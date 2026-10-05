@@ -12,7 +12,7 @@
 
 - База опубликована через Apache (`/web-publish`)
 - Node.js 18+ установлен
-- Зависимости и браузер установлены: `cd .agents/skills/web-test/scripts && npm install && npx playwright install chromium`
+- Зависимости и браузер установлены: `npm install --prefix .agents --no-fund --no-audit "playwright@^1.50.0" && npx --prefix .agents playwright install chromium`
 
 ## Рабочий цикл
 

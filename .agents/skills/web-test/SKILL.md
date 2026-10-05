@@ -29,10 +29,10 @@ SCRIPT
 ## Setup (first time)
 
 ```bash
-cd ".agents/skills/web-test/scripts" && npm install && npx playwright install chromium
+npm install --prefix .agents --no-fund --no-audit "playwright@^1.50.0" && npx --prefix .agents playwright install chromium
 ```
 
-Requires Node.js 18+. `npm install` fetches Playwright; `npx playwright install chromium` downloads the browser.
+Requires Node.js 18+. `npm install` fetches Playwright into `.agents/node_modules` (outside the skill directory, so goose does not list it as skill files); `npx playwright install chromium` downloads the browser.
 
 ## URL resolution
 

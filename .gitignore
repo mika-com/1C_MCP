@@ -25,3 +25,8 @@ __pycache__/
 # Скриншоты и видео (артефакты web-test)
 *.png
 *.mp4
+
+# web-test: Playwright ставится в .agents/node_modules (вне каталогов навыков)
+.agents/node_modules/
+.agents/package.json
+.agents/package-lock.json

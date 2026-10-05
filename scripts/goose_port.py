@@ -42,6 +42,9 @@ GITIGNORE_RECOMMENDATIONS = [
     '*.epf',
     '*.erf',
     '*.log',
+    '.agents/node_modules/',
+    '.agents/package.json',
+    '.agents/package-lock.json',
 ]
 
 # ---------------------------------------------------------------------------
@@ -144,6 +147,9 @@ def apply_runtime(skills_dir, runtime, verbose=True):
 # ---------------------------------------------------------------------------
 # Адаптация SKILL.md из формата Claude Code в формат goose
 # ---------------------------------------------------------------------------
+WEB_TEST_SETUP = ('npm install --prefix .agents --no-fund --no-audit "playwright@^1.50.0" '
+                  '&& npx --prefix .agents playwright install chromium')
+
 GOOSE_TEXT_REPLACEMENTS = [
     ('Спроси у пользователя через AskUserQuestion', 'Спроси у пользователя'),
     ('через AskUserQuestion', 'вопросом пользователю'),
@@ -154,6 +160,14 @@ GOOSE_TEXT_REPLACEMENTS = [
     # (shell-инструмент goose не ждёт процессы, отправленные в фон через &).
     ('node $RUN start <url>            # run_in_background=true',
      'nohup node $RUN start <url> > "${TMPDIR:-/tmp}/web-test-start.log" 2>&1 &   # в фоне: goose не ждёт процесс с &'),
+    # web-test: зависимости ставим в .agents/node_modules, а не внутрь навыка. goose при загрузке
+    # навыка перечисляет все его файлы, и node_modules (~550 файлов) раздул бы контекст;
+    # Node находит пакет в родительских каталогах скрипта.
+    ('cd ".agents/skills/web-test/scripts" && npm install && npx playwright install chromium',
+     WEB_TEST_SETUP),
+    ("Requires Node.js 18+. `npm install` fetches Playwright; `npx playwright install chromium` downloads the browser.",
+     "Requires Node.js 18+. `npm install` fetches Playwright into `.agents/node_modules` (outside the skill "
+     "directory, so goose does not list it as skill files); `npx playwright install chromium` downloads the browser."),
 ]
 
 MANUAL_ONLY_NOTE = ' Вызывай только по явной просьбе пользователя.'
@@ -271,6 +285,9 @@ def rewrite_prefix_absolute(skills_dir):
     for md in glob.glob(os.path.join(skills_dir, '**', '*.md'), recursive=True):
         content = read(md)
         new = RX_SKILLS_PREFIX.sub(lambda _: abs_prefix, content)
+        # Зависимости web-test — в каталоге-предке навыков (~/.agents/node_modules)
+        agents_dir = os.path.dirname(skills_dir.rstrip('/\\')).replace('\\', '/')
+        new = new.replace('--prefix .agents ', f'--prefix "{agents_dir}" ')
         if new != content:
             write(md, new)
 

@@ -72,6 +72,11 @@ python tools/1c-goose/scripts/goose_port.py uninstall --project-dir .
 > **Важно:** goose запускает shell в рабочем каталоге сессии, а пути в SKILL.md указаны от корня проекта
 > (`.agents/skills/...`). Запускайте goose из корня проекта, куда установлены навыки. При глобальной
 > установке (`--global`) пути абсолютные, и это ограничение снимается.
+>
+> **Ограничение глобальной установки:** скрипты `web-publish` / `web-info` / `web-stop` / `web-unpublish`
+> и `web-test` определяют корень проекта по своему расположению. При `--global` это домашний каталог:
+> Apache по умолчанию ставится в `~/tools/apache24`, а относительные пути `web-test` (видео, скриншоты,
+> файлы для загрузки) считаются от `~`. Для работы с веб-клиентом лучше ставить навыки в проект.
 
 ## Настройка goose
 
@@ -103,7 +108,7 @@ python tools/1c-goose/scripts/goose_port.py uninstall --project-dir .
 Работает и в goose: навык управляет Chromium через Playwright, а goose запускает его скрипты через shell.
 
 1. Один раз установить зависимости:
-   `cd .agents/skills/web-test/scripts && npm install && npx playwright install chromium`.
+   `npm install --prefix .agents --no-fund --no-audit "playwright@^1.50.0" && npx --prefix .agents playwright install chromium`.
 2. Опубликовать базу (`/web-publish <база>`) или прописать в `.v8-project.json` в записи базы
    `"webUrl": "http://сервер/база"` для уже опубликованной.
 3. Просить своими словами: «открой в 1С список заказов и создай новый», «проверь отчёт по продажам
@@ -158,7 +163,7 @@ Python 3.9+ и зависимости: `pip install -r requirements.txt` (`lxml`
 - **Windows** с PowerShell 5.1+ — рантайм по умолчанию; либо **Python 3.9+** — на любой ОС
 - **1С:Предприятие 8.3** — для сборки/разборки EPF/ERF и работы с базами (навыки генерации XML работают без платформы)
 - **Node.js 18+** — для `web-test` и плагина хуков. Перед первым запуском `web-test`:
-  `cd .agents/skills/web-test/scripts && npm install && npx playwright install chromium`
+  `npm install --prefix .agents --no-fund --no-audit "playwright@^1.50.0" && npx --prefix .agents playwright install chromium`
 
 ## Защита конфигураций на поддержке (хуки goose, экспериментально)
 
