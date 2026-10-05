@@ -227,7 +227,7 @@ export default async function({
 - **`name`** — человекочитаемое имя теста. Появится в отчёте.
 - **`tags`** — теги для фильтрации. Можно прогонять не весь набор, а только нужные: `--tags=контрагенты`.
 - **`timeout`** — сколько максимум тест может идти. По умолчанию 30 секунд, для длинных сценариев увеличиваем.
-- **Тело теста** — функция, которая получает API браузера (см. [SKILL.md](../.agents/skills/web-test/SKILL.md)) плюс `assert` и `step`.
+- **Тело теста** — функция, которая получает API браузера (см. [SKILL.md](../skills/web-test/SKILL.md)) плюс `assert` и `step`.
 - **`step('имя', async () => {...})`** — обёртка шага. Имена шагов попадают в отчёт, при падении видно, какой именно шаг сломался.
 - **`assert.*`** — проверки. `assert.tableHasRow`, `assert.equal`, `assert.ok` и т.д. Если проверка не выполнилась — тест считается упавшим.
 
@@ -402,7 +402,7 @@ assert.tableHasRow(t, r => r['Комментарий'] === метка);
 
 ## Где смотреть дальше
 
-- API браузера, которое вызывают тесты — [SKILL.md](../.agents/skills/web-test/SKILL.md).
-- Подробная инструкция для модели по написанию тестов (на английском, технический документ) — [.agents/skills/web-test/regress.md](../.agents/skills/web-test/regress.md).
+- API браузера, которое вызывают тесты — [SKILL.md](../skills/web-test/SKILL.md).
+- Подробная инструкция для модели по написанию тестов (на английском, технический документ) — [skills/web-test/regress.md](../skills/web-test/regress.md).
 - Интерактивный режим без тестов — [web-test-guide.md](web-test-guide.md).
 - Запись видеоинструкций — [web-test-recording-guide.md](web-test-recording-guide.md).

@@ -1,7 +1,7 @@
 # 1C Skills for goose
 
-Порт набора навыков [cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills) (автор — Nikolay Shirokov, MIT)
-для AI-агента [goose](https://github.com/block/goose).
+Плагин для AI-агента [goose](https://github.com/block/goose): порт набора навыков
+[cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills) (автор — Nikolay Shirokov, MIT).
 
 81 навык охватывает полный цикл разработки на платформе 1С:Предприятие 8.3 — от создания конфигураций,
 расширений, внешних обработок и отчётов до загрузки изменений в информационную базу, публикации на
@@ -9,74 +9,79 @@
 готовые абстракции над XML-форматами и CLI конфигуратора, а веб-тестирование — глаза и руки для работы
 с интерфейсом 1С.
 
-## Чем порт отличается от оригинала
-
-| | cc-1c-skills (Claude Code) | Этот порт (goose) |
-|---|---|---|
-| Каталог навыков | `.claude/skills/` | `.agents/skills/` — стандартный каталог goose |
-| Пути к скриптам | `${CLAUDE_SKILL_DIR}/scripts/...` | `.agents/skills/<навык>/scripts/...` от корня проекта (при глобальной установке — абсолютные) |
-| `allowed-tools` | список инструментов Claude Code | удалён — в goose его нет |
-| `disable-model-invocation` | запрет автовызова | goose его не поддерживает: в `description` добавлено «Вызывай только по явной просьбе пользователя» (`db-load-dt`, `form-decompile`, `form-remove`, `meta-decompile`, `skd-decompile`, `template-remove`) |
-| `AskUserQuestion` | инструмент вопроса | «спроси пользователя» обычным сообщением |
-| Фоновый процесс `web-test start` | `run_in_background=true` | `nohup ... &` в shell |
-| Хуки | `hooks/` (Claude Code) | плагин goose `goose/plugins/1c-support-guard/` (протокол Open Plugins) |
-| Подсказки проекта | `CLAUDE.md` | `.goosehints` (образец — `goose/.goosehints`) |
-
-Скрипты навыков (`.ps1`, `.py`, `.mjs`) не менялись — это те же файлы, что в upstream.
-
-## Быстрый старт
-
-### Вариант 1 — скопировать каталог
-
-Скопируйте `.agents/skills/` из этого репозитория в корень своего 1С-проекта и запустите goose из этого
-каталога:
-
-```
-МойПроект/
-├── .agents/skills/    ← скопировать сюда
-└── ...
-```
-
-### Вариант 2 — скрипт установки
+## Установка
 
 ```bash
-git clone https://github.com/mika-com/1C_MCP_GOOSE.git tools/1c-goose
-
-# В проект (PowerShell-рантайм, Windows)
-python tools/1c-goose/scripts/goose_port.py install --project-dir .
-
-# В проект с Python-рантаймом (Linux/Mac), плагином защиты поддержки и .goosehints
-python tools/1c-goose/scripts/goose_port.py install --project-dir . --runtime python --hooks --hints
-
-# Для пользователя: ~/.agents/skills/ (пути в SKILL.md станут абсолютными)
-python tools/1c-goose/scripts/goose_port.py install --global
-
-# Удалить
-python tools/1c-goose/scripts/goose_port.py uninstall --project-dir .
+goose plugin install https://github.com/mika-com/1C_MCP_GOOSE
+# или с автообновлением:
+goose plugin install --auto-update https://github.com/mika-com/1C_MCP_GOOSE
 ```
 
-Повторный `install` обновляет навыки до версии из репозитория.
+Плагин встаёт в `~/.agents/plugins/1c/` и доступен во всех проектах. Обновление — `goose plugin update 1c`.
+Отключить — добавить `"1c"` в `disabledPlugins` в `~/.config/goose/settings.json`.
+
+Плагин содержит:
+- **81 навык** — в goose они называются с префиксом плагина: `1c:epf-init`, `1c:meta-info`, …;
+- **хук `support-guard`** — защита объектов типовой конфигурации на поддержке от прямой правки
+  (см. [hooks/README.md](hooks/README.md)).
+
+После установки — один раз для веба (Node.js 18+):
+
+```bash
+npm install --prefix "$HOME/.agents" --no-fund --no-audit "playwright@^1.50.0" && npx --prefix "$HOME/.agents" playwright install chromium
+```
+
+Модель выполнит эту команду сама, когда впервые понадобится `web-test`. Playwright ставится
+в `~/.agents/node_modules`, поэтому `goose plugin update` его не стирает.
+
+Python-рантайм (Linux/macOS или без PowerShell): `pip install -r requirements.txt` (`lxml`, `Pillow`, `psutil`).
 
 ### Использование
 
-Просто опишите задачу своими словами — goose видит названия и описания всех навыков и сам загрузит
-нужный (`load_skill`). Для точного контроля работают слеш-команды с именем навыка:
+Запустите goose **из корня 1С-проекта** и опишите задачу своими словами — goose видит названия
+и описания всех навыков и сам загрузит нужный. Для точного контроля работают слеш-команды:
 
 ```
-/epf-init МояОбработка
-/skills meta-info form-info
+/1c:epf-init МояОбработка
+/skills 1c:meta-info 1c:form-info
 ```
 
 Список навыков: `goose skills list` или `/skills` в сессии.
 
-> **Важно:** goose запускает shell в рабочем каталоге сессии, а пути в SKILL.md указаны от корня проекта
-> (`.agents/skills/...`). Запускайте goose из корня проекта, куда установлены навыки. При глобальной
-> установке (`--global`) пути абсолютные, и это ограничение снимается.
->
-> **Ограничение глобальной установки:** скрипты `web-publish` / `web-info` / `web-stop` / `web-unpublish`
-> и `web-test` определяют корень проекта по своему расположению. При `--global` это домашний каталог:
-> Apache по умолчанию ставится в `~/tools/apache24`, а относительные пути `web-test` (видео, скриншоты,
-> файлы для загрузки) считаются от `~`. Для работы с веб-клиентом лучше ставить навыки в проект.
+### Установка без плагина
+
+Если нужны имена навыков без префикса, навыки внутри репозитория проекта (для всей команды) или
+свой рантайм, поставьте навыки как обычные Agent Skills:
+
+```bash
+git clone https://github.com/mika-com/1C_MCP_GOOSE.git tools/1c-goose
+python tools/1c-goose/scripts/goose_port.py install --project-dir . --hooks --hints   # в <проект>/.agents/skills/
+python tools/1c-goose/scripts/goose_port.py install --global                          # в ~/.agents/skills/
+python tools/1c-goose/scripts/goose_port.py runtime python --project-dir .            # жёстко Python
+python tools/1c-goose/scripts/goose_port.py uninstall --project-dir .
+```
+
+Не ставьте одновременно плагин и навыки через `install` — получатся дубли (`1c:epf-init` и `epf-init`).
+
+## Чем порт отличается от оригинала
+
+| | cc-1c-skills (Claude Code) | Этот порт (goose) |
+|---|---|---|
+| Упаковка | плагин Claude Code, `.claude/skills/` | плагин goose (Open Plugins): `plugin.json`, `skills/`, `hooks/hooks.json` |
+| Пути к скриптам | `${CLAUDE_SKILL_DIR}/scripts/...` подставляет Claude Code | `{SKILL_DIR}/scripts/...` — модель подставляет путь из `Skill directory:`, который goose выводит при загрузке навыка. Работает при любом месте установки |
+| Рантайм | PowerShell или Python — разные сборки | одна сборка: команды на PowerShell, при отсутствии `powershell.exe` модель запускает одноимённый `.py` (параметры совпадают) |
+| Корень проекта в скриптах `web-*`, `web-test` | 4–6 уровней вверх от скрипта | текущий каталог (навыки лежат вне проекта, в плагине) |
+| Зависимости `web-test` | `node_modules` внутри навыка | `~/.agents/node_modules`: goose перечисляет модели все файлы навыка, и ~550 файлов `node_modules` раздули бы контекст |
+| Фоновый `web-test start` | `run_in_background=true` | `nohup … &` в shell |
+| `allowed-tools` | список инструментов Claude Code | удалён — в goose его нет |
+| `disable-model-invocation` | запрет автовызова | goose его не поддерживает: в `description` добавлено «Вызывай только по явной просьбе пользователя» (`db-load-dt`, `form-decompile`, `form-remove`, `meta-decompile`, `skd-decompile`, `template-remove`) |
+| `AskUserQuestion` | инструмент вопроса | «спроси пользователя» обычным сообщением |
+| Хук `support-guard` | опционально, вручную | в плагине включён; протокол goose (`{"decision":"block"}`) |
+| Хук `skill-suggester` | опционально | не портирован: хуки goose не добавляют текст в контекст модели |
+| Подсказки проекта | `CLAUDE.md` | `.goosehints` (образец — `goose/.goosehints`) |
+
+Все правки скриптов (10 файлов) делает `scripts/goose_port.py build` — точечные замены, отмеченные
+комментарием `goose`. Остальные скрипты — те же, что в upstream.
 
 ## Настройка goose
 
@@ -89,7 +94,7 @@ python tools/1c-goose/scripts/goose_port.py uninstall --project-dir .
 | `GOOSE_DEFAULT_EXTENSION_TIMEOUT` | Стандартный таймаут shell-команды — 300 с. `db-update`, загрузка/выгрузка, сборка и сценарии `web-test` на больших конфигурациях идут дольше | `setx GOOSE_DEFAULT_EXTENSION_TIMEOUT 3600` (модель может и сама передать `timeout_secs`, подсказка есть в `.goosehints`) |
 | Режим подтверждений (`GOOSE_MODE`) | Навыки запускают много shell-команд. В `approve` / `smart_approve` goose спрашивает подтверждение на каждую | `auto` для доверенного проекта, иначе `smart_approve` |
 | Модель | Навыки длинные (сотни строк инструкций и DSL), нужна модель с хорошим tool calling и контекстом от 128K | любая сильная модель провайдера goose |
-| `.goosehints` | Подсказки проекта: сначала навык, потом ручная правка XML; запуск из корня; таймауты | `install --hints` или скопировать `goose/.goosehints` |
+| `.goosehints` | Подсказки проекта: сначала навык 1С, а не ручная правка XML; запуск из корня; таймауты | скопировать `goose/.goosehints` в корень проекта (или `install --hints`) |
 
 ### Нужна ли локальная база 1С
 
@@ -105,35 +110,22 @@ python tools/1c-goose/scripts/goose_port.py uninstall --project-dir .
 
 ### Работа с веб-клиентом (`web-test`)
 
-Работает и в goose: навык управляет Chromium через Playwright, а goose запускает его скрипты через shell.
+Работает: навык управляет Chromium через Playwright, а goose запускает его скрипты через shell.
+Проверено на goose 1.53: плагин установлен `goose plugin install`, `run.mjs run` из каталога плагина
+открыл страницу и выполнил сценарий; после `goose plugin update` Playwright остался на месте.
 
-1. Один раз установить зависимости:
-   `npm install --prefix .agents --no-fund --no-audit "playwright@^1.50.0" && npx --prefix .agents playwright install chromium`.
-2. Опубликовать базу (`/web-publish <база>`) или прописать в `.v8-project.json` в записи базы
+1. Один раз поставить Playwright и Chromium (команда выше; модель сделает это сама).
+2. Опубликовать базу (`/1c:web-publish <база>`) или прописать в `.v8-project.json` в записи базы
    `"webUrl": "http://сервер/база"` для уже опубликованной.
 3. Просить своими словами: «открой в 1С список заказов и создай новый», «проверь отчёт по продажам
-   за май».
+   за май», «запиши видеоинструкцию по созданию заказа».
 
-Автономный режим (`run.mjs run <url> script.js`) — одна команда. Интерактивный (`run.mjs start`) держит
-браузер между шагами. В Claude Code он стартует через `run_in_background`, а в порте — через `&` в shell:
-goose не ждёт фоновые процессы.
-
-## Рантайм: PowerShell ↔ Python
-
-По умолчанию навыки вызывают скрипты через `powershell.exe` (основной вариант upstream, Windows).
-На Linux/Mac или без PowerShell переключитесь на Python-порты:
-
-```bash
-python scripts/goose_port.py runtime python --project-dir /path/to/project
-python scripts/goose_port.py runtime powershell --project-dir /path/to/project
-```
-
-Python 3.9+ и зависимости: `pip install -r requirements.txt` (`lxml`, `Pillow`, `psutil`).
-Навык `img-grid` существует только в Python-версии и не переключается.
+Apache для `web-publish` ставится в `<проект>/tools/apache24`, видео и скриншоты `web-test` — относительно
+корня проекта (текущего каталога goose).
 
 ## Группы навыков
 
-| Группа | Навыки | Описание | Гайд |
+| Группа | Навыки (с префиксом `1c:`) | Описание | Гайд |
 |--------|--------|----------|------|
 | Внешние обработки (EPF) | 6 навыков `epf-*` | Создание, сборка, разборка, валидация обработок из XML-исходников | [Подробнее](docs/epf-guide.md) |
 | Внешние отчёты (ERF) | 4 навыка `erf-*` | Создание, сборка, разборка, валидация внешних отчётов | [Подробнее](docs/epf-guide.md#внешние-отчёты-erf) |
@@ -159,52 +151,41 @@ Python 3.9+ и зависимости: `pip install -r requirements.txt` (`lxml`
 
 ## Требования
 
-- **goose** со встроенными расширениями Skills и Developer (включены по умолчанию); на Windows — Git Bash (см. «Настройка goose»)
-- **Windows** с PowerShell 5.1+ — рантайм по умолчанию; либо **Python 3.9+** — на любой ОС
+- **goose** со встроенными расширениями Skills и Developer (включены по умолчанию); на Windows — Git Bash
+  (см. «Настройка goose»)
+- **Windows** с PowerShell 5.1+, либо **Python 3.9+** — на любой ОС
 - **1С:Предприятие 8.3** — для сборки/разборки EPF/ERF и работы с базами (навыки генерации XML работают без платформы)
-- **Node.js 18+** — для `web-test` и плагина хуков. Перед первым запуском `web-test`:
-  `npm install --prefix .agents --no-fund --no-audit "playwright@^1.50.0" && npx --prefix .agents playwright install chromium`
-
-## Защита конфигураций на поддержке (хуки goose, экспериментально)
-
-Навыки-мутаторы сами не дают испортить объект типовой конфигурации на поддержке поставщика.
-Плагин [`1c-support-guard`](goose/plugins/1c-support-guard/README.md) добавляет защиту от правки
-**в обход навыков**: хук `PreToolUse` блокирует встроенные инструменты goose `write`/`edit`/`text_editor`
-для объектов «на замке» и объясняет модели, как действовать (расширение или `support-edit`).
-Ставится флагом `--hooks`. Хук подсказки навыков (`skill-suggester`) не портирован: хуки goose не умеют
-добавлять текст в контекст модели.
+- **Node.js 18+** — для `web-test` и хука `support-guard`
 
 ## Обновление из upstream
 
-Каталог `.agents/skills/` генерируется из [cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills).
+Каталог `skills/` генерируется из [cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills).
 Версия, из которой собран порт, записана в файле [`UPSTREAM`](UPSTREAM). Пересборка:
 
 ```bash
-python scripts/goose_port.py build                          # git clone main во временный каталог
+python scripts/goose_port.py build                             # git clone main во временный каталог
 python scripts/goose_port.py build --upstream ../cc-1c-skills  # из локального клона
 python scripts/goose_port.py build --ref <ветка-или-тег>
 ```
 
-Сборка заменяет `${CLAUDE_SKILL_DIR}` путями `.agents/skills/...`, чистит frontmatter от полей Claude Code
-и переписывает упоминания инструментов Claude. Правьте навыки в upstream, а не в `.agents/skills/` —
-ручные правки перезапишутся при следующей сборке.
+Правьте навыки в upstream или в `scripts/goose_port.py`, а не в `skills/` — ручные правки перезапишутся
+при следующей сборке. После пересборки поднимите `version` в `plugin.json`.
 
 ## Структура репозитория
 
 ```
-.agents/skills/                 # 81 навык в формате goose (Agent Skills)
-goose/
-├── .goosehints                 # Образец подсказок проекта для goose
-└── plugins/1c-support-guard/   # Плагин хуков: защита объектов на поддержке
-    ├── plugin.json
-    ├── hooks/hooks.json
-    ├── scripts/                # support-guard.mjs + common/
-    └── test/run.mjs
-scripts/goose_port.py           # Сборка из upstream, установка, переключение рантайма
-docs/                           # Гайды и спецификации форматов 1С (из upstream)
-.v8-project.example.json        # Пример настроек проекта
-.v8-xsd/                        # Каталог для XSD-схем платформы (v8-xsd-fetch)
-UPSTREAM                        # Коммит cc-1c-skills, из которого собран порт
+plugin.json                 # Манифест плагина goose (Open Plugins), имя «1c»
+skills/                     # 81 навык (Agent Skills)
+hooks/
+├── hooks.json              # PreToolUse → support-guard
+├── support-guard.mjs       # + common/
+└── test/run.mjs
+goose/.goosehints           # Образец подсказок проекта для goose
+scripts/goose_port.py       # Сборка из upstream, установка без плагина, переключение рантайма
+docs/                       # Гайды и спецификации форматов 1С (из upstream)
+.v8-project.example.json    # Пример настроек проекта
+.v8-xsd/                    # Каталог для XSD-схем платформы (v8-xsd-fetch)
+UPSTREAM                    # Коммит cc-1c-skills, из которого собран порт
 ```
 
 Спецификации форматов: **[сводный индекс](docs/1c-specs-index.md)**.

@@ -1,17 +1,18 @@
 #!/usr/bin/env python3
-# goose_port.py v1.0 — Порт навыков 1С (cc-1c-skills) под AI-агент goose
+# goose_port.py v2.0 — Порт навыков 1С (cc-1c-skills) под AI-агент goose
 # Upstream: https://github.com/Nikolay-Shirokov/cc-1c-skills (MIT)
 """
 Сборка и установка навыков 1С для goose (https://github.com/block/goose).
 
-goose находит навыки в `.agents/skills/` проекта и в `~/.agents/skills/`,
-а хуки — в плагинах `.agents/plugins/<имя>/` и `~/.agents/plugins/<имя>/`.
+Репозиторий — плагин goose (Open Plugins): plugin.json, skills/, hooks/hooks.json.
+Основной способ установки — `goose plugin install https://github.com/mika-com/1C_MCP_GOOSE`.
+Этот скрипт нужен для пересборки из upstream и для установки навыков без плагина.
 
 Команды:
-  build    — пересобрать .agents/skills/ этого репозитория из upstream cc-1c-skills
-  install  — установить навыки в проект (или глобально в ~/.agents/skills/)
-  runtime  — переключить рантайм скриптов (PowerShell <-> Python) у установленных навыков
-  uninstall — удалить установленные навыки (и плагин хуков)
+  build     — пересобрать skills/ из upstream cc-1c-skills
+  install   — установить навыки в проект (.agents/skills/) или для пользователя (~/.agents/skills/)
+  runtime   — жёстко переключить рантайм (PowerShell <-> Python) у установленных навыков
+  uninstall — удалить навыки, установленные командой install
 
 Примеры:
   python scripts/goose_port.py install --project-dir /path/to/my-1c-project
@@ -22,6 +23,7 @@ goose находит навыки в `.agents/skills/` проекта и в `~/.
 """
 import argparse
 import glob
+import json
 import os
 import re
 import shutil
@@ -31,9 +33,15 @@ import tempfile
 
 UPSTREAM_URL = 'https://github.com/Nikolay-Shirokov/cc-1c-skills.git'
 
-SKILLS_PREFIX = '.agents/skills'
+REPO_SKILLS = 'skills'              # навыки в репозитории (каталог skills/ плагина)
+INSTALL_SKILLS = '.agents/skills'   # куда install кладёт навыки без плагина
 PLUGINS_PREFIX = '.agents/plugins'
 HOOKS_PLUGIN = '1c-support-guard'
+
+# Каталог навыка в командах SKILL.md. goose при загрузке навыка выводит его абсолютный путь
+# («Skill directory: ...»), поэтому одни и те же SKILL.md работают из плагина, из проекта
+# и из ~/.agents/skills. Без «$», чтобы shell не подставил пустую переменную.
+SKILL_DIR = '{SKILL_DIR}'
 
 GITIGNORE_RECOMMENDATIONS = [
     '.v8-project.json',
@@ -42,20 +50,14 @@ GITIGNORE_RECOMMENDATIONS = [
     '*.epf',
     '*.erf',
     '*.log',
-    '.agents/node_modules/',
-    '.agents/package.json',
-    '.agents/package-lock.json',
+    'tools/',
 ]
 
 # ---------------------------------------------------------------------------
-# Пути и рантайм (логика совместима со scripts/switch.py из upstream)
+# Рантайм (логика совместима со scripts/switch.py из upstream)
 # ---------------------------------------------------------------------------
-# ${CLAUDE_SKILL_DIR}/../<other>/<rest> — ссылка на соседний навык
 RX_SKILL_DIR_CROSS = re.compile(r'\$\{CLAUDE_SKILL_DIR\}/\.\./([a-z][a-z0-9-]+)/')
-SKILL_DIR_VAR = '${CLAUDE_SKILL_DIR}/'
-
-# Префикс путей к навыкам в собранных SKILL.md (не часть более длинного пути).
-RX_SKILLS_PREFIX = re.compile(r'(?<![\w/~.\\-])\.agents/skills/')
+CLAUDE_SKILL_DIR = '${CLAUDE_SKILL_DIR}/'
 
 RX_PS = re.compile(
     r'powershell\.exe\s+'
@@ -66,20 +68,22 @@ RX_PS = re.compile(
 RX_PY = re.compile(r"python\s+(?P<q>[\"']?)(?P<path>[^\"\s]+?)\.py(?P=q)?")
 
 
-def ps_invocation(path, quote):
-    return f"powershell.exe -NoProfile -File {quote}{path}.ps1{quote}"
-
-
 def switch_runtime_content(content, runtime):
     if runtime == 'python':
         return RX_PS.sub(lambda m: f"python {m.group('q')}{m.group('path')}.py{m.group('q')}", content)
     if runtime == 'powershell':
-        return RX_PY.sub(lambda m: ps_invocation(m.group('path'), m.group('q')), content)
+        return RX_PY.sub(
+            lambda m: f"powershell.exe -NoProfile -File {m.group('q')}{m.group('path')}.ps1{m.group('q')}",
+            content)
     return content
 
 
 def repo_root():
     return os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def native(path):
+    return path.replace('/', os.sep)
 
 
 def scan_skills(skills_dir):
@@ -105,30 +109,28 @@ def write(path, content):
         f.write(content)
 
 
-def missing_runtime_files(skill_dir, runtime, skills_root):
+def missing_runtime_files(skill_dir, runtime):
     """Скрипты целевого рантайма, на которые сослался бы SKILL.md, но которых нет."""
     rx, ext = (RX_PS, '.py') if runtime == 'python' else (RX_PY, '.ps1')
     missing = []
     for md in collect_md_files(skill_dir):
         for m in rx.finditer(read(md)):
-            # Путь относительный (.agents/skills/...) или абсолютный (глобальная установка)
             p = m.group('path')
-            idx = p.find(SKILLS_PREFIX + '/')
-            if idx < 0:
+            if not p.startswith(SKILL_DIR + '/'):
                 continue
-            rel = p[idx + len(SKILLS_PREFIX) + 1:]
-            if not os.path.isfile(os.path.join(skills_root, rel + ext)):
-                missing.append(rel + ext)
+            target = os.path.normpath(os.path.join(skill_dir, native(p[len(SKILL_DIR) + 1:]) + ext))
+            if not os.path.isfile(target):
+                missing.append(target)
     return missing
 
 
 def apply_runtime(skills_dir, runtime, verbose=True):
-    """Переключить рантайм во всех .md навыков. Навыки, у которых нет скриптов
-    целевого рантайма (например, img-grid — только Python), не трогаются."""
+    """Переключить рантайм во всех .md навыков. Навыки без скриптов целевого рантайма
+    (например, img-grid — только Python) не трогаются."""
     switched, single = 0, []
     for name in scan_skills(skills_dir):
         skill_dir = os.path.join(skills_dir, name)
-        if missing_runtime_files(skill_dir, runtime, skills_dir):
+        if missing_runtime_files(skill_dir, runtime):
             single.append(name)
             continue
         for md in collect_md_files(skill_dir):
@@ -147,8 +149,15 @@ def apply_runtime(skills_dir, runtime, verbose=True):
 # ---------------------------------------------------------------------------
 # Адаптация SKILL.md из формата Claude Code в формат goose
 # ---------------------------------------------------------------------------
-WEB_TEST_SETUP = ('npm install --prefix .agents --no-fund --no-audit "playwright@^1.50.0" '
-                  '&& npx --prefix .agents playwright install chromium')
+# web-test: Playwright ставится не внутрь навыка, а в каталог-предок: goose при загрузке навыка
+# перечисляет модели все его файлы, и node_modules (~550 файлов) раздул бы контекст, а Node находит
+# пакет в родительских каталогах скрипта. Для плагина (~/.agents/plugins/1c/...) и ~/.agents/skills
+# это ~/.agents — переживает `goose plugin update`, который заменяет каталог плагина целиком.
+# При установке в проект install переписывает префикс на <проект>/.agents.
+WEB_TEST_PREFIX = '"$HOME/.agents"'
+WEB_TEST_PREFIX_PROJECT = f'"{SKILL_DIR}/../.."'
+WEB_TEST_SETUP = (f'npm install --prefix {WEB_TEST_PREFIX} --no-fund --no-audit "playwright@^1.50.0" '
+                  f'&& npx --prefix {WEB_TEST_PREFIX} playwright install chromium')
 
 GOOSE_TEXT_REPLACEMENTS = [
     ('Спроси у пользователя через AskUserQuestion', 'Спроси у пользователя'),
@@ -160,15 +169,20 @@ GOOSE_TEXT_REPLACEMENTS = [
     # (shell-инструмент goose не ждёт процессы, отправленные в фон через &).
     ('node $RUN start <url>            # run_in_background=true',
      'nohup node $RUN start <url> > "${TMPDIR:-/tmp}/web-test-start.log" 2>&1 &   # в фоне: goose не ждёт процесс с &'),
-    # web-test: зависимости ставим в .agents/node_modules, а не внутрь навыка. goose при загрузке
-    # навыка перечисляет все его файлы, и node_modules (~550 файлов) раздул бы контекст;
-    # Node находит пакет в родительских каталогах скрипта.
-    ('cd ".agents/skills/web-test/scripts" && npm install && npx playwright install chromium',
-     WEB_TEST_SETUP),
+    (f'cd "{SKILL_DIR}/scripts" && npm install && npx playwright install chromium', WEB_TEST_SETUP),
     ("Requires Node.js 18+. `npm install` fetches Playwright; `npx playwright install chromium` downloads the browser.",
-     "Requires Node.js 18+. `npm install` fetches Playwright into `.agents/node_modules` (outside the skill "
-     "directory, so goose does not list it as skill files); `npx playwright install chromium` downloads the browser."),
+     "Requires Node.js 18+. `npm install` puts Playwright into `node_modules` of a parent directory of the "
+     "skill (outside the skill, so goose does not list it as skill files; Node resolves packages from parent "
+     "directories). `npx playwright install chromium` downloads the browser. If `run.mjs` fails with "
+     "\"Cannot find package 'playwright'\", repeat this setup."),
 ]
+
+GOOSE_NOTE = (
+    '> **goose:** `{SKILL_DIR}` в командах — каталог этого навыка: подставь абсолютный путь из строки '
+    '`Skill directory:` (раздел Supporting Files в конце). Команды запускай из корня проекта. '
+    'Если `powershell.exe` недоступен (Linux/macOS), запусти одноимённый `.py`-скрипт через `python` '
+    '(или `python3`) с теми же параметрами.\n\n'
+)
 
 MANUAL_ONLY_NOTE = ' Вызывай только по явной просьбе пользователя.'
 
@@ -200,17 +214,66 @@ def adapt_frontmatter(fm):
     return '\n'.join(out)
 
 
-def adapt_markdown(content, skill_name, is_skill_md):
-    # ${CLAUDE_SKILL_DIR} -> путь от корня проекта (goose запускает shell в каталоге проекта)
-    content = RX_SKILL_DIR_CROSS.sub(f'{SKILLS_PREFIX}/\\1/', content)
-    content = content.replace(SKILL_DIR_VAR, f'{SKILLS_PREFIX}/{skill_name}/')
+def adapt_markdown(content, is_skill_md):
+    content = RX_SKILL_DIR_CROSS.sub(f'{SKILL_DIR}/../\\1/', content)
+    content = content.replace(CLAUDE_SKILL_DIR, SKILL_DIR + '/')
     for old, new in GOOSE_TEXT_REPLACEMENTS:
         content = content.replace(old, new)
     if is_skill_md:
         m = RX_FRONTMATTER.match(content)
         if m:
-            content = '---\n' + adapt_frontmatter(m.group('body')) + '\n---\n' + content[m.end():]
+            body = content[m.end():]
+            if SKILL_DIR in body:
+                # Заметка — сразу после заголовка навыка
+                h = re.match(r'(\s*#[^\n]*\n\n?)', body)
+                body = (h.group(1) + GOOSE_NOTE + body[h.end():]) if h else GOOSE_NOTE + body
+            content = '---\n' + adapt_frontmatter(m.group('body')) + '\n---\n' + body
     return content
+
+
+# В плагине скрипты лежат вне проекта (~/.agents/plugins/...), поэтому корень проекта —
+# рабочий каталог сессии goose, а не «4 уровня вверх от скрипта», как в upstream.
+SCRIPT_PATCHES = {
+    '.ps1': [
+        ('$projectRoot = (Get-Item $PSScriptRoot).Parent.Parent.Parent.Parent.FullName',
+         '$projectRoot = (Get-Location).Path  # goose: корень проекта — рабочий каталог'),
+    ],
+    '.py': [
+        ('project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(script_dir))))',
+         'project_root = os.getcwd()  # goose: корень проекта — рабочий каталог'),
+    ],
+    '.mjs': [
+        ("export const projectRoot = pathResolve(dirname(__fn_state), '..', '..', '..', '..', '..', '..');",
+         "// goose: навыки могут лежать вне проекта (плагин), корень проекта — рабочий каталог\n"
+         "export const projectRoot = process.env.V8_PROJECT_ROOT ? pathResolve(process.env.V8_PROJECT_ROOT) "
+         ": process.cwd();"),
+        # Скриншот ошибки — во временный каталог, а не в каталог навыка (в плагине это ~/.agents/plugins/...,
+        # а каждый файл в каталоге навыка goose перечисляет модели при загрузке навыка).
+        ("import { fileURLToPath } from 'url';\nimport * as browser from '../browser.mjs';",
+         "import { fileURLToPath } from 'url';\nimport { tmpdir } from 'os';\nimport * as browser from '../browser.mjs';"),
+        ("const DEFAULT_ERROR_SHOT_PATH = resolve(__dirname, '..', '..', 'error-shot.png');",
+         "const DEFAULT_ERROR_SHOT_PATH = resolve(tmpdir(), 'web-test-error-shot.png');  // goose"),
+    ],
+}
+
+
+def patch_scripts(skills_dir):
+    """Точечные правки скриптов. Работает с байтами, чтобы сохранить BOM у .ps1."""
+    patched = []
+    for ext, repls in SCRIPT_PATCHES.items():
+        for path in glob.glob(os.path.join(skills_dir, '*', 'scripts', '**', '*' + ext), recursive=True):
+            if 'node_modules' in path:
+                continue
+            with open(path, 'rb') as f:
+                data = f.read()
+            new = data
+            for old, rep in repls:
+                new = new.replace(old.encode('utf-8'), rep.encode('utf-8'))
+            if new != data:
+                with open(path, 'wb') as f:
+                    f.write(new)
+                patched.append(os.path.relpath(path, skills_dir))
+    return patched
 
 
 # ---------------------------------------------------------------------------
@@ -235,7 +298,7 @@ def cmd_build(args):
         print(f'Ошибка: навыки не найдены в {src}', file=sys.stderr)
         return 1
 
-    dst = os.path.join(repo_root(), SKILLS_PREFIX.replace('/', os.sep))
+    dst = os.path.join(repo_root(), REPO_SKILLS)
     if os.path.isdir(dst):
         shutil.rmtree(dst)
     os.makedirs(dst)
@@ -249,10 +312,16 @@ def cmd_build(args):
         shutil.copytree(os.path.join(src, name), os.path.join(dst, name), ignore=ignore)
         for md in collect_md_files(os.path.join(dst, name)):
             content = read(md)
-            new = adapt_markdown(content, name, os.path.basename(md) == 'SKILL.md')
+            new = adapt_markdown(content, os.path.basename(md) == 'SKILL.md')
             if new != content:
                 write(md, new)
+    patched = patch_scripts(dst)
     apply_runtime(dst, args.runtime, verbose=False)
+
+    left = [md for md in glob.glob(os.path.join(dst, '**', '*.md'), recursive=True)
+            if 'CLAUDE_SKILL_DIR' in read(md)]
+    if left:
+        print('Предупреждение: остались ${CLAUDE_SKILL_DIR}: ' + ', '.join(left), file=sys.stderr)
 
     sha = ''
     try:
@@ -260,49 +329,39 @@ def cmd_build(args):
                              capture_output=True, text=True, check=True).stdout.strip()
     except (OSError, subprocess.CalledProcessError):
         pass
-    write(os.path.join(repo_root(), 'UPSTREAM'),
-          f'{UPSTREAM_URL}\n{sha}\n')
-    print(f'Собрано {len(skills)} навыков в {SKILLS_PREFIX}/ (рантайм: {args.runtime}, upstream {sha[:12]})')
+    write(os.path.join(repo_root(), 'UPSTREAM'), f'{UPSTREAM_URL}\n{sha}\n')
+    print(f'Собрано {len(skills)} навыков в {REPO_SKILLS}/ (рантайм: {args.runtime}, '
+          f'upstream {sha[:12]}, пропатчено скриптов: {len(patched)})')
     if not args.upstream:
         shutil.rmtree(upstream, ignore_errors=True)
     return 0
 
 
 # ---------------------------------------------------------------------------
-# install / uninstall / runtime
+# install / uninstall / runtime (установка без плагина)
 # ---------------------------------------------------------------------------
 def target_base(args):
     return os.path.expanduser('~') if args.is_global else os.path.abspath(args.project_dir)
 
 
-def rewrite_prefix_absolute(skills_dir):
-    """Для глобальной установки относительные пути `.agents/skills/...` из SKILL.md
-    не работают (shell goose стартует в каталоге проекта) — делаем их абсолютными."""
-    abs_prefix = skills_dir.replace('\\', '/').rstrip('/') + '/'
-    if ' ' in abs_prefix:
-        print(f'Предупреждение: путь "{abs_prefix}" содержит пробелы — '
-              f'часть команд в SKILL.md может потребовать кавычек.', file=sys.stderr)
-    for md in glob.glob(os.path.join(skills_dir, '**', '*.md'), recursive=True):
-        content = read(md)
-        new = RX_SKILLS_PREFIX.sub(lambda _: abs_prefix, content)
-        # Зависимости web-test — в каталоге-предке навыков (~/.agents/node_modules)
-        agents_dir = os.path.dirname(skills_dir.rstrip('/\\')).replace('\\', '/')
-        new = new.replace('--prefix .agents ', f'--prefix "{agents_dir}" ')
-        if new != content:
-            write(md, new)
-
-
 def install_hooks(base):
-    src = os.path.join(repo_root(), 'goose', 'plugins', HOOKS_PLUGIN)
-    dst = os.path.join(base, PLUGINS_PREFIX.replace('/', os.sep), HOOKS_PLUGIN)
+    """Хуки как отдельный плагин goose: <base>/.agents/plugins/1c-support-guard/."""
+    dst = os.path.join(base, native(PLUGINS_PREFIX), HOOKS_PLUGIN)
     if os.path.isdir(dst):
         shutil.rmtree(dst)
-    shutil.copytree(src, dst, ignore=shutil.ignore_patterns('test'))
+    shutil.copytree(os.path.join(repo_root(), 'hooks'), os.path.join(dst, 'hooks'),
+                    ignore=shutil.ignore_patterns('test'))
+    manifest = {
+        'name': HOOKS_PLUGIN,
+        'version': '1.0.0',
+        'description': 'Защита объектов типовой конфигурации 1С на поддержке от прямой правки (write/edit).',
+    }
+    write(os.path.join(dst, 'plugin.json'), json.dumps(manifest, ensure_ascii=False, indent=2) + '\n')
     print(f'Плагин хуков установлен: {dst}')
 
 
 def install_hints(base, is_global):
-    """Подсказки проекта для goose: <проект>/.goosehints или ~/.config/goose/.goosehints."""
+    """Подсказки для goose: <проект>/.goosehints или ~/.config/goose/.goosehints."""
     src = os.path.join(repo_root(), 'goose', '.goosehints')
     dst = (os.path.join(base, '.config', 'goose', '.goosehints') if is_global
            else os.path.join(base, '.goosehints'))
@@ -319,7 +378,9 @@ def print_gitignore_recommendations(project_dir):
     existing = set()
     if os.path.isfile(path):
         existing = {line.strip() for line in read(path).splitlines()}
-    missing = [r for r in GITIGNORE_RECOMMENDATIONS if r not in existing]
+    recs = GITIGNORE_RECOMMENDATIONS + ['.agents/node_modules/', '.agents/package.json',
+                                        '.agents/package-lock.json']
+    missing = [r for r in recs if r not in existing]
     if missing:
         print('\nРекомендуется добавить в .gitignore проекта:')
         for r in missing:
@@ -327,7 +388,7 @@ def print_gitignore_recommendations(project_dir):
 
 
 def cmd_install(args):
-    src = os.path.join(repo_root(), SKILLS_PREFIX.replace('/', os.sep))
+    src = os.path.join(repo_root(), REPO_SKILLS)
     skills = scan_skills(src)
     if not skills:
         print(f'Ошибка: навыки не найдены в {src}. Сначала выполните build.', file=sys.stderr)
@@ -336,16 +397,7 @@ def cmd_install(args):
     if not os.path.isdir(base):
         print(f"Ошибка: каталог '{base}' не найден.", file=sys.stderr)
         return 1
-    dst = os.path.join(base, SKILLS_PREFIX.replace('/', os.sep))
-    if os.path.realpath(dst) == os.path.realpath(src):
-        if args.runtime:
-            apply_runtime(dst, args.runtime)
-        if args.hooks:
-            install_hooks(base)
-        if args.hints:
-            install_hints(base, args.is_global)
-        return 0
-
+    dst = os.path.join(base, native(INSTALL_SKILLS))
     os.makedirs(dst, exist_ok=True)
     for name in os.listdir(src):
         p = os.path.join(src, name)
@@ -359,10 +411,15 @@ def cmd_install(args):
         shutil.copytree(os.path.join(src, name), target, ignore=ignore)
     print(f'Установлено {len(skills)} навыков в {dst}')
 
+    if not args.is_global:
+        # web-test: ~/.agents не предок <проект>/.agents/skills — ставим Playwright в <проект>/.agents
+        for md in collect_md_files(os.path.join(dst, 'web-test')):
+            content = read(md)
+            new = content.replace(f'--prefix {WEB_TEST_PREFIX} ', f'--prefix {WEB_TEST_PREFIX_PROJECT} ')
+            if new != content:
+                write(md, new)
     if args.runtime:
         apply_runtime(dst, args.runtime)
-    if args.is_global:
-        rewrite_prefix_absolute(dst)
     if args.hooks:
         install_hooks(base)
     if args.hints:
@@ -370,22 +427,20 @@ def cmd_install(args):
     if not args.is_global:
         print_gitignore_recommendations(base)
     print('\nЗапустите goose из каталога проекта — навыки появятся в `/skills` и `goose skills list`.')
+    print('Не ставьте одновременно плагин `1c` и навыки через install — получатся дубли.')
     return 0
 
 
 def cmd_uninstall(args):
     base = target_base(args)
-    src_names = set(scan_skills(os.path.join(repo_root(), SKILLS_PREFIX.replace('/', os.sep))))
-    dst = os.path.join(base, SKILLS_PREFIX.replace('/', os.sep))
-    if os.path.realpath(dst) == os.path.realpath(os.path.join(repo_root(), SKILLS_PREFIX)):
-        print('Ошибка: нельзя удалять навыки из самого репозитория порта.', file=sys.stderr)
-        return 1
+    src_names = set(scan_skills(os.path.join(repo_root(), REPO_SKILLS)))
+    dst = os.path.join(base, native(INSTALL_SKILLS))
     removed = 0
     for name in scan_skills(dst):
         if name in src_names:
             shutil.rmtree(os.path.join(dst, name))
             removed += 1
-    hooks = os.path.join(base, PLUGINS_PREFIX.replace('/', os.sep), HOOKS_PLUGIN)
+    hooks = os.path.join(base, native(PLUGINS_PREFIX), HOOKS_PLUGIN)
     if os.path.isdir(hooks):
         shutil.rmtree(hooks)
         print(f'Удалён плагин хуков: {hooks}')
@@ -394,7 +449,7 @@ def cmd_uninstall(args):
 
 
 def cmd_runtime(args):
-    dst = os.path.join(target_base(args), SKILLS_PREFIX.replace('/', os.sep))
+    dst = os.path.join(target_base(args), native(INSTALL_SKILLS))
     if not scan_skills(dst):
         print(f'Ошибка: навыки не найдены в {dst}', file=sys.stderr)
         return 1
@@ -404,9 +459,9 @@ def cmd_runtime(args):
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Навыки 1С для goose: сборка из upstream и установка',
+        description='Навыки 1С для goose: сборка из upstream и установка без плагина',
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog=__doc__.split('Примеры:', 1)[1] if 'Примеры:' in __doc__ else None,
+        epilog='Примеры:' + __doc__.split('Примеры:', 1)[1],
     )
     sub = parser.add_subparsers(dest='cmd', required=True)
 
@@ -415,30 +470,30 @@ def main():
         g.add_argument('--project-dir', default=os.getcwd(),
                        help='целевой проект (по умолчанию: текущий каталог)')
         g.add_argument('--global', dest='is_global', action='store_true',
-                       help='установка для пользователя: ~/.agents/skills/')
+                       help='для пользователя: ~/.agents/skills/')
 
-    p = sub.add_parser('build', help='пересобрать .agents/skills/ из upstream cc-1c-skills')
+    p = sub.add_parser('build', help='пересобрать skills/ из upstream cc-1c-skills')
     p.add_argument('--upstream', help='путь к локальному клону cc-1c-skills (иначе git clone)')
     p.add_argument('--ref', help='ветка/тег upstream для git clone (по умолчанию main)')
     p.add_argument('--runtime', choices=['powershell', 'python'], default='powershell')
     p.set_defaults(func=cmd_build)
 
-    p = sub.add_parser('install', help='установить навыки в проект или глобально')
+    p = sub.add_parser('install', help='установить навыки в проект или для пользователя (без плагина)')
     add_target(p)
     p.add_argument('--runtime', choices=['powershell', 'python'],
-                   help='рантайм скриптов (по умолчанию как в репозитории — PowerShell)')
+                   help='жёстко прописать рантайм (по умолчанию PowerShell с откатом на Python)')
     p.add_argument('--hooks', action='store_true',
-                   help='[экспериментально] установить плагин хуков 1c-support-guard')
+                   help='установить хуки отдельным плагином 1c-support-guard')
     p.add_argument('--hints', action='store_true',
-                   help='скопировать подсказки goose/.goosehints в проект (если файла ещё нет)')
+                   help='скопировать goose/.goosehints в проект (если файла ещё нет)')
     p.set_defaults(func=cmd_install)
 
-    p = sub.add_parser('runtime', help='переключить рантайм у установленных навыков')
+    p = sub.add_parser('runtime', help='переключить рантайм у навыков, установленных install')
     p.add_argument('runtime', choices=['powershell', 'python'])
     add_target(p)
     p.set_defaults(func=cmd_runtime)
 
-    p = sub.add_parser('uninstall', help='удалить установленные навыки и плагин хуков')
+    p = sub.add_parser('uninstall', help='удалить навыки, установленные install, и плагин хуков')
     add_target(p)
     p.set_defaults(func=cmd_uninstall)
 

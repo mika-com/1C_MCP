@@ -18,11 +18,11 @@
 
 | Навык | Задача |
 |---|---|
-| [`/xdto-info`](../.agents/skills/xdto-info/SKILL.md) | Что в пакете и как заполнять тип — в терминах 1С |
-| [`/xdto-compile`](../.agents/skills/xdto-compile/SKILL.md) | Собрать пакет по XML-схеме |
-| [`/xdto-decompile`](../.agents/skills/xdto-decompile/SKILL.md) | Выгрузить пакет в XML-схему |
-| [`/xdto-edit`](../.agents/skills/xdto-edit/SKILL.md) | Точечно поправить существующий пакет |
-| [`/xdto-validate`](../.agents/skills/xdto-validate/SKILL.md) | Проверить перед загрузкой в базу |
+| [`/xdto-info`](../skills/xdto-info/SKILL.md) | Что в пакете и как заполнять тип — в терминах 1С |
+| [`/xdto-compile`](../skills/xdto-compile/SKILL.md) | Собрать пакет по XML-схеме |
+| [`/xdto-decompile`](../skills/xdto-decompile/SKILL.md) | Выгрузить пакет в XML-схему |
+| [`/xdto-edit`](../skills/xdto-edit/SKILL.md) | Точечно поправить существующий пакет |
+| [`/xdto-validate`](../skills/xdto-validate/SKILL.md) | Проверить перед загрузкой в базу |
 
 Формат описания — обычная XML-схема, своего DSL нет. Схема в реальных задачах
 обычно уже есть: её присылает контрагент или публикует регулятор.

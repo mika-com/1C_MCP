@@ -263,7 +263,7 @@ goose вызовет `/form-compile` с флагом `-FromObject`. Назнач
 <project-root>/presets/skills/form/erp-standard.json
 ```
 
-Файл накладывается поверх встроенного пресета через deep merge -- достаточно указать только переопределяемые ключи. Полная документация ключей: `.agents/skills/form-compile/presets/README.md`.
+Файл накладывается поверх встроенного пресета через deep merge -- достаточно указать только переопределяемые ключи. Полная документация ключей: `skills/form-compile/presets/README.md`.
 
 ## Примеры слеш-команд
 

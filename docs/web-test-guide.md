@@ -115,7 +115,7 @@ goose будет выполнять команды по одной, показы
 Одна команда: открывает браузер → логинится → выполняет сценарий → закрывает браузер → завершает процесс. Не оставляет висящих процессов.
 
 ```bash
-RUN=".agents/skills/web-test/scripts/run.mjs"
+RUN="<каталог навыка web-test>/scripts/run.mjs"
 node $RUN run http://localhost:8081/erp scenario.js
 ```
 

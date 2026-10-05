@@ -1149,4 +1149,4 @@ JSON-отчёт (`tests[]`, полная структура — §9) для ка
 - [web-test-guide.md](web-test-guide.md) — browser API (`clickElement`, `getFormState`, `readTable`, …) и интерактивный режим.
 - [web-test-recording-guide.md](web-test-recording-guide.md) — видеозапись, captions, narration, overlays.
 - [web-test-regression-guide.md](web-test-regression-guide.md) — пользовательский гайд (на русском, с быстрым стартом).
-- `/web-test` skill — `.agents/skills/web-test/SKILL.md`, `regress.md` (рабочая шпаргалка для модели).
+- `/web-test` skill — `skills/web-test/SKILL.md`, `regress.md` (рабочая шпаргалка для модели).
