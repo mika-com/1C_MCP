@@ -150,6 +150,10 @@ GOOSE_TEXT_REPLACEMENTS = [
     ('AskUserQuestion', 'вопрос пользователю'),
     ('читай результат через Read tool', 'читай результат инструментом чтения файлов'),
     ('Read tool', 'инструмент чтения файлов'),
+    # web-test: в goose нет run_in_background — фоновый запуск средствами shell
+    # (shell-инструмент goose не ждёт процессы, отправленные в фон через &).
+    ('node $RUN start <url>            # run_in_background=true',
+     'nohup node $RUN start <url> > "${TMPDIR:-/tmp}/web-test-start.log" 2>&1 &   # в фоне: goose не ждёт процесс с &'),
 ]
 
 MANUAL_ONLY_NOTE = ' Вызывай только по явной просьбе пользователя.'

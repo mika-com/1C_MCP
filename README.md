@@ -18,6 +18,7 @@
 | `allowed-tools` | список инструментов Claude Code | удалён — в goose его нет |
 | `disable-model-invocation` | запрет автовызова | goose его не поддерживает: в `description` добавлено «Вызывай только по явной просьбе пользователя» (`db-load-dt`, `form-decompile`, `form-remove`, `meta-decompile`, `skd-decompile`, `template-remove`) |
 | `AskUserQuestion` | инструмент вопроса | «спроси пользователя» обычным сообщением |
+| Фоновый процесс `web-test start` | `run_in_background=true` | `nohup ... &` в shell |
 | Хуки | `hooks/` (Claude Code) | плагин goose `goose/plugins/1c-support-guard/` (протокол Open Plugins) |
 | Подсказки проекта | `CLAUDE.md` | `.goosehints` (образец — `goose/.goosehints`) |
 
@@ -72,6 +73,46 @@ python tools/1c-goose/scripts/goose_port.py uninstall --project-dir .
 > (`.agents/skills/...`). Запускайте goose из корня проекта, куда установлены навыки. При глобальной
 > установке (`--global`) пути абсолютные, и это ограничение снимается.
 
+## Настройка goose
+
+Отдельный MCP-сервер не нужен: навыки работают через встроенные расширения goose — **Skills**
+(загрузка навыков) и **Developer** (shell и файлы). Оба включены по умолчанию.
+
+| Что | Зачем | Как |
+|-----|-------|-----|
+| `GOOSE_SHELL` = Git Bash (только Windows) | goose на Windows по умолчанию запускает команды через `cmd`, а в навыках синтаксис bash: heredoc, `&`, `until`. Claude Code на Windows работает через Git Bash, поэтому в оригинале это не было проблемой | `setx GOOSE_SHELL "C:\Program Files\Git\bin\bash.exe"` и перезапустить goose |
+| `GOOSE_DEFAULT_EXTENSION_TIMEOUT` | Стандартный таймаут shell-команды — 300 с. `db-update`, загрузка/выгрузка, сборка и сценарии `web-test` на больших конфигурациях идут дольше | `setx GOOSE_DEFAULT_EXTENSION_TIMEOUT 3600` (модель может и сама передать `timeout_secs`, подсказка есть в `.goosehints`) |
+| Режим подтверждений (`GOOSE_MODE`) | Навыки запускают много shell-команд. В `approve` / `smart_approve` goose спрашивает подтверждение на каждую | `auto` для доверенного проекта, иначе `smart_approve` |
+| Модель | Навыки длинные (сотни строк инструкций и DSL), нужна модель с хорошим tool calling и контекстом от 128K | любая сильная модель провайдера goose |
+| `.goosehints` | Подсказки проекта: сначала навык, потом ручная правка XML; запуск из корня; таймауты | `install --hints` или скопировать `goose/.goosehints` |
+
+### Нужна ли локальная база 1С
+
+Зависит от навыка:
+
+| Навыки | Что нужно |
+|--------|-----------|
+| Генерация и анализ XML: `epf-init`, `erf-init`, `meta-*`, `form-*`, `skd-*`, `mxl-*`, `role-*`, `cf-*`, `cfe-*`, `subsystem-*`, `interface-*`, `xdto-*`, `template-*`, `help-add`, `support-edit` | **Ничего**: ни платформы, ни базы. Работа только с файлами выгрузки |
+| `epf-build` / `erf-build` / `epf-dump` / `erf-dump` | Установленная **платформа 1С 8.3** (`1cv8` или `ibcmd`). База не обязательна: без неё скрипт сам создаст и удалит временную файловую базу. С реальной базой сборка надёжнее, если обработка ссылается на объекты конфигурации |
+| `db-*` | Платформа 1С и **информационная база**: файловая или на сервере 1С, локальная или сетевая. Её можно создать навыком `db-create` и зарегистрировать в `.v8-project.json` (`db-list`) |
+| `web-publish` / `web-stop` / `web-info` / `web-unpublish` | Платформа 1С (модуль веб-расширения `wsap24`) и база; Apache скачивается автоматически (portable, Windows) |
+| `web-test` | **URL опубликованной базы.** Это может быть локальная публикация (`web-publish`) или любой доступный веб-клиент 1С, указанный в `webUrl` в `.v8-project.json`. Плюс Node.js 18+ и Chromium |
+
+### Работа с веб-клиентом (`web-test`)
+
+Работает и в goose: навык управляет Chromium через Playwright, а goose запускает его скрипты через shell.
+
+1. Один раз установить зависимости:
+   `cd .agents/skills/web-test/scripts && npm install && npx playwright install chromium`.
+2. Опубликовать базу (`/web-publish <база>`) или прописать в `.v8-project.json` в записи базы
+   `"webUrl": "http://сервер/база"` для уже опубликованной.
+3. Просить своими словами: «открой в 1С список заказов и создай новый», «проверь отчёт по продажам
+   за май».
+
+Автономный режим (`run.mjs run <url> script.js`) — одна команда. Интерактивный (`run.mjs start`) держит
+браузер между шагами. В Claude Code он стартует через `run_in_background`, а в порте — через `&` в shell:
+goose не ждёт фоновые процессы.
+
 ## Рантайм: PowerShell ↔ Python
 
 По умолчанию навыки вызывают скрипты через `powershell.exe` (основной вариант upstream, Windows).
@@ -113,7 +154,7 @@ Python 3.9+ и зависимости: `pip install -r requirements.txt` (`lxml`
 
 ## Требования
 
-- **goose** с включённым встроенным расширением Skills (включено по умолчанию) и Developer (shell, файлы)
+- **goose** со встроенными расширениями Skills и Developer (включены по умолчанию); на Windows — Git Bash (см. «Настройка goose»)
 - **Windows** с PowerShell 5.1+ — рантайм по умолчанию; либо **Python 3.9+** — на любой ОС
 - **1С:Предприятие 8.3** — для сборки/разборки EPF/ERF и работы с базами (навыки генерации XML работают без платформы)
 - **Node.js 18+** — для `web-test` и плагина хуков. Перед первым запуском `web-test`:

@@ -53,7 +53,7 @@ node $RUN run <url> script.js   # exits when done, no session
 ```bash
 # 1. Start session in the background — `start` stays running as the server, so don't wait on
 #    its stdout. Poll `status` instead: it exits 0 only once the session is loaded and live.
-node $RUN start <url>            # run_in_background=true
+nohup node $RUN start <url> > "${TMPDIR:-/tmp}/web-test-start.log" 2>&1 &   # в фоне: goose не ждёт процесс с &
 until node $RUN status >/dev/null 2>&1; do sleep 2; done   # exit 0 = ready
 
 # 2. Execute scripts against running session
