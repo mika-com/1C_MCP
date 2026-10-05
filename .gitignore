@@ -1,0 +1,27 @@
+# Результаты сборки
+build/
+base/
+*.epf
+*.erf
+*.log
+
+# Локальный реестр баз данных 1С
+.v8-project.json
+
+# XSD-схемы платформы (/v8-xsd-fetch) — собственность 1С, не распространяем
+.v8-xsd/*
+!.v8-xsd/README.md
+
+# web-test: Node.js зависимости и runtime-артефакты
+.agents/skills/web-test/scripts/node_modules/
+.agents/skills/web-test/.browser-session.json
+
+# Python кэш
+__pycache__/
+
+# Локальные настройки goose
+.config/goose/settings.local.json
+
+# Скриншоты и видео (артефакты web-test)
+*.png
+*.mp4
