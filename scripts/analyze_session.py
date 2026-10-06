@@ -30,6 +30,14 @@ from datetime import datetime, timezone
 RX_SKILL_SCRIPT = re.compile(r'[\\/]skills[\\/]([a-z][a-z0-9-]+)[\\/]scripts[\\/]([\w.-]+\.(?:ps1|py|mjs))')
 RX_1C_SOURCE = re.compile(r'\.(xml|bsl|mxl)$', re.I)
 EDIT_TOOLS = {'edit', 'write', 'text_editor'}
+INFO_SKILLS = {'meta-info', 'form-info', 'cf-info', 'skd-info', 'role-info', 'mxl-info', 'subsystem-info',
+               'xdto-info', 'cfe-diff'}
+# shell-команда, читающая сырые файлы выгрузки (поиск/просмотр XML и модулей)
+RX_RAW_READ = re.compile(r'\b(grep|rg|sed|cat|head|tail|awk|findstr|Select-String|Get-Content|type)\b'
+                         r'[^|;&]*\.(xml|bsl)\b|\b(ls|find|dir)\b[^|;&]*\bsrc[\\/]', re.I)
+RX_GOOSE_SELF = re.compile(r'(Block[\\/]goose|[\\/]Goose[\\/]logs|\.config[\\/]goose|goose[\\/]sessions|sessions\.db)', re.I)
+RX_ENCODING = re.compile(r'UnicodeEncodeError|UnicodeDecodeError|cp1251|cp866|charmap|\ufffd')
+RX_PS_COMMAND = re.compile(r'powershell(\.exe)?\s[^|]*-Command\s[^|]*skills[\\/][a-z0-9-]+[\\/]scripts', re.I)
 
 
 def expand_path(path):
@@ -346,6 +354,31 @@ def report(data, conv, a, top):
               and RX_1C_SOURCE.search(str(c['args'].get('path', '')))]
     xml_edits = [c for c in manual if str(c['args'].get('path', '')).lower().endswith('.xml')]
 
+    # Наблюдения по работе с выгрузкой и окружением
+    shells = [c for c in calls if c['name'] == 'shell']
+    raw_reads = [c for c in shells if RX_RAW_READ.search(c['args'].get('command', ''))
+                 and not RX_SKILL_SCRIPT.search(c['args'].get('command', ''))]
+    raw_chars = sum(len(c['result']) for c in raw_reads)
+    goose_self = [c for c in shells if RX_GOOSE_SELF.search(c['args'].get('command', ''))]
+    enc_issues = [c for c in calls if RX_ENCODING.search(c['result'])]
+    ps_command = [c for c in shells if RX_PS_COMMAND.search(c['args'].get('command', ''))]
+    info_used = sorted(main_loaded & INFO_SKILLS)
+    script_cnt = Counter(f'{sk}/{f}' for sk, f, _ in script_runs)
+    w('## Как модель работала с выгрузкой\n')
+    w(f'- Навыки анализа (`*-info`, `cfe-diff`): ' + (', '.join(f'`{n}`' for n in info_used) if info_used else '**не использовались**'))
+    w(f'- Ручной просмотр/поиск по XML и модулям через shell: **{len(raw_reads)}** команд, '
+      f'{num(raw_chars)} симв. в ответах')
+    if goose_self:
+        w(f'- Команд, исследующих сам goose (настройки, логи, сеансы): {len(goose_self)}')
+    if enc_issues:
+        w(f'- Ответов с проблемами кодировки (cp1251/cp866, UnicodeError, «�»): {len(enc_issues)}')
+    if ps_command:
+        w(f'- Скрипты навыков вызывались через `powershell -Command`: {len(ps_command)}')
+    loops = [(k, v) for k, v in script_cnt.most_common() if v >= 8]
+    if loops:
+        w('- Многократные запуски одного скрипта: ' + ', '.join(f'`{k}` ×{v}' for k, v in loops))
+    w('')
+
     # Ошибки
     errors = [c for c in calls if c['error']]
     if errors:
@@ -365,6 +398,31 @@ def report(data, conv, a, top):
     if xml_edits:
         rec.append(f'XML выгрузки правился вручную (правок: {len(xml_edits)}, инструмент {", ".join(sorted({c["name"] for c in xml_edits}))}). '
                    'Для этого есть навыки *-edit / *-compile — они не ломают формат.')
+    if len(raw_reads) >= 10 and not info_used:
+        rec.append(f'Модель изучала выгрузку вручную ({len(raw_reads)} команд grep/sed/cat, {num(raw_chars)} симв.) и ни разу '
+                   'не загрузила навыки анализа. Начинайте задачу так: «сначала изучи объект навыками meta-info и form-info».')
+    elif len(raw_reads) >= 20:
+        rec.append(f'Много ручного поиска по XML ({len(raw_reads)} команд). Чаще используйте навыки *-info.')
+    if goose_self:
+        rec.append('Модель тратила шаги на изучение самого goose (настройки, логи, сеансы). Это вне задачи — '
+                   'остановите её и верните к задаче; правило есть в свежем .goosehints.')
+    if enc_issues:
+        rec.append('Были проблемы с кодировкой. Запустите свежий install-windows.cmd — он включает UTF-8 для Python '
+                   '(PYTHONUTF8, PYTHONIOENCODING); и просите сохранять вывод скриптов в файл (-OutFile).')
+    if ps_command:
+        rec.append('Скрипты навыков вызывались через `powershell -Command "& ..."` — так ломается передача '
+                   'списков в параметрах. Правильно: `powershell.exe -NoProfile -File "<путь>" -Параметр значение`, как в навыке.')
+    for k, v in loops:
+        if k.startswith('db-load-xml') or k.startswith('db-load-git'):
+            rec.append(f'Загрузка в базу выполнялась {v} раз — цикл «правка → загрузка → проверка». Перед загрузкой '
+                       'проверяйте изменения навыками cfe-validate / form-validate, чтобы ловить ошибки до базы.')
+        elif k.startswith('web-test'):
+            rec.append(f'web-test запускался {v} раз. Отладку сценария удобнее вести в интерактивном режиме '
+                       '(run.mjs start/exec), а не повторными run с новым входом в базу.')
+    model = ((data.get('model_config') or {}).get('model_name') or '').lower()
+    if any(t in model for t in ('flash', 'mini', 'haiku', 'lite', 'small', 'nano')) and len(steps) > 50:
+        rec.append(f'Модель «{model}» — быстрая облегчённая версия. На длинных задачах 1С она делает много лишних шагов: '
+                   'возьмите старшую модель того же поставщика хотя бы для анализа и плана.')
     if repeats and len(repeats[0][1]) >= 3:
         rec.append('Модель повторяла одни и те же действия. Остановите её раньше, уточните задачу или '
                    'подскажите следующий шаг; при частых повторах возьмите более сильную модель.')

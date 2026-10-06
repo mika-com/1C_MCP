@@ -6,7 +6,7 @@
 #   2. Находит Git Bash и прописывает GOOSE_SHELL: навыки пишут команды для bash, а goose на
 #      Windows по умолчанию использует cmd.
 #   3. Ставит GOOSE_DEFAULT_EXTENSION_TIMEOUT=3600, чтобы долгие операции с базой не обрывались
-#      через 5 минут.
+#      через 5 минут, и включает UTF-8 для Python (PYTHONUTF8, PYTHONIOENCODING).
 #   4. Проверяет Node.js (нужен для работы через браузер и защиты типовых конфигураций).
 # Повторный запуск обновляет плагин до версии из этой папки.
 param(
@@ -75,10 +75,13 @@ if ($NoEnv) {
     Say '      и запустите установку ещё раз. Без него навыки на Windows работать не будут.' 'Red'
 }
 
-# --- 3. Таймаут --------------------------------------------------------------
+# --- 3. Таймаут и кодировка --------------------------------------------------
 if (-not $NoEnv) {
     [Environment]::SetEnvironmentVariable('GOOSE_DEFAULT_EXTENSION_TIMEOUT', '3600', 'User')
-    Say '[3/4] GOOSE_DEFAULT_EXTENSION_TIMEOUT = 3600 (1 час на команду)' 'Green'
+    # Python в режиме UTF-8: иначе print() русского текста в консоли goose падает на cp1251.
+    [Environment]::SetEnvironmentVariable('PYTHONUTF8', '1', 'User')
+    [Environment]::SetEnvironmentVariable('PYTHONIOENCODING', 'utf-8', 'User')
+    Say '[3/4] GOOSE_DEFAULT_EXTENSION_TIMEOUT = 3600 (1 час на команду), Python в режиме UTF-8' 'Green'
 }
 
 # --- 4. Node.js --------------------------------------------------------------
