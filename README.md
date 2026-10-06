@@ -194,6 +194,7 @@ hooks/
 goose/.goosehints           # Образец подсказок проекта для goose
 scripts/goose_port.py       # Сборка из upstream, установка без плагина, переключение рантайма
 scripts/install-windows.ps1 # Логика установщика install-windows.cmd
+scripts/analyze_session.py  # Разбор сеанса goose: токены, навыки, повторы, ошибки, рекомендации
 docs/                       # Гайды и спецификации форматов 1С (из upstream)
 .v8-project.example.json    # Пример настроек проекта
 .v8-xsd/                    # Каталог для XSD-схем платформы (v8-xsd-fetch)
