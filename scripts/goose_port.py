@@ -36,7 +36,8 @@ UPSTREAM_URL = 'https://github.com/Nikolay-Shirokov/cc-1c-skills.git'
 REPO_SKILLS = 'skills'              # навыки в репозитории (каталог skills/ плагина)
 INSTALL_SKILLS = '.agents/skills'   # куда install кладёт навыки без плагина
 PLUGINS_PREFIX = '.agents/plugins'
-HOOKS_PLUGIN = '1c-support-guard'
+HOOKS_PLUGIN = '1c-tools'          # хуки и ask_user для установки без плагина
+OLD_HOOKS_PLUGINS = ('1c-support-guard',)
 
 # Каталог навыка в командах SKILL.md. goose при загрузке навыка выводит его абсолютный путь
 # («Skill directory: ...»), поэтому одни и те же SKILL.md работают из плагина, из проекта
@@ -160,9 +161,10 @@ WEB_TEST_SETUP = (f'npm install --prefix {WEB_TEST_PREFIX} --no-fund --no-audit 
                   f'&& npx --prefix {WEB_TEST_PREFIX} playwright install chromium')
 
 GOOSE_TEXT_REPLACEMENTS = [
-    ('Спроси у пользователя через AskUserQuestion', 'Спроси у пользователя'),
-    ('через AskUserQuestion', 'вопросом пользователю'),
-    ('AskUserQuestion', 'вопрос пользователю'),
+    # AskUserQuestion (Claude Code) -> ask_user: MCP-сервер плагина mcp/ask-user.mjs показывает форму
+    ('Спроси у пользователя через AskUserQuestion', 'Спроси у пользователя через инструмент `ask_user` (форма)'),
+    ('через AskUserQuestion', 'через инструмент `ask_user` (форма)'),
+    ('AskUserQuestion', 'инструмент `ask_user`'),
     ('читай результат через Read tool', 'читай результат инструментом чтения файлов'),
     ('Read tool', 'инструмент чтения файлов'),
     # web-test: в goose нет run_in_background — фоновый запуск средствами shell
@@ -382,19 +384,25 @@ def target_base(args):
 
 
 def install_hooks(base):
-    """Хуки как отдельный плагин goose: <base>/.agents/plugins/1c-support-guard/."""
-    dst = os.path.join(base, native(PLUGINS_PREFIX), HOOKS_PLUGIN)
+    """Хуки и форма вопросов ask_user отдельным плагином goose: <base>/.agents/plugins/1c-tools/."""
+    plugins = os.path.join(base, native(PLUGINS_PREFIX))
+    for old in OLD_HOOKS_PLUGINS:
+        if os.path.isdir(os.path.join(plugins, old)):
+            shutil.rmtree(os.path.join(plugins, old))
+    dst = os.path.join(plugins, HOOKS_PLUGIN)
     if os.path.isdir(dst):
         shutil.rmtree(dst)
     shutil.copytree(os.path.join(repo_root(), 'hooks'), os.path.join(dst, 'hooks'),
                     ignore=shutil.ignore_patterns('test'))
+    shutil.copytree(os.path.join(repo_root(), 'mcp'), os.path.join(dst, 'mcp'))
+    shutil.copy2(os.path.join(repo_root(), '.mcp.json'), os.path.join(dst, '.mcp.json'))
     manifest = {
         'name': HOOKS_PLUGIN,
         'version': '1.0.0',
-        'description': 'Защита объектов типовой конфигурации 1С на поддержке от прямой правки (write/edit).',
+        'description': 'Навыки 1С: защита объектов на поддержке (хук) и форма уточняющих вопросов ask_user.',
     }
     write(os.path.join(dst, 'plugin.json'), json.dumps(manifest, ensure_ascii=False, indent=2) + '\n')
-    print(f'Плагин хуков установлен: {dst}')
+    print(f'Плагин 1c-tools (хук и ask_user) установлен: {dst}')
 
 
 def install_hints(base, is_global):
@@ -477,10 +485,11 @@ def cmd_uninstall(args):
         if name in src_names:
             shutil.rmtree(os.path.join(dst, name))
             removed += 1
-    hooks = os.path.join(base, native(PLUGINS_PREFIX), HOOKS_PLUGIN)
-    if os.path.isdir(hooks):
-        shutil.rmtree(hooks)
-        print(f'Удалён плагин хуков: {hooks}')
+    for name in (HOOKS_PLUGIN,) + OLD_HOOKS_PLUGINS:
+        hooks = os.path.join(base, native(PLUGINS_PREFIX), name)
+        if os.path.isdir(hooks):
+            shutil.rmtree(hooks)
+            print(f'Удалён плагин: {hooks}')
     print(f'Удалено навыков: {removed} из {dst}')
     return 0
 
@@ -520,7 +529,7 @@ def main():
     p.add_argument('--runtime', choices=['powershell', 'python'],
                    help='жёстко прописать рантайм (по умолчанию PowerShell с откатом на Python)')
     p.add_argument('--hooks', action='store_true',
-                   help='установить хуки отдельным плагином 1c-support-guard')
+                   help='установить хук защиты поддержки и форму вопросов ask_user (плагин 1c-tools)')
     p.add_argument('--hints', action='store_true',
                    help='скопировать goose/.goosehints в проект (если файла ещё нет)')
     p.set_defaults(func=cmd_install)

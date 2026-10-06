@@ -33,7 +33,10 @@ goose plugin install --auto-update https://github.com/mika-com/1C_MCP_GOOSE
 Плагин содержит:
 - **81 навык** — `epf-init`, `meta-info`, … (после `goose plugin install` goose добавляет к именам префикс плагина: `1c:epf-init`);
 - **хук `support-guard`** — защита объектов типовой конфигурации на поддержке от прямой правки
-  (см. [hooks/README.md](hooks/README.md)).
+  (см. [hooks/README.md](hooks/README.md));
+- **инструмент `ask_user`** (MCP-сервер `mcp/ask-user.mjs`, подключается через `.mcp.json`) — уточняющие
+  вопросы формой: в goose Desktop прямо в чате, в CLI — в терминале. Аналог `AskUserQuestion` из Claude Code,
+  работает через MCP Elicitation. Нужен Node.js.
 
 После установки — один раз для веба (Node.js 18+):
 
@@ -85,7 +88,7 @@ python tools/1c-goose/scripts/goose_port.py uninstall --project-dir .
 | Фоновый `web-test start` | `run_in_background=true` | `nohup … &` в shell |
 | `allowed-tools` | список инструментов Claude Code | удалён — в goose его нет |
 | `disable-model-invocation` | запрет автовызова | goose его не поддерживает: в `description` добавлено «Вызывай только по явной просьбе пользователя» (`db-load-dt`, `form-decompile`, `form-remove`, `meta-decompile`, `skd-decompile`, `template-remove`) |
-| `AskUserQuestion` | инструмент вопроса | «спроси пользователя» обычным сообщением |
+| `AskUserQuestion` | инструмент вопроса | инструмент `ask_user` плагина: форма через MCP Elicitation |
 | Хук `support-guard` | опционально, вручную | в плагине включён; протокол goose (`{"decision":"block"}`) |
 | Хук `skill-suggester` | опционально | не портирован: хуки goose не добавляют текст в контекст модели |
 | Подсказки проекта | `CLAUDE.md` | `.goosehints` (образец — `goose/.goosehints`) |
@@ -187,6 +190,8 @@ python scripts/goose_port.py build --ref <ветка-или-тег>
 plugin.json                 # Манифест плагина goose (Open Plugins), имя «1c»
 install-windows.cmd         # Установщик для Windows (goose Desktop/CLI): плагин + GOOSE_SHELL + таймаут
 skills/                     # 81 навык (Agent Skills)
+.mcp.json                   # MCP-серверы плагина: ask_user
+mcp/ask-user.mjs            # Форма уточняющих вопросов (MCP Elicitation), без зависимостей
 hooks/
 ├── hooks.json              # PreToolUse → support-guard
 ├── support-guard.mjs       # + common/
