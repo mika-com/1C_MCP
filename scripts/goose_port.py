@@ -231,6 +231,42 @@ def adapt_markdown(content, is_skill_md):
     return content
 
 
+# Подсказки, которых нет в upstream там, где они нужны. Знание «расширение после первой загрузки
+# в безопасном режиме, перехватчики не работают» есть только в db-cfe-admin, а модель в этом
+# сценарии работает с навыками загрузки/обновления и его не открывает.
+SAFE_MODE_NOTE = (
+    '> **Расширение и безопасный режим.** Расширение, впервые загруженное в базу, создаётся '
+    'с **включённым безопасным режимом**: перехватчики модулей (`&Перед`, `&После`, `&Вместо`, '
+    '`&ИзменениеИКонтроль`) в нём **не применяются**, обращения к файлам и внешним ресурсам запрещены. '
+    'Если после загрузки и обновления доработка расширения «не работает» — сначала проверь свойства: '
+    '`/db-cfe-admin list`, и сними режим: `/db-cfe-admin set-properties <база> -Name <Расширение> '
+    '-SafeMode off` (нужен `ibcmd` и файловая база). Если `ibcmd` нет или база серверная — не ищи '
+    'обходных путей, а скажи пользователю снять флажок вручную: в Предприятии «Все функции → '
+    'Стандартные → Управление расширениями конфигурации» или в конфигураторе «Конфигурация → '
+    'Расширения конфигурации».\n\n'
+)
+SKILL_NOTES = {
+    # навык: заголовок, перед которым вставить заметку
+    'db-load-xml': '## Примеры',
+    'db-load-cf': '## Примеры',
+    'db-load-git': '## Примеры',
+    'db-update': '## Примеры',
+    'cfe-patch-method': '## Команда',
+}
+
+
+def add_skill_notes(skills_dir):
+    for name, anchor in SKILL_NOTES.items():
+        path = os.path.join(skills_dir, name, 'SKILL.md')
+        content = read(path)
+        if SAFE_MODE_NOTE.strip() in content:
+            continue
+        if anchor not in content:
+            print(f'Предупреждение: в {name}/SKILL.md нет «{anchor}», заметка не добавлена', file=sys.stderr)
+            continue
+        write(path, content.replace(anchor, SAFE_MODE_NOTE + anchor, 1))
+
+
 # В плагине скрипты лежат вне проекта (~/.agents/plugins/...), поэтому корень проекта —
 # рабочий каталог сессии goose, а не «4 уровня вверх от скрипта», как в upstream.
 SCRIPT_PATCHES = {
@@ -316,6 +352,7 @@ def cmd_build(args):
             if new != content:
                 write(md, new)
     patched = patch_scripts(dst)
+    add_skill_notes(dst)
     apply_runtime(dst, args.runtime, verbose=False)
 
     left = [md for md in glob.glob(os.path.join(dst, '**', '*.md'), recursive=True)
