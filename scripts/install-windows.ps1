@@ -88,9 +88,15 @@ if (-not $NoEnv) {
 $node = Get-Command node -ErrorAction SilentlyContinue
 if ($node) {
     Say "[4/4] Node.js найден: $(& node --version)" 'Green'
+    $ask = Join-Path $dstFull 'mcp\ask-user.mjs'
+    if (Test-Path $ask) {
+        $check = & node $ask --selftest 2>&1
+        if ($LASTEXITCODE -eq 0) { Say "      Форма вопросов: $check" 'Green' }
+        else { Say "      Форма вопросов не запускается: $check" 'Red' }
+    }
 } else {
-    Say '[4/4] Node.js не найден. Он нужен для работы через браузер (web-test) и защиты' 'Yellow'
-    Say '      типовых конфигураций. Скачайте LTS-версию: https://nodejs.org' 'Yellow'
+    Say '[4/4] Node.js не найден. Он нужен для формы вопросов (ask_user), работы через браузер' 'Yellow'
+    Say '      (web-test) и защиты типовых конфигураций. Скачайте LTS-версию: https://nodejs.org' 'Yellow'
 }
 
 Say ''

@@ -395,11 +395,11 @@ def install_hooks(base):
     shutil.copytree(os.path.join(repo_root(), 'hooks'), os.path.join(dst, 'hooks'),
                     ignore=shutil.ignore_patterns('test'))
     shutil.copytree(os.path.join(repo_root(), 'mcp'), os.path.join(dst, 'mcp'))
-    shutil.copy2(os.path.join(repo_root(), '.mcp.json'), os.path.join(dst, '.mcp.json'))
     manifest = {
         'name': HOOKS_PLUGIN,
         'version': '1.0.0',
         'description': 'Навыки 1С: защита объектов на поддержке (хук) и форма уточняющих вопросов ask_user.',
+        'mcpServers': json.load(open(os.path.join(repo_root(), 'plugin.json'), encoding='utf-8'))['mcpServers'],
     }
     write(os.path.join(dst, 'plugin.json'), json.dumps(manifest, ensure_ascii=False, indent=2) + '\n')
     print(f'Плагин 1c-tools (хук и ask_user) установлен: {dst}')

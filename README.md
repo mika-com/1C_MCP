@@ -34,7 +34,7 @@ goose plugin install --auto-update https://github.com/mika-com/1C_MCP_GOOSE
 - **81 навык** — `epf-init`, `meta-info`, … (после `goose plugin install` goose добавляет к именам префикс плагина: `1c:epf-init`);
 - **хук `support-guard`** — защита объектов типовой конфигурации на поддержке от прямой правки
   (см. [hooks/README.md](hooks/README.md));
-- **инструмент `ask_user`** (MCP-сервер `mcp/ask-user.mjs`, подключается через `.mcp.json`) — уточняющие
+- **инструмент `ask_user`** (MCP-сервер `mcp/ask-user.mjs`, подключается в `plugin.json` → `mcpServers`) — уточняющие
   вопросы формой: в goose Desktop прямо в чате, в CLI — в терминале. Аналог `AskUserQuestion` из Claude Code,
   работает через MCP Elicitation. Нужен Node.js.
 
@@ -187,10 +187,9 @@ python scripts/goose_port.py build --ref <ветка-или-тег>
 ## Структура репозитория
 
 ```
-plugin.json                 # Манифест плагина goose (Open Plugins), имя «1c»
+plugin.json                 # Манифест плагина goose (Open Plugins), имя «1c»; MCP-сервер ask_user
 install-windows.cmd         # Установщик для Windows (goose Desktop/CLI): плагин + GOOSE_SHELL + таймаут
 skills/                     # 81 навык (Agent Skills)
-.mcp.json                   # MCP-серверы плагина: ask_user
 mcp/ask-user.mjs            # Форма уточняющих вопросов (MCP Elicitation), без зависимостей
 hooks/
 ├── hooks.json              # PreToolUse → support-guard

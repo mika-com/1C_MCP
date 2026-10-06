@@ -219,7 +219,13 @@ async function handle(msg) {
   }
 }
 
-if (process.argv[1]?.endsWith('ask-user.mjs')) {
+if (process.argv[1]?.endsWith('ask-user.mjs') && process.argv.includes('--selftest')) {
+  // Проверка для установщика: модуль загружается, форма строится.
+  const f = buildForm({ questions: [{ question: 'Проверка', options: ['да', 'нет'] }] });
+  const ok = Object.keys(f.requestedSchema.properties).length === 2;
+  console.log(ok ? `ask_user OK (Node.js ${process.version})` : 'ask_user: ошибка построения формы');
+  process.exit(ok ? 0 : 1);
+} else if (process.argv[1]?.endsWith('ask-user.mjs')) {
   const rl = createInterface({ input: process.stdin });
   rl.on('line', (line) => {
     if (!line.trim()) return;

@@ -1,8 +1,0 @@
-{
-  "mcpServers": {
-    "ask": {
-      "command": "node",
-      "args": ["${PLUGIN_ROOT}/mcp/ask-user.mjs"]
-    }
-  }
-}
