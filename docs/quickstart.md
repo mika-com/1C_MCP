@@ -210,6 +210,10 @@ goose умеет открывать базу в веб-клиенте 1С и р�
    python analyze_session.py "%USERPROFILE%\Downloads\<файл сеанса>.json" -o "%USERPROFILE%\Desktop\отчёт.md"
    ```
 
+   В PowerShell (строка начинается с `PS`) пишите `$env:USERPROFILE` вместо `%USERPROFILE%`.
+   Скрипт понимает оба варианта, но старая версия скрипта понимает только тот, что подходит для вашей
+   командной строки.
+
    Без экспорта, прямо из истории goose: `python analyze_session.py --list` покажет последние сеансы,
    `python analyze_session.py --db` разберёт последний, `--session <ID>` — конкретный.
 

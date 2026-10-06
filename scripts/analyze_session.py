@@ -32,6 +32,13 @@ RX_1C_SOURCE = re.compile(r'\.(xml|bsl|mxl)$', re.I)
 EDIT_TOOLS = {'edit', 'write', 'text_editor'}
 
 
+def expand_path(path):
+    """Раскрыть %VAR%, $VAR, $env:VAR и ~ в пути."""
+    path = re.sub(r'\$env:(\w+)', lambda m: os.environ.get(m.group(1), m.group(0)), path, flags=re.I)
+    path = re.sub(r'%(\w+)%', lambda m: os.environ.get(m.group(1), os.environ.get(m.group(1).upper(), m.group(0))), path)
+    return os.path.expanduser(os.path.expandvars(path))
+
+
 def default_db_path():
     if os.name == 'nt':
         return os.path.join(os.environ.get('APPDATA', ''), 'Block', 'goose', 'data', 'sessions', 'sessions.db')
@@ -43,7 +50,9 @@ def default_db_path():
 # Загрузка
 # ---------------------------------------------------------------------------
 def load_export(path):
-    with open(path, encoding='utf-8') as f:
+    if not os.path.isfile(path):
+        sys.exit(f'Файл не найден: {path}\nПроверьте имя файла и папку (по умолчанию экспорт goose сохраняет в «Загрузки»).')
+    with open(path, encoding='utf-8-sig') as f:
         data = json.load(f)
     conv = data.get('conversation') or []
     if isinstance(conv, dict):
@@ -422,6 +431,11 @@ def main():
     p.add_argument('--transcript', help='записать сжатую расшифровку сеанса в файл (Markdown)')
     p.add_argument('--result-chars', type=int, default=600, help='обрезка ответов инструментов в расшифровке')
     args = p.parse_args()
+    # %USERPROFILE% раскрывает только cmd, PowerShell передаёт его как есть — раскрываем сами.
+    for attr in ('export', 'output', 'transcript', 'db_path'):
+        val = getattr(args, attr)
+        if val:
+            setattr(args, attr, expand_path(val))
 
     if args.list:
         db_list(args.db_path, args.top * 2)
