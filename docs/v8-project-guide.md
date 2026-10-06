@@ -13,7 +13,7 @@
 ```jsonc
 {
   // === Платформа ===
-  "v8path": "C:\\Program Files\\1cv8\\8.3.24.1691\\bin",
+  "v8path": "C:\\Program Files\\1cv8\\8.3.27.2325\\bin",
 
   // === Базы данных ===
   "databases": [
@@ -35,7 +35,7 @@
       // операции конфигуратора.
       "repository": {
         "path": "\\\\srv01\\repo\\MyApp",     // каталог или tcp://srv01:1542/MyApp
-        "user": "Ivanov",
+        "user": "RutskiiKS",
         "password": ""
       },
 
