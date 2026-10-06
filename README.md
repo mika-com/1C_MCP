@@ -9,9 +9,17 @@
 готовые абстракции над XML-форматами и CLI конфигуратора, а веб-тестирование — глаза и руки для работы
 с интерфейсом 1С.
 
-> **Впервые работаете с goose?** Начните с пошаговой инструкции: **[docs/quickstart.md](docs/quickstart.md)**.
+> **Впервые работаете с goose?** Начните с пошаговой инструкции для goose Desktop (с окном):
+> **[docs/quickstart.md](docs/quickstart.md)**.
 
 ## Установка
+
+**goose Desktop (Windows):** скачайте ZIP этого репозитория (**Code → Download ZIP**), распакуйте
+и дважды щёлкните **`install-windows.cmd`**. Установщик положит плагин в `%USERPROFILE%\.agents\plugins\1c`
+и настроит `GOOSE_SHELL` (Git Bash) и таймаут команд. Затем перезапустите goose. Подробно —
+в [docs/quickstart.md](docs/quickstart.md).
+
+**goose CLI:**
 
 ```bash
 goose plugin install https://github.com/mika-com/1C_MCP_GOOSE
@@ -23,7 +31,7 @@ goose plugin install --auto-update https://github.com/mika-com/1C_MCP_GOOSE
 Отключить — добавить `"1c"` в `disabledPlugins` в `~/.config/goose/settings.json`.
 
 Плагин содержит:
-- **81 навык** — в goose они называются с префиксом плагина: `1c:epf-init`, `1c:meta-info`, …;
+- **81 навык** — `epf-init`, `meta-info`, … (после `goose plugin install` goose добавляет к именам префикс плагина: `1c:epf-init`);
 - **хук `support-guard`** — защита объектов типовой конфигурации на поддержке от прямой правки
   (см. [hooks/README.md](hooks/README.md)).
 
@@ -177,6 +185,7 @@ python scripts/goose_port.py build --ref <ветка-или-тег>
 
 ```
 plugin.json                 # Манифест плагина goose (Open Plugins), имя «1c»
+install-windows.cmd         # Установщик для Windows (goose Desktop/CLI): плагин + GOOSE_SHELL + таймаут
 skills/                     # 81 навык (Agent Skills)
 hooks/
 ├── hooks.json              # PreToolUse → support-guard
@@ -184,6 +193,7 @@ hooks/
 └── test/run.mjs
 goose/.goosehints           # Образец подсказок проекта для goose
 scripts/goose_port.py       # Сборка из upstream, установка без плагина, переключение рантайма
+scripts/install-windows.ps1 # Логика установщика install-windows.cmd
 docs/                       # Гайды и спецификации форматов 1С (из upstream)
 .v8-project.example.json    # Пример настроек проекта
 .v8-xsd/                    # Каталог для XSD-схем платформы (v8-xsd-fetch)

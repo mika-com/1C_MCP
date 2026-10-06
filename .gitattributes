@@ -26,3 +26,6 @@
 # под правилом *.bin binary (байты не нормализуются), но включаем текстовый diff,
 # иначе изменение модели пакета в истории выглядит как «Binary files differ».
 XDTOPackages/**/Package.bin diff
+
+# Windows: .cmd с CRLF, иначе cmd.exe может неверно разбирать файл
+*.cmd   text eol=crlf
