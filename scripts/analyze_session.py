@@ -400,7 +400,8 @@ def report(data, conv, a, top):
                    'Для этого есть навыки *-edit / *-compile — они не ломают формат.')
     if len(raw_reads) >= 10 and not info_used:
         rec.append(f'Модель изучала выгрузку вручную ({len(raw_reads)} команд grep/sed/cat, {num(raw_chars)} симв.) и ни разу '
-                   'не загрузила навыки анализа. Начинайте задачу так: «сначала изучи объект навыками meta-info и form-info».')
+                   'не загрузила навыки анализа. Начинайте задачу так: «сначала найди объекты инструментами find_object/find_method '
+                   'и изучи навыками meta-info и form-info» или используйте рецепт «1С: анализ и план доработки».')
     elif len(raw_reads) >= 20:
         rec.append(f'Много ручного поиска по XML ({len(raw_reads)} команд). Чаще используйте навыки *-info.')
     if goose_self:
@@ -415,7 +416,7 @@ def report(data, conv, a, top):
     for k, v in loops:
         if k.startswith('db-load-xml') or k.startswith('db-load-git'):
             rec.append(f'Загрузка в базу выполнялась {v} раз — цикл «правка → загрузка → проверка». Перед загрузкой '
-                       'проверяйте изменения навыками cfe-validate / form-validate, чтобы ловить ошибки до базы.')
+                       'проверяйте изменения навыками bsl-check и cfe-validate / form-validate, чтобы ловить ошибки до базы.')
         elif k.startswith('web-test'):
             rec.append(f'web-test запускался {v} раз. Отладку сценария удобнее вести в интерактивном режиме '
                        '(run.mjs start/exec), а не повторными run с новым входом в базу.')

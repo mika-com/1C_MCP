@@ -257,16 +257,43 @@ SKILL_NOTES = {
 }
 
 
+BSL_CHECK_NOTE = (
+    '> **Проверка кода перед загрузкой.** Перед загрузкой в базу проверь изменённые модули навыком '
+    '`bsl-check` (BSL Language Server): `bsl-check -Path <каталог расширения или объекта>`. Он находит '
+    'синтаксические и типовые ошибки за секунды — без цикла «загрузка → ошибка платформы → правка».\n\n'
+)
+BSL_CHECK_NOTES = {
+    'db-load-xml': '## Примеры',
+    'db-load-git': '## Примеры',
+    'cfe-validate': '## Команда',
+}
+# Свои навыки порта (их нет в upstream): копируются в skills/ при каждой сборке
+OWN_SKILLS = 'goose/skills'
+
+
 def add_skill_notes(skills_dir):
-    for name, anchor in SKILL_NOTES.items():
-        path = os.path.join(skills_dir, name, 'SKILL.md')
-        content = read(path)
-        if SAFE_MODE_NOTE.strip() in content:
-            continue
-        if anchor not in content:
-            print(f'Предупреждение: в {name}/SKILL.md нет «{anchor}», заметка не добавлена', file=sys.stderr)
-            continue
-        write(path, content.replace(anchor, SAFE_MODE_NOTE + anchor, 1))
+    for note, targets in ((SAFE_MODE_NOTE, SKILL_NOTES), (BSL_CHECK_NOTE, BSL_CHECK_NOTES)):
+        for name, anchor in targets.items():
+            path = os.path.join(skills_dir, name, 'SKILL.md')
+            content = read(path)
+            if note.strip() in content:
+                continue
+            if anchor not in content:
+                print(f'Предупреждение: в {name}/SKILL.md нет «{anchor}», заметка не добавлена', file=sys.stderr)
+                continue
+            write(path, content.replace(anchor, note + anchor, 1))
+
+
+def copy_own_skills(dst):
+    src = os.path.join(repo_root(), native(OWN_SKILLS))
+    names = scan_skills(src)
+    for name in names:
+        target = os.path.join(dst, name)
+        if os.path.isdir(target):
+            shutil.rmtree(target)
+        shutil.copytree(os.path.join(src, name), target,
+                        ignore=shutil.ignore_patterns('__pycache__', 'node_modules'))
+    return names
 
 
 # В плагине скрипты лежат вне проекта (~/.agents/plugins/...), поэтому корень проекта —
@@ -356,6 +383,7 @@ def cmd_build(args):
     patched = patch_scripts(dst)
     add_skill_notes(dst)
     apply_runtime(dst, args.runtime, verbose=False)
+    own = copy_own_skills(dst)
 
     left = [md for md in glob.glob(os.path.join(dst, '**', '*.md'), recursive=True)
             if 'CLAUDE_SKILL_DIR' in read(md)]
@@ -369,8 +397,8 @@ def cmd_build(args):
     except (OSError, subprocess.CalledProcessError):
         pass
     write(os.path.join(repo_root(), 'UPSTREAM'), f'{UPSTREAM_URL}\n{sha}\n')
-    print(f'Собрано {len(skills)} навыков в {REPO_SKILLS}/ (рантайм: {args.runtime}, '
-          f'upstream {sha[:12]}, пропатчено скриптов: {len(patched)})')
+    print(f'Собрано {len(skills)} навыков upstream + {len(own)} своих ({", ".join(own)}) в {REPO_SKILLS}/ '
+          f'(рантайм: {args.runtime}, upstream {sha[:12]}, пропатчено скриптов: {len(patched)})')
     if not args.upstream:
         shutil.rmtree(upstream, ignore_errors=True)
     return 0
@@ -395,14 +423,17 @@ def install_hooks(base):
     shutil.copytree(os.path.join(repo_root(), 'hooks'), os.path.join(dst, 'hooks'),
                     ignore=shutil.ignore_patterns('test'))
     shutil.copytree(os.path.join(repo_root(), 'mcp'), os.path.join(dst, 'mcp'))
+    # mcp/bsl-ls.mjs ищет BSL LS модулем навыка bsl-check — кладём копию рядом
+    shutil.copy2(os.path.join(repo_root(), native(OWN_SKILLS), 'bsl-check', 'scripts', 'bsl-ls.mjs'),
+                 os.path.join(dst, 'mcp', 'bsl-ls-locate.mjs'))
     manifest = {
         'name': HOOKS_PLUGIN,
         'version': '1.0.0',
-        'description': 'Навыки 1С: защита объектов на поддержке (хук) и форма уточняющих вопросов ask_user.',
+        'description': 'Навыки 1С: защита объектов на поддержке (хук), форма вопросов ask_user, поиск по выгрузке, BSL LS.',
         'mcpServers': json.load(open(os.path.join(repo_root(), 'plugin.json'), encoding='utf-8'))['mcpServers'],
     }
     write(os.path.join(dst, 'plugin.json'), json.dumps(manifest, ensure_ascii=False, indent=2) + '\n')
-    print(f'Плагин 1c-tools (хук и ask_user) установлен: {dst}')
+    print(f'Плагин 1c-tools (хук, ask_user, поиск, BSL LS) установлен: {dst}')
 
 
 def install_hints(base, is_global):
@@ -416,6 +447,19 @@ def install_hints(base, is_global):
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     shutil.copy2(src, dst)
     print(f'Подсказки goose установлены: {dst}')
+
+
+def install_recipes(base):
+    """Рецепты этапов работы: <base>/.agents/recipes (goose ищет там и в проекте, и в домашнем каталоге)."""
+    src = os.path.join(repo_root(), 'goose', 'recipes')
+    if not os.path.isdir(src):
+        return
+    dst = os.path.join(base, '.agents', 'recipes')
+    os.makedirs(dst, exist_ok=True)
+    names = [f for f in sorted(os.listdir(src)) if f.endswith('.yaml')]
+    for f in names:
+        shutil.copy2(os.path.join(src, f), os.path.join(dst, f))
+    print(f'Рецепты ({len(names)}): {dst}')
 
 
 def print_gitignore_recommendations(project_dir):
@@ -469,6 +513,7 @@ def cmd_install(args):
         install_hooks(base)
     if args.hints:
         install_hints(base, args.is_global)
+    install_recipes(base)
     if not args.is_global:
         print_gitignore_recommendations(base)
     print('\nЗапустите goose из каталога проекта — навыки появятся в `/skills` и `goose skills list`.')
@@ -490,6 +535,12 @@ def cmd_uninstall(args):
         if os.path.isdir(hooks):
             shutil.rmtree(hooks)
             print(f'Удалён плагин: {hooks}')
+    rdir = os.path.join(base, '.agents', 'recipes')
+    src_recipes = os.path.join(repo_root(), 'goose', 'recipes')
+    if os.path.isdir(rdir) and os.path.isdir(src_recipes):
+        for f in os.listdir(src_recipes):
+            if os.path.isfile(os.path.join(rdir, f)):
+                os.remove(os.path.join(rdir, f))
     print(f'Удалено навыков: {removed} из {dst}')
     return 0
 
@@ -529,7 +580,7 @@ def main():
     p.add_argument('--runtime', choices=['powershell', 'python'],
                    help='жёстко прописать рантайм (по умолчанию PowerShell с откатом на Python)')
     p.add_argument('--hooks', action='store_true',
-                   help='установить хук защиты поддержки и форму вопросов ask_user (плагин 1c-tools)')
+                   help='установить хук, форму вопросов ask_user, поиск по выгрузке и BSL LS как MCP (плагин 1c-tools)')
     p.add_argument('--hints', action='store_true',
                    help='скопировать goose/.goosehints в проект (если файла ещё нет)')
     p.set_defaults(func=cmd_install)
