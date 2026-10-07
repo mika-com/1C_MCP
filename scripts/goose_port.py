@@ -430,10 +430,22 @@ def install_hooks(base):
         'name': HOOKS_PLUGIN,
         'version': '1.0.0',
         'description': 'Навыки 1С: защита объектов на поддержке (хук), форма вопросов ask_user, поиск по выгрузке, BSL LS.',
-        'mcpServers': json.load(open(os.path.join(repo_root(), 'plugin.json'), encoding='utf-8'))['mcpServers'],
     }
     write(os.path.join(dst, 'plugin.json'), json.dumps(manifest, ensure_ascii=False, indent=2) + '\n')
     print(f'Плагин 1c-tools (хук, ask_user, поиск, BSL LS) установлен: {dst}')
+    register_extensions(os.path.join(dst, 'mcp'))
+
+
+def register_extensions(mcp_dir, remove=False):
+    """MCP-серверы (ask_user, поиск, BSL LS) — обычными расширениями goose в config.yaml."""
+    script = os.path.join(mcp_dir, 'register-extensions.mjs')
+    node = shutil.which('node')
+    if not node or not os.path.isfile(script):
+        if not remove:
+            print('Node.js не найден — расширения 1c-ask/1c-search/1c-bsl не зарегистрированы. '
+                  f'После установки Node.js выполните: node "{script}"')
+        return
+    subprocess.run([node, script] + (['--remove'] if remove else []), check=False)
 
 
 def install_hints(base, is_global):
@@ -532,6 +544,8 @@ def cmd_uninstall(args):
             removed += 1
     for name in (HOOKS_PLUGIN,) + OLD_HOOKS_PLUGINS:
         hooks = os.path.join(base, native(PLUGINS_PREFIX), name)
+        if name == HOOKS_PLUGIN and os.path.isdir(os.path.join(hooks, 'mcp')):
+            register_extensions(os.path.join(hooks, 'mcp'), remove=True)
         if os.path.isdir(hooks):
             shutil.rmtree(hooks)
             print(f'Удалён плагин: {hooks}')

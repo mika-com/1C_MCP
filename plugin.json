@@ -1,28 +1,8 @@
 {
   "name": "1c",
-  "version": "1.2.0",
+  "version": "1.3.0",
   "description": "Навыки для разработки на 1С:Предприятие 8.3 — XML-выгрузки (обработки, отчёты, формы, СКД, роли, метаданные, расширения), информационные базы, веб-публикация и тестирование через веб-клиент. Порт cc-1c-skills для goose.",
   "author": "Nikolay Shirokov (cc-1c-skills); порт для goose",
   "homepage": "https://github.com/mika-com/1C_MCP_GOOSE",
-  "license": "MIT",
-  "mcpServers": {
-    "ask": {
-      "command": "node",
-      "args": [
-        "${PLUGIN_ROOT}/mcp/ask-user.mjs"
-      ]
-    },
-    "search": {
-      "command": "node",
-      "args": [
-        "${PLUGIN_ROOT}/mcp/code-search.mjs"
-      ]
-    },
-    "bsl": {
-      "command": "node",
-      "args": [
-        "${PLUGIN_ROOT}/mcp/bsl-ls.mjs"
-      ]
-    }
-  }
+  "license": "MIT"
 }

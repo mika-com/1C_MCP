@@ -7,7 +7,8 @@
 #      Windows по умолчанию использует cmd.
 #   3. Ставит GOOSE_DEFAULT_EXTENSION_TIMEOUT=3600, чтобы долгие операции с базой не обрывались
 #      через 5 минут, и включает UTF-8 для Python (PYTHONUTF8, PYTHONIOENCODING).
-#   4. Проверяет Node.js (форма вопросов, поиск по выгрузке, web-test, хук защиты).
+#   4. Проверяет Node.js и регистрирует в config.yaml goose расширения 1c-ask (форма вопросов),
+#      1c-search (поиск по выгрузке), 1c-bsl (BSL LS) — они видны на экране «Расширения».
 #   5. Скачивает BSL Language Server (~170 МБ, со встроенной Java) в %USERPROFILE%\.agents\tools —
 #      проверка BSL-кода (навык bsl-check) и MCP-сервер bsl. -NoBslLs — пропустить, -UpdateBslLs — обновить.
 #   6. Копирует рецепты этапов работы в %USERPROFILE%\.agents\recipes (библиотека рецептов goose).
@@ -98,6 +99,13 @@ if ($node) {
         $check = & node $ask --selftest 2>&1
         if ($LASTEXITCODE -eq 0) { Say "      Форма вопросов: $check" 'Green' }
         else { Say "      Форма вопросов не запускается: $check" 'Red' }
+    }
+    # ask_user, поиск по выгрузке и BSL LS — обычными расширениями goose (видны в «Расширениях»)
+    $reg = Join-Path $dstFull 'mcp\register-extensions.mjs'
+    if (Test-Path $reg) {
+        $out = & node $reg 2>&1
+        if ($LASTEXITCODE -eq 0) { Say "      $out" 'Green' }
+        else { Say "      Не удалось зарегистрировать расширения: $out" 'Red' }
     }
 } else {
     Say '[4/6] Node.js не найден. Он нужен для формы вопросов (ask_user), работы через браузер' 'Yellow'

@@ -25,23 +25,30 @@
 goose plugin install https://github.com/mika-com/1C_MCP_GOOSE
 # или с автообновлением:
 goose plugin install --auto-update https://github.com/mika-com/1C_MCP_GOOSE
+# MCP-серверы плагина (ask_user, поиск, BSL LS) — обычными расширениями goose:
+node ~/.agents/plugins/1c/mcp/register-extensions.mjs
 ```
 
 Плагин встаёт в `~/.agents/plugins/1c/` и доступен во всех проектах. Обновление — `goose plugin update 1c`.
+
+MCP-серверы `1c-ask`, `1c-search`, `1c-bsl` регистрируются в `config.yaml` goose как обычные расширения
+([`mcp/register-extensions.mjs`](mcp/register-extensions.mjs); `install-windows.cmd` делает это сам): так они
+видны в goose Desktop на экране «Расширения» с переключателями и работают в любой версии goose — MCP-серверы
+из `plugin.json` подключает не каждая версия, а Desktop их не показывает. `--remove` — удалить записи.
 Отключить — добавить `"1c"` в `disabledPlugins` в `~/.config/goose/settings.json`.
 
 Плагин содержит:
 - **82 навыка** — 81 из cc-1c-skills (`epf-init`, `meta-info`, …) и свой `bsl-check`. После `goose plugin install`
   goose добавляет к именам префикс плагина: `1c:epf-init`;
-- **поиск по выгрузке** — MCP-сервер `search` ([`mcp/code-search.mjs`](mcp/code-search.mjs)): `find_object` (объект
+- **поиск по выгрузке** — расширение `1c-search` ([`mcp/code-search.mjs`](mcp/code-search.mjs)): `find_object` (объект
   по смыслу — имени, синониму, реквизиту), `find_method` (метод сразу с кодом), `module_methods`, `find_usages`
   (кто вызывает), `search_code`. Заменяет `grep`/`sed` по XML: ответы короткие, контекст не раздувается.
   Индекс строится при первом запросе и кэшируется (выгрузка на 3,4 млн строк BSL — 5 с, повторно — 0,5 с);
-- **проверка BSL-кода** — навык `bsl-check` и MCP-сервер `bsl` на базе
+- **проверка BSL-кода** — навык `bsl-check` и расширение `1c-bsl` на базе
   [BSL Language Server](https://github.com/1c-syntax/bsl-language-server): ошибки в модулях до загрузки в базу,
   символы модуля, ссылки, граф вызовов, справка по типам платформы. BSL LS ставится установщиком отдельно
-  (около 170 МБ, со встроенной Java); без него сервер `bsl` только подсказывает, как его поставить;
-- **уточняющие вопросы формой** — MCP-сервер `ask` (`ask_user`): в goose Desktop прямо в чате, в CLI — в терминале.
+  (около 170 МБ, со встроенной Java); без него `1c-bsl` только подсказывает, как его поставить;
+- **уточняющие вопросы формой** — расширение `1c-ask` (`ask_user`): в goose Desktop прямо в чате, в CLI — в терминале.
   Аналог `AskUserQuestion` из Claude Code, работает через MCP Elicitation;
 - **рецепты этапов работы** ([`goose/recipes/`](goose/recipes)): «1С: анализ и план доработки» → «доработка по плану» →
   «загрузка в базу» → «проверка в браузере». Каждый — новый чат с узкими инструкциями и параметрами;
@@ -213,11 +220,12 @@ pull requests».
 ## Структура репозитория
 
 ```
-plugin.json                 # Манифест плагина goose (Open Plugins), имя «1c»; MCP-сервер ask_user
+plugin.json                 # Манифест плагина goose (Open Plugins), имя «1c»
 install-windows.cmd         # Установщик для Windows (goose Desktop/CLI): плагин + GOOSE_SHELL + таймаут
 skills/                     # 82 навыка (Agent Skills): 81 из upstream + свои из goose/skills
-mcp/code-search.mjs         # MCP-сервер search: поиск объектов, методов, вызовов по выгрузке
-mcp/bsl-ls.mjs              # MCP-сервер bsl: запуск BSL Language Server (или подсказка, если не установлен)
+mcp/register-extensions.mjs # Регистрация MCP-серверов расширениями goose (config.yaml)
+mcp/code-search.mjs         # MCP-сервер 1c-search: поиск объектов, методов, вызовов по выгрузке
+mcp/bsl-ls.mjs              # MCP-сервер 1c-bsl: запуск BSL Language Server (или подсказка, если не установлен)
 mcp/lib/stdio-server.mjs    # Общий минимальный MCP-сервер на stdio
 mcp/ask-user.mjs            # Форма уточняющих вопросов (MCP Elicitation), без зависимостей
 hooks/
