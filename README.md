@@ -31,12 +31,26 @@ goose plugin install --auto-update https://github.com/mika-com/1C_MCP_GOOSE
 Отключить — добавить `"1c"` в `disabledPlugins` в `~/.config/goose/settings.json`.
 
 Плагин содержит:
-- **81 навык** — `epf-init`, `meta-info`, … (после `goose plugin install` goose добавляет к именам префикс плагина: `1c:epf-init`);
+- **82 навыка** — 81 из cc-1c-skills (`epf-init`, `meta-info`, …) и свой `bsl-check`. После `goose plugin install`
+  goose добавляет к именам префикс плагина: `1c:epf-init`;
+- **поиск по выгрузке** — MCP-сервер `search` ([`mcp/code-search.mjs`](mcp/code-search.mjs)): `find_object` (объект
+  по смыслу — имени, синониму, реквизиту), `find_method` (метод сразу с кодом), `module_methods`, `find_usages`
+  (кто вызывает), `search_code`. Заменяет `grep`/`sed` по XML: ответы короткие, контекст не раздувается.
+  Индекс строится при первом запросе и кэшируется (выгрузка на 3,4 млн строк BSL — 5 с, повторно — 0,5 с);
+- **проверка BSL-кода** — навык `bsl-check` и MCP-сервер `bsl` на базе
+  [BSL Language Server](https://github.com/1c-syntax/bsl-language-server): ошибки в модулях до загрузки в базу,
+  символы модуля, ссылки, граф вызовов, справка по типам платформы. BSL LS ставится установщиком отдельно
+  (около 170 МБ, со встроенной Java); без него сервер `bsl` только подсказывает, как его поставить;
+- **уточняющие вопросы формой** — MCP-сервер `ask` (`ask_user`): в goose Desktop прямо в чате, в CLI — в терминале.
+  Аналог `AskUserQuestion` из Claude Code, работает через MCP Elicitation;
+- **рецепты этапов работы** ([`goose/recipes/`](goose/recipes)): «1С: анализ и план доработки» → «доработка по плану» →
+  «загрузка в базу» → «проверка в браузере». Каждый — новый чат с узкими инструкциями и параметрами;
 - **хук `support-guard`** — защита объектов типовой конфигурации на поддержке от прямой правки
-  (см. [hooks/README.md](hooks/README.md));
-- **инструмент `ask_user`** (MCP-сервер `mcp/ask-user.mjs`, подключается в `plugin.json` → `mcpServers`) — уточняющие
-  вопросы формой: в goose Desktop прямо в чате, в CLI — в терминале. Аналог `AskUserQuestion` из Claude Code,
-  работает через MCP Elicitation. Нужен Node.js.
+  (см. [hooks/README.md](hooks/README.md)).
+
+MCP-серверы плагина написаны на Node.js без зависимостей — нужен Node.js 18+. Каждый чат запускает свой
+экземпляр BSL LS (Java, около 300–500 МБ памяти). Если памяти мало, отключите сервер `bsl`
+переменной окружения `BSL_LS_MCP=off` — навык `bsl-check` продолжит работать.
 
 После установки — один раз для веба (Node.js 18+):
 
@@ -92,6 +106,9 @@ python tools/1c-goose/scripts/goose_port.py uninstall --project-dir .
 | Хук `support-guard` | опционально, вручную | в плагине включён; протокол goose (`{"decision":"block"}`) |
 | Хук `skill-suggester` | опционально | не портирован: хуки goose не добавляют текст в контекст модели |
 | Подсказки проекта | `CLAUDE.md` | `.goosehints` (образец — `goose/.goosehints`) |
+| Поиск по выгрузке | `grep`/чтение файлов | MCP-сервер `search` с индексом объектов и методов |
+| Проверка BSL-кода | — | навык `bsl-check` и MCP-сервер `bsl` (BSL Language Server) |
+| Этапы работы | — | рецепты goose «1С: …» |
 
 Все правки скриптов (10 файлов) делает `scripts/goose_port.py build` — точечные замены, отмеченные
 комментарием `goose`. Остальные скрипты — те же, что в upstream.
@@ -168,7 +185,9 @@ Apache для `web-publish` ставится в `<проект>/tools/apache24`,
   (см. «Настройка goose»)
 - **Windows** с PowerShell 5.1+, либо **Python 3.9+** — на любой ОС
 - **1С:Предприятие 8.3** — для сборки/разборки EPF/ERF и работы с базами (навыки генерации XML работают без платформы)
-- **Node.js 18+** — для `web-test` и хука `support-guard`
+- **Node.js 18+** — для MCP-серверов плагина (вопросы, поиск, BSL LS), `web-test` и хука `support-guard`
+- **BSL Language Server** — для проверки кода (`bsl-check`, сервер `bsl`); ставится `install-windows.cmd`
+  или `node skills/bsl-check/scripts/bsl-check.mjs -Install`
 
 ## Обновление из upstream
 
@@ -182,20 +201,33 @@ python scripts/goose_port.py build --ref <ветка-или-тег>
 ```
 
 Правьте навыки в upstream или в `scripts/goose_port.py`, а не в `skills/` — ручные правки перезапишутся
-при следующей сборке. После пересборки поднимите `version` в `plugin.json`.
+при следующей сборке. Собственные навыки порта лежат в `goose/skills/` и копируются в `skills/` при сборке.
+После пересборки поднимите `version` в `plugin.json`.
+
+**Автоматически:** GitHub Action [`upstream-sync`](.github/workflows/upstream-sync.yml) раз в неделю
+пересобирает порт из свежего cc-1c-skills и, если есть изменения, открывает PR (ветка `auto/upstream-sync`,
+версия плагина +1). Запустить вручную — Actions → «Синхронизация с cc-1c-skills» → Run workflow. Чтобы
+Action мог создавать PR, включите Settings → Actions → General → «Allow GitHub Actions to create and approve
+pull requests».
 
 ## Структура репозитория
 
 ```
 plugin.json                 # Манифест плагина goose (Open Plugins), имя «1c»; MCP-сервер ask_user
 install-windows.cmd         # Установщик для Windows (goose Desktop/CLI): плагин + GOOSE_SHELL + таймаут
-skills/                     # 81 навык (Agent Skills)
+skills/                     # 82 навыка (Agent Skills): 81 из upstream + свои из goose/skills
+mcp/code-search.mjs         # MCP-сервер search: поиск объектов, методов, вызовов по выгрузке
+mcp/bsl-ls.mjs              # MCP-сервер bsl: запуск BSL Language Server (или подсказка, если не установлен)
+mcp/lib/stdio-server.mjs    # Общий минимальный MCP-сервер на stdio
 mcp/ask-user.mjs            # Форма уточняющих вопросов (MCP Elicitation), без зависимостей
 hooks/
 ├── hooks.json              # PreToolUse → support-guard
 ├── support-guard.mjs       # + common/
 └── test/run.mjs
 goose/.goosehints           # Образец подсказок проекта для goose
+goose/skills/bsl-check/     # Свой навык: проверка BSL-кода через BSL LS (+ поиск/установка BSL LS)
+goose/recipes/              # Рецепты goose: анализ → доработка → загрузка → проверка в браузере
+.github/workflows/upstream-sync.yml  # Еженедельная синхронизация с cc-1c-skills
 scripts/goose_port.py       # Сборка из upstream, установка без плагина, переключение рантайма
 scripts/install-windows.ps1 # Логика установщика install-windows.cmd
 scripts/analyze_session.py  # Разбор сеанса goose: токены, навыки, повторы, ошибки, рекомендации

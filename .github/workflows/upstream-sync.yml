@@ -1,0 +1,74 @@
+# Еженедельная синхронизация с upstream cc-1c-skills: пересборка skills/ и PR с изменениями.
+# Для создания PR в настройках репозитория включите:
+# Settings → Actions → General → Workflow permissions → «Allow GitHub Actions to create and approve pull requests».
+name: Синхронизация с cc-1c-skills
+
+on:
+  schedule:
+    - cron: '17 5 * * 1'   # понедельник, 05:17 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: upstream-sync
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Пересборка из upstream
+        run: python scripts/goose_port.py build
+
+      - name: Проверка изменений
+        id: diff
+        run: |
+          # status, а не diff: новый навык в upstream — это новые (неотслеживаемые) файлы
+          if [ -z "$(git status --porcelain -- skills UPSTREAM)" ]; then
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+            echo "sha=$(sed -n 2p UPSTREAM | cut -c1-12)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Версия плагина +1 (patch)
+        if: steps.diff.outputs.changed == 'true'
+        run: |
+          python - <<'PY'
+          import json
+          p = 'plugin.json'
+          d = json.load(open(p, encoding='utf-8'))
+          major, minor, patch = (d.get('version', '1.0.0').split('.') + ['0', '0'])[:3]
+          d['version'] = f'{major}.{minor}.{int(patch) + 1}'
+          open(p, 'w', encoding='utf-8').write(json.dumps(d, ensure_ascii=False, indent=2) + '\n')
+          PY
+
+      - name: Коммит и PR
+        if: steps.diff.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ steps.diff.outputs.sha }}
+        run: |
+          branch=auto/upstream-sync
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git checkout -B "$branch"
+          git add -A skills UPSTREAM plugin.json
+          git commit -m "Синхронизация с cc-1c-skills ${SHA}"
+          git push -f origin "$branch"
+          body="Автоматическая пересборка \`skills/\` из [cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills) (коммит \`${SHA}\`). Проверьте изменения и слейте."
+          if gh pr view "$branch" --json state -q .state 2>/dev/null | grep -q OPEN; then
+            gh pr edit "$branch" --body "$body"
+          else
+            gh pr create --head "$branch" --base "${{ github.event.repository.default_branch }}" \
+              --title "Синхронизация с cc-1c-skills ${SHA}" --body "$body"
+          fi
