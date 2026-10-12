@@ -1,6 +1,6 @@
 # Базы данных 1С
 
-Навыки группы `/db-*` позволяют управлять информационными базами 1С из goose: создавать базы, загружать и выгружать конфигурации, обновлять БД, запускать предприятие, загружать изменения из Git.
+Навыки группы `/db-*` позволяют управлять информационными базами 1С из агента OpenCode: создавать базы, загружать и выгружать конфигурации, обновлять БД, запускать предприятие, загружать изменения из Git.
 
 ## Навыки
 
@@ -85,7 +85,7 @@
 > Создай файловую базу C:\Bases\Test и загрузи в неё конфигурацию из C:\WS\cfsrc
 ```
 
-goose вызовет `/db-create` → `/db-load-xml -Mode Full` → предложит `/db-update`.
+агент вызовет `/db-create` → `/db-load-xml -Mode Full` → предложит `/db-update`.
 
 ### Загрузить изменения из Git
 
@@ -93,7 +93,7 @@ goose вызовет `/db-create` → `/db-load-xml -Mode Full` → предло
 > Загрузи мои последние правки в базу разработки
 ```
 
-goose вызовет `/db-load-git dev -Source All` → предложит `/db-update`.
+агент вызовет `/db-load-git dev -Source All` → предложит `/db-update`.
 
 ### Выгрузить конфигурацию
 
@@ -101,7 +101,7 @@ goose вызовет `/db-load-git dev -Source All` → предложит `/db-
 > Выгрузи конфигурацию из тестовой базы в C:\WS\cfsrc
 ```
 
-goose вызовет `/db-dump-xml test C:\WS\cfsrc -Mode Full`.
+агент вызовет `/db-dump-xml test C:\WS\cfsrc -Mode Full`.
 
 ### Работа с расширениями
 
@@ -109,13 +109,13 @@ goose вызовет `/db-dump-xml test C:\WS\cfsrc -Mode Full`.
 > Выгрузи расширение МоёРасширение из базы dev в C:\WS\ext_src
 ```
 
-goose вызовет `/db-dump-xml dev C:\WS\ext_src -Extension МоёРасширение`.
+агент вызовет `/db-dump-xml dev C:\WS\ext_src -Extension МоёРасширение`.
 
 ```
 > Загрузи расширение обратно в базу
 ```
 
-goose вызовет `/db-load-xml C:\WS\ext_src dev -Extension МоёРасширение` → предложит `/db-update -Extension МоёРасширение`.
+агент вызовет `/db-load-xml C:\WS\ext_src dev -Extension МоёРасширение` → предложит `/db-update -Extension МоёРасширение`.
 
 ### Запустить предприятие
 
@@ -123,7 +123,7 @@ goose вызовет `/db-load-xml C:\WS\ext_src dev -Extension МоёРасши
 > Запусти базу разработки
 ```
 
-goose вызовет `/db-run dev`.
+агент вызовет `/db-run dev`.
 
 ## Движок: 1cv8 или ibcmd
 

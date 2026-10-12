@@ -47,7 +47,7 @@
 > Опубликуй базу bp-demo
 ```
 
-goose вызовет `/web-publish bp-demo` → скачает Apache (если нет) → сгенерирует VRD → настроит httpd.conf → запустит Apache → выдаст URL.
+агент вызовет `/web-publish bp-demo` → скачает Apache (если нет) → сгенерирует VRD → настроит httpd.conf → запустит Apache → выдаст URL.
 
 ### Проверить статус
 
@@ -55,7 +55,7 @@ goose вызовет `/web-publish bp-demo` → скачает Apache (если 
 > Что с веб-сервером?
 ```
 
-goose вызовет `/web-info` → покажет состояние Apache, порт, список публикаций, последние ошибки.
+агент вызовет `/web-info` → покажет состояние Apache, порт, список публикаций, последние ошибки.
 
 ### Опубликовать на другом порту
 
@@ -63,7 +63,7 @@ goose вызовет `/web-info` → покажет состояние Apache, �
 > Опубликуй ERP на порту 9090
 ```
 
-goose вызовет `/web-publish erp --port 9090`.
+агент вызовет `/web-publish erp --port 9090`.
 
 ### Сменить пользователя публикации
 
@@ -71,7 +71,7 @@ goose вызовет `/web-publish erp --port 9090`.
 > Переключи публикацию bp-demo на пользователя Иванов
 ```
 
-goose вызовет `/web-publish bp-demo` с `-UserName "Иванов"` — перезапишет VRD с новым пользователем.
+агент вызовет `/web-publish bp-demo` с `-UserName "Иванов"` — перезапишет VRD с новым пользователем.
 
 ### Параллельные публикации под разными пользователями
 
@@ -79,7 +79,7 @@ goose вызовет `/web-publish bp-demo` с `-UserName "Иванов"` — п
 > Добавь ещё одну публикацию bp-demo под Ивановым, Admin оставь
 ```
 
-goose вызовет `/web-publish bp-demo --appname bpdemo-ivanov --user Иванов` — создаст вторую публикацию. Обе будут доступны одновременно по разным URL.
+агент вызовет `/web-publish bp-demo --appname bpdemo-ivanov --user Иванов` — создаст вторую публикацию. Обе будут доступны одновременно по разным URL.
 
 ### Остановить сервер
 
@@ -87,7 +87,7 @@ goose вызовет `/web-publish bp-demo --appname bpdemo-ivanov --user Ива
 > Останови Apache
 ```
 
-goose вызовет `/web-stop`.
+агент вызовет `/web-stop`.
 
 ### Удалить публикацию
 
@@ -95,7 +95,7 @@ goose вызовет `/web-stop`.
 > Убери публикацию bpdemo
 ```
 
-goose вызовет `/web-unpublish bpdemo` → удалит блок из httpd.conf → удалит каталог → перезапустит Apache (если есть другие публикации).
+агент вызовет `/web-unpublish bpdemo` → удалит блок из httpd.conf → удалит каталог → перезапустит Apache (если есть другие публикации).
 
 ### Удалить все публикации
 
@@ -103,7 +103,7 @@ goose вызовет `/web-unpublish bpdemo` → удалит блок из http
 > Удали все веб-публикации
 ```
 
-goose вызовет `/web-unpublish --all` → удалит все блоки из httpd.conf → удалит все каталоги → остановит Apache.
+агент вызовет `/web-unpublish --all` → удалит все блоки из httpd.conf → удалит все каталоги → остановит Apache.
 
 ## Работа с сервисами
 
@@ -112,21 +112,21 @@ goose вызовет `/web-unpublish --all` → удалит все блоки �
 > Вызови HTTP-сервис ОбменДанными метод ПолучитьСтатус
 ```
 
-goose составит curl/Invoke-WebRequest к `http://localhost:8081/appname/hs/exchange/status`
+агент составит curl/Invoke-WebRequest к `http://localhost:8081/appname/hs/exchange/status`
 
 ### Проверить OData
 ```
 > Покажи список справочников через OData
 ```
 
-goose вызовет `http://localhost:8081/appname/odata/standard.odata/$metadata`
+агент вызовет `http://localhost:8081/appname/odata/standard.odata/$metadata`
 
 ### Получить WSDL web-сервиса
 ```
 > Покажи WSDL сервиса ОбменСВнешнимиСистемами
 ```
 
-goose откроет `http://localhost:8081/appname/ws/ExchangeWithExternalSystems?wsdl`
+агент откроет `http://localhost:8081/appname/ws/ExchangeWithExternalSystems?wsdl`
 
 ## Ручная установка Apache
 

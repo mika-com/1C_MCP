@@ -6,7 +6,7 @@ argument-hint: "сценарий на естественном языке"
 
 # /web-test — Browser automation for 1C web client
 
-> **goose:** `{SKILL_DIR}` в командах — каталог этого навыка: подставь абсолютный путь из строки `Skill directory:` (раздел Supporting Files в конце). Команды запускай из корня проекта. Если `powershell.exe` недоступен (Linux/macOS), запусти одноимённый `.py`-скрипт через `python` (или `python3`) с теми же параметрами.
+> **OpenCode:** `{SKILL_DIR}` в командах — каталог текущего навыка. Подставь абсолютный путь к каталогу навыка, если среда не делает это автоматически. Команды запускай из корня проекта. Если `powershell.exe` недоступен (Linux/macOS), запусти одноимённый `.py`-скрипт через `python` (или `python3`) с теми же параметрами.
 
 Automates user interactions with 1C:Enterprise web client via Playwright — navigating sections, filling forms, reading tables and reports, filtering lists.
 
@@ -31,10 +31,10 @@ SCRIPT
 ## Setup (first time)
 
 ```bash
-npm install --prefix "$HOME/.agents" --no-fund --no-audit "playwright@^1.50.0" && npx --prefix "$HOME/.agents" playwright install chromium
+npm install --prefix "$HOME/.config/opencode" --no-fund --no-audit "playwright@^1.50.0" && npx --prefix "$HOME/.config/opencode" playwright install chromium
 ```
 
-Requires Node.js 18+. `npm install` puts Playwright into `node_modules` of a parent directory of the skill (outside the skill, so goose does not list it as skill files; Node resolves packages from parent directories). `npx playwright install chromium` downloads the browser. If `run.mjs` fails with "Cannot find package 'playwright'", repeat this setup.
+Requires Node.js 18+. `npm install` puts Playwright into `node_modules` of a parent directory of the skill (outside the skill, so the skill directory stays compact; Node resolves packages from parent directories). `npx playwright install chromium` downloads the browser. If `run.mjs` fails with "Cannot find package 'playwright'", repeat this setup.
 
 ## URL resolution
 
@@ -55,7 +55,7 @@ node $RUN run <url> script.js   # exits when done, no session
 ```bash
 # 1. Start session in the background — `start` stays running as the server, so don't wait on
 #    its stdout. Poll `status` instead: it exits 0 only once the session is loaded and live.
-nohup node $RUN start <url> > "${TMPDIR:-/tmp}/web-test-start.log" 2>&1 &   # в фоне: goose не ждёт процесс с &
+nohup node $RUN start <url> > "${TMPDIR:-/tmp}/web-test-start.log" 2>&1 &   # в фоне: агент не должен ждать процесс с &
 until node $RUN status >/dev/null 2>&1; do sleep 2; done   # exit 0 = ready
 
 # 2. Execute scripts against running session
