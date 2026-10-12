@@ -21,7 +21,7 @@
                                         /interface-edit → CommandInterface.xml → /interface-validate
 ```
 
-1. goose формирует JSON-определение подсистемы (имя, состав, дочерние, картинка)
+1. агент формирует JSON-определение подсистемы (имя, состав, дочерние, картинка)
 2. `/subsystem-compile` генерирует XML-файл подсистемы и регистрирует в Configuration.xml
 3. `/subsystem-edit` вносит точечные изменения: добавление объектов, дочерних подсистем, изменение свойств
 4. `/interface-edit` настраивает командный интерфейс: скрытие/показ команд, размещение в группах, порядок
@@ -119,7 +119,7 @@
 > Покажи дерево подсистем конфигурации
 ```
 
-goose вызовет `/subsystem-info` (tree → overview → ci) и опишет:
+агент вызовет `/subsystem-info` (tree → overview → ci) и опишет:
 - иерархию подсистем с маркерами [CI], [OneCmd], [Скрыт]
 - состав каждой подсистемы (объекты по типам)
 - настройки командного интерфейса (видимость, размещение, порядок)
@@ -131,7 +131,7 @@ goose вызовет `/subsystem-info` (tree → overview → ci) и опише�
 > Дочерние подсистемы: Настройки, Отчёты. Картинка — CommonPicture.Продажи.
 ```
 
-goose сформирует JSON:
+агент сформирует JSON:
 ```json
 {
   "name": "Продажи",
@@ -150,7 +150,7 @@ goose сформирует JSON:
 > Добавь Document.Счёт и Report.Задолженность в подсистему Продажи
 ```
 
-goose вызовет `/subsystem-edit` с операцией `add-content`:
+агент вызовет `/subsystem-edit` с операцией `add-content`:
 ```powershell
 ... -SubsystemPath Subsystems/Продажи.xml -Operation add-content -Value '["Document.Счёт","Report.Задолженность"]'
 ```
@@ -161,7 +161,7 @@ goose вызовет `/subsystem-edit` с операцией `add-content`:
 > Скрой команду открытия списка товаров и размести отчёт Продажи в группе Отчёты
 ```
 
-goose вызовет `/interface-edit`:
+агент вызовет `/interface-edit`:
 ```powershell
 # Скрыть команду
 ... -CIPath Subsystems/Продажи/Ext/CommandInterface.xml -Operation hide -Value "Catalog.Товары.StandardCommand.OpenList"
@@ -176,7 +176,7 @@ goose вызовет `/interface-edit`:
 > Проверь подсистему Subsystems/Продажи.xml
 ```
 
-goose вызовет `/subsystem-validate` и `/interface-validate`, покажет результат: ошибки (невалидный XML, отсутствующие файлы, дубликаты) и предупреждения.
+агент вызовет `/subsystem-validate` и `/interface-validate`, покажет результат: ошибки (невалидный XML, отсутствующие файлы, дубликаты) и предупреждения.
 
 ## Структура файлов подсистемы
 
