@@ -12,7 +12,8 @@ import { fileURLToPath } from 'node:url';
 const IS_WIN = process.platform === 'win32';
 const IS_MAC = process.platform === 'darwin';
 
-export const TOOLS_DIR = join(homedir(), '.agents', 'tools', 'bsl-language-server');
+export const TOOLS_DIR = join(homedir(), '.config', 'opencode', 'tools', 'bsl-language-server');
+export const LEGACY_TOOLS_DIR = join(homedir(), '.agents', 'tools', 'bsl-language-server');
 const RELEASE_URL = 'https://github.com/1c-syntax/bsl-language-server/releases/latest/download/';
 const ASSETS = { win32: 'bsl-language-server_win.zip', linux: 'bsl-language-server_nix.zip', darwin: 'bsl-language-server_mac.zip' };
 
@@ -57,7 +58,7 @@ function candidatesIn(dir) {
   return c;
 }
 
-// Найти BSL LS: переменная BSL_LS_PATH (файл или каталог) → ~/.agents/tools/bsl-language-server.
+// Найти BSL LS: переменная BSL_LS_PATH (файл или каталог) → OpenCode tools → legacy ~/.agents/tools.
 export function findBslLs() {
   const env = process.env.BSL_LS_PATH;
   const places = [];
@@ -66,6 +67,7 @@ export function findBslLs() {
     else places.push(...candidatesIn(env));
   }
   places.push(...candidatesIn(TOOLS_DIR));
+  places.push(...candidatesIn(LEGACY_TOOLS_DIR));
   for (const p of places) {
     if (isFile(p)) {
       const r = fromExecutable(p);
@@ -121,7 +123,7 @@ function makeExecutable(dir) {
   walk(dir, 0);
 }
 
-// Установить (или обновить) BSL LS в ~/.agents/tools/bsl-language-server. Возвращает findBslLs().
+// Установить (или обновить) BSL LS в ~/.config/opencode/tools/bsl-language-server. Возвращает findBslLs().
 export function installBslLs({ log = console.log } = {}) {
   const asset = ASSETS[process.platform];
   if (!asset) throw new Error(`платформа ${process.platform} не поддерживается — поставьте BSL LS вручную и задайте BSL_LS_PATH`);
@@ -150,4 +152,5 @@ export function bslVersion(found) {
 export const INSTALL_HINT =
   'BSL Language Server не установлен. Установите его один раз: запустите install-windows.cmd из папки плагина ' +
   `или выполните \`node "${join(dirname(fileURLToPath(import.meta.url)), 'bsl-check.mjs')}" -Install\` ` +
-  `(около 170 МБ, ставится в ${TOOLS_DIR}). Свой BSL LS можно указать переменной BSL_LS_PATH.`;
+  `(около 170 МБ, ставится в ${TOOLS_DIR}; также поддерживается legacy-путь ${LEGACY_TOOLS_DIR}). ` +
+  'Свой BSL LS можно указать переменной BSL_LS_PATH.';

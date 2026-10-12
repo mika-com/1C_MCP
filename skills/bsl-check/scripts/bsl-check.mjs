@@ -6,7 +6,7 @@
 //
 //   node bsl-check.mjs -Path src/cfe/МоёРасширение [-Severity Error|Warning|Information|Hint] [-Limit 60]
 //   node bsl-check.mjs -Status        — где BSL LS и какая версия
-//   node bsl-check.mjs -Install       — скачать/обновить BSL LS (~170 МБ) в ~/.agents/tools
+//   node bsl-check.mjs -Install       — скачать/обновить BSL LS (~170 МБ) в ~/.config/opencode/tools
 
 import { existsSync, statSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { resolve, relative, dirname, join, sep } from 'node:path';
