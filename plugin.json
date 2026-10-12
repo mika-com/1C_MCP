@@ -1,0 +1,8 @@
+{
+  "name": "1c",
+  "version": "1.3.0",
+  "description": "Legacy-манифест старого goose-порта. Основной режим проекта — OpenCode-first: навыки, MCP и установка через opencode.json и scripts/opencode_port.py.",
+  "author": "Nikolay Shirokov (cc-1c-skills); OpenCode-адаптация mika-com",
+  "homepage": "https://github.com/mika-com/1C_MCP_GOOSE",
+  "license": "MIT"
+}
