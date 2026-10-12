@@ -1,20 +1,15 @@
-﻿# install-windows.ps1 — установка навыков 1С для goose (Desktop и CLI) на Windows
+﻿# install-windows.ps1 — установка навыков 1С для OpenCode на Windows
 # Запуск: двойной щелчок по install-windows.cmd в корне распакованного архива.
 #
 # Что делает:
-#   1. Копирует плагин (эту папку) в %USERPROFILE%\.agents\plugins\1c — оттуда его берёт goose.
-#   2. Находит Git Bash и прописывает GOOSE_SHELL: навыки пишут команды для bash, а goose на
-#      Windows по умолчанию использует cmd.
-#   3. Ставит GOOSE_DEFAULT_EXTENSION_TIMEOUT=3600, чтобы долгие операции с базой не обрывались
-#      через 5 минут, и включает UTF-8 для Python (PYTHONUTF8, PYTHONIOENCODING).
-#   4. Проверяет Node.js и регистрирует в config.yaml goose расширения 1c-ask (форма вопросов),
-#      1c-search (поиск по выгрузке), 1c-bsl (BSL LS) — они видны на экране «Расширения».
-#   5. Скачивает BSL Language Server (~170 МБ, со встроенной Java) в %USERPROFILE%\.agents\tools —
-#      проверка BSL-кода (навык bsl-check) и MCP-сервер bsl. -NoBslLs — пропустить, -UpdateBslLs — обновить.
-#   6. Копирует рецепты этапов работы в %USERPROFILE%\.agents\recipes (библиотека рецептов goose).
-# Повторный запуск обновляет плагин до версии из этой папки.
+#   1. Копирует репозиторий в %USERPROFILE%\.config\opencode\1c-skills.
+#   2. Копирует все навыки в %USERPROFILE%\.config\opencode\skills.
+#   3. Регистрирует MCP-серверы 1c-ask, 1c-search, 1c-bsl в opencode.json.
+#   4. Включает UTF-8 для Python.
+#   5. При необходимости ставит BSL Language Server.
 param(
-    [string]$Target = (Join-Path $env:USERPROFILE '.agents\plugins\1c'),
+    [string]$RepoTarget = (Join-Path $env:USERPROFILE '.config\opencode\1c-skills'),
+    [string]$SkillsTarget = (Join-Path $env:USERPROFILE '.config\opencode\skills'),
     [switch]$NoEnv,
     [switch]$NoBslLs,
     [switch]$UpdateBslLs
@@ -26,20 +21,21 @@ $source = Split-Path -Parent $PSScriptRoot
 function Say([string]$text, [string]$color = 'Gray') { Write-Host $text -ForegroundColor $color }
 
 Say ''
-Say '=== Навыки 1С для goose: установка ===' 'Cyan'
+Say '=== Навыки 1С для OpenCode: установка ===' 'Cyan'
 Say ''
 
-if (-not (Test-Path (Join-Path $source 'plugin.json'))) {
-    Say "Ошибка: не найден plugin.json в $source. Запускайте install-windows.cmd из распакованного архива." 'Red'
+if (-not (Test-Path (Join-Path $source 'skills'))) {
+    Say "Ошибка: не найден каталог skills в $source. Запускайте install-windows.cmd из распакованного архива." 'Red'
     exit 1
 }
 
-# --- 1. Плагин --------------------------------------------------------------
-$srcFull = (Resolve-Path $source).Path.TrimEnd('\')
-$dstFull = [System.IO.Path]::GetFullPath($Target).TrimEnd('\')
-if ($srcFull -ieq $dstFull) {
-    Say "[1/6] Плагин уже на месте: $dstFull" 'Green'
-} else {
+function Copy-Repo([string]$from, [string]$to) {
+    $srcFull = (Resolve-Path $from).Path.TrimEnd('\')
+    $dstFull = [System.IO.Path]::GetFullPath($to).TrimEnd('\')
+    if ($srcFull -ieq $dstFull) {
+        Say "[1/5] Репозиторий уже на месте: $dstFull" 'Green'
+        return $dstFull
+    }
     if (Test-Path $dstFull) {
         Remove-Item -LiteralPath $dstFull -Recurse -Force
     }
@@ -47,80 +43,57 @@ if ($srcFull -ieq $dstFull) {
     Get-ChildItem -LiteralPath $srcFull -Force |
         Where-Object { $_.Name -notin @('.git', 'node_modules', 'tools', 'build', 'base') } |
         Copy-Item -Destination $dstFull -Recurse -Force
-    Say "[1/6] Плагин установлен: $dstFull" 'Green'
+    Say "[1/5] Репозиторий установлен: $dstFull" 'Green'
+    return $dstFull
 }
 
-# --- 2. Git Bash -> GOOSE_SHELL --------------------------------------------
-$bash = $null
-$git = Get-Command git -ErrorAction SilentlyContinue
-if ($git) {
-    # ...\Git\cmd\git.exe или ...\Git\bin\git.exe -> ...\Git\bin\bash.exe
-    $gitRoot = Split-Path -Parent (Split-Path -Parent $git.Source)
-    if ($gitRoot) {
-        $cand = Join-Path $gitRoot 'bin\bash.exe'
-        if (Test-Path $cand) { $bash = $cand }
+function Copy-Skills([string]$repoDir, [string]$dstRoot) {
+    $skillsSrc = Join-Path $repoDir 'skills'
+    New-Item -ItemType Directory -Path $dstRoot -Force | Out-Null
+    $list = Get-ChildItem -LiteralPath $skillsSrc -Directory
+    foreach ($skill in $list) {
+        $dst = Join-Path $dstRoot $skill.Name
+        if (Test-Path $dst) {
+            Remove-Item -LiteralPath $dst -Recurse -Force
+        }
+        Copy-Item -LiteralPath $skill.FullName -Destination $dst -Recurse -Force
     }
-}
-if (-not $bash) {
-    $roots = @()
-    if ($env:ProgramFiles) { $roots += Join-Path $env:ProgramFiles 'Git' }
-    if ($env:LOCALAPPDATA) { $roots += Join-Path $env:LOCALAPPDATA 'Programs\Git' }
-    foreach ($root in $roots) {
-        $cand = Join-Path $root 'bin\bash.exe'
-        if (Test-Path $cand) { $bash = $cand; break }
-    }
+    Say "[2/5] Навыки установлены ($($list.Count)): $dstRoot" 'Green'
 }
 
-if ($NoEnv) {
-    Say '[2/6] Переменные окружения не трогаю (-NoEnv)' 'Yellow'
-} elseif ($bash) {
-    [Environment]::SetEnvironmentVariable('GOOSE_SHELL', $bash, 'User')
-    Say "[2/6] GOOSE_SHELL = $bash" 'Green'
-} else {
-    Say '[2/6] Git Bash не найден. Установите Git for Windows (https://git-scm.com/download/win)' 'Red'
-    Say '      и запустите установку ещё раз. Без него навыки на Windows работать не будут.' 'Red'
-}
+$repoDir = Copy-Repo $source $RepoTarget
+Copy-Skills $repoDir $SkillsTarget
 
-# --- 3. Таймаут и кодировка --------------------------------------------------
 if (-not $NoEnv) {
-    [Environment]::SetEnvironmentVariable('GOOSE_DEFAULT_EXTENSION_TIMEOUT', '3600', 'User')
-    # Python в режиме UTF-8: иначе print() русского текста в консоли goose падает на cp1251.
     [Environment]::SetEnvironmentVariable('PYTHONUTF8', '1', 'User')
     [Environment]::SetEnvironmentVariable('PYTHONIOENCODING', 'utf-8', 'User')
-    Say '[3/6] GOOSE_DEFAULT_EXTENSION_TIMEOUT = 3600 (1 час на команду), Python в режиме UTF-8' 'Green'
+    Say '[3/5] Python переведён в режим UTF-8' 'Green'
+} else {
+    Say '[3/5] Переменные окружения не трогаю (-NoEnv)' 'Yellow'
 }
 
-# --- 4. Node.js --------------------------------------------------------------
 $node = Get-Command node -ErrorAction SilentlyContinue
 if ($node) {
-    Say "[4/6] Node.js найден: $(& node --version)" 'Green'
-    $ask = Join-Path $dstFull 'mcp\ask-user.mjs'
-    if (Test-Path $ask) {
-        $check = & node $ask --selftest 2>&1
-        if ($LASTEXITCODE -eq 0) { Say "      Форма вопросов: $check" 'Green' }
-        else { Say "      Форма вопросов не запускается: $check" 'Red' }
-    }
-    # ask_user, поиск по выгрузке и BSL LS — обычными расширениями goose (видны в «Расширениях»)
-    $reg = Join-Path $dstFull 'mcp\register-extensions.mjs'
+    Say "[4/5] Node.js найден: $(& node --version)" 'Green'
+    $reg = Join-Path $repoDir 'mcp\register-opencode-mcp.mjs'
     if (Test-Path $reg) {
         $out = & node $reg 2>&1
         if ($LASTEXITCODE -eq 0) { Say "      $out" 'Green' }
-        else { Say "      Не удалось зарегистрировать расширения: $out" 'Red' }
+        else { Say "      Не удалось обновить opencode.json: $out" 'Red' }
     }
 } else {
-    Say '[4/6] Node.js не найден. Он нужен для формы вопросов (ask_user), работы через браузер' 'Yellow'
-    Say '      (web-test) и защиты типовых конфигураций. Скачайте LTS-версию: https://nodejs.org' 'Yellow'
+    Say '[4/5] Node.js не найден. MCP-серверы 1c-ask/1c-search/1c-bsl не зарегистрированы.' 'Yellow'
+    Say '      Установите Node.js 18+ и выполните: node mcp\register-opencode-mcp.mjs' 'Yellow'
 }
 
-# --- 5. BSL Language Server -----------------------------------------------------
-$bslDir = Join-Path $env:USERPROFILE '.agents\tools\bsl-language-server'
+$bslDir = Join-Path $env:USERPROFILE '.config\opencode\tools\bsl-language-server'
 $bslExe = Join-Path $bslDir 'bsl-language-server\bsl-language-server.exe'
 if ($NoBslLs) {
-    Say '[5/6] BSL Language Server: пропущено (-NoBslLs)' 'Yellow'
+    Say '[5/5] BSL Language Server: пропущено (-NoBslLs)' 'Yellow'
 } elseif ((Test-Path $bslExe) -and -not $UpdateBslLs) {
-    Say "[5/6] BSL Language Server уже установлен: $bslExe" 'Green'
+    Say "[5/5] BSL Language Server уже установлен: $bslExe" 'Green'
 } else {
-    Say '[5/6] Скачиваю BSL Language Server (около 170 МБ, один раз)...' 'Gray'
+    Say '[5/5] Скачиваю BSL Language Server (около 170 МБ, один раз)...' 'Gray'
     $zip = Join-Path $env:TEMP 'bsl-language-server_win.zip'
     try {
         [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
@@ -135,23 +108,12 @@ if ($NoBslLs) {
         else { Say "      Архив распакован, но $bslExe не найден" 'Red' }
     } catch {
         Say "      Не удалось скачать BSL Language Server: $($_.Exception.Message)" 'Yellow'
-        Say '      Навыки работают и без него, кроме проверки кода (bsl-check). Повторите установку позже.' 'Yellow'
+        Say '      Навыки работают и без него, кроме проверки кода (bsl-check).' 'Yellow'
     }
-}
-
-# --- 6. Рецепты ------------------------------------------------------------------
-$recipesSrc = Join-Path $dstFull 'goose\recipes'
-$recipesDst = Join-Path $env:USERPROFILE '.agents\recipes'
-if (Test-Path $recipesSrc) {
-    New-Item -ItemType Directory -Path $recipesDst -Force | Out-Null
-    $list = Get-ChildItem -LiteralPath $recipesSrc -Filter '*.yaml'
-    $list | Copy-Item -Destination $recipesDst -Force
-    Say "[6/6] Рецепты этапов работы ($($list.Count)): $recipesDst" 'Green'
 }
 
 Say ''
 Say 'Готово.' 'Cyan'
-Say 'Полностью закройте goose (и в области уведомлений) и запустите снова, чтобы он увидел настройки.'
-Say 'В goose: «Навыки» в меню слева — там должны появиться навыки 1С (epf-init, meta-info и др.),'
-Say '«Рецепты» — четыре рецепта «1С: …» (анализ, доработка, загрузка в базу, проверка в браузере).'
-if (-not $bash -or -not $node) { exit 2 }
+Say 'Перезапустите OpenCode, чтобы он перечитал глобальные skills и opencode.json.'
+Say 'Навыки лежат в %USERPROFILE%\.config\opencode\skills, MCP — в %USERPROFILE%\.config\opencode\opencode.json.'
+if (-not $node) { exit 2 }

@@ -6,7 +6,7 @@ argument-hint: <ObjectPath> <FormName> [-Purpose <Purpose>] [-Synonym <Synonym>]
 
 # /form-add — Добавление формы к объекту конфигурации
 
-> **goose:** `{SKILL_DIR}` в командах — каталог этого навыка: подставь абсолютный путь из строки `Skill directory:` (раздел Supporting Files в конце). Команды запускай из корня проекта. Если `powershell.exe` недоступен (Linux/macOS), запусти одноимённый `.py`-скрипт через `python` (или `python3`) с теми же параметрами.
+> **OpenCode:** `{SKILL_DIR}` в командах — каталог текущего навыка. Подставь абсолютный путь к каталогу навыка, если среда не делает это автоматически. Команды запускай из корня проекта. Если `powershell.exe` недоступен (Linux/macOS), запусти одноимённый `.py`-скрипт через `python` (или `python3`) с теми же параметрами.
 
 Создаёт управляемую форму (metadata XML + Form.xml + Module.bsl) и регистрирует её в корневом XML объекта конфигурации (Document, Catalog, InformationRegister и др.).
 

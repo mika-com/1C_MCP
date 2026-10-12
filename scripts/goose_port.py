@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-# goose_port.py v2.0 — Порт навыков 1С (cc-1c-skills) под AI-агент goose
+# goose_port.py v2.0 — legacy-порт навыков 1С (cc-1c-skills) под AI-агент goose
 # Upstream: https://github.com/Nikolay-Shirokov/cc-1c-skills (MIT)
 """
-Сборка и установка навыков 1С для goose (https://github.com/block/goose).
+Legacy-сборка и установка навыков 1С для goose (https://github.com/block/goose).
 
 Репозиторий — плагин goose (Open Plugins): plugin.json, skills/, hooks/hooks.json.
 Основной способ установки — `goose plugin install https://github.com/mika-com/1C_MCP_GOOSE`.
