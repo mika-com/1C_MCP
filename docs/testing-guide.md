@@ -65,4 +65,4 @@ JUnit для web-test собирается из Allure того же прого�
 
 - Ничего из этого не прогонялось на живой базе 1С — проверены только скрипты (preflight, allure-to-junit) и установка.
 - `web-publish` работает только на Windows (Apache + `wsap24.dll`).
-- CI-сценария пока нет; `.github/workflows/upstream-sync.yml` ещё не обновлён (см. README).
+- CI-сценария для тестов пока нет (есть только `upstream-sync` для пересборки навыков).

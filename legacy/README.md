@@ -14,6 +14,3 @@
 | `scripts/analyze_session.py`, `install-windows.ps1` | анализ сеансов goose, установщик Windows | — |
 
 Тест хука: `node legacy/hooks/test/run.mjs`.
-
-`.github/workflows/upstream-sync.yml` всё ещё ссылается на `scripts/goose_port.py` и `plugin.json` — см. предупреждение
-в [README](../README.md#обновление-из-upstream).

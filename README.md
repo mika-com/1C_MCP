@@ -108,12 +108,10 @@ python scripts/opencode_port.py build --upstream ../cc-1c-skills
 [`UPSTREAM`](UPSTREAM) хранит коммит сборки (сейчас cc-1c-skills `b102d9d`). Свои навыки берутся из `own-skills/`,
 адаптация под OpenCode — в `scripts/port_core.py`.
 
-> ⚠️ **GitHub Action `upstream-sync` в этой ветке сломан.** [`.github/workflows/upstream-sync.yml`](.github/workflows/upstream-sync.yml)
-> ещё вызывает удалённый `scripts/goose_port.py` и поднимает версию в `plugin.json` (перенесён в `legacy/goose/`).
-> Исправление готово, но не отправлено: токену `gh` нужно право `workflow` (`gh auth refresh -s workflow`). До
-> исправления не сливайте ветку в ветку по умолчанию перед еженедельным запуском (понедельник, 05:17 UTC) или
-> отключите workflow. Нужные правки: `python scripts/opencode_port.py build` вместо `goose_port.py build`, убрать шаг
-> «Версия плагина +1» и `plugin.json` из `git add`.
+GitHub Action [`upstream-sync`](.github/workflows/upstream-sync.yml) раз в неделю (понедельник, 05:17 UTC) или вручную
+выполняет `python scripts/opencode_port.py build` и, если `skills/` или `UPSTREAM` изменились, открывает PR из ветки
+`auto/upstream-sync`. Для создания PR включите в настройках репозитория «Allow GitHub Actions to create and approve
+pull requests».
 
 ## Лицензия
 
