@@ -4,9 +4,9 @@
 
 - **84 навыка**: 81 из [cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills) (конфигурации, расширения,
   EPF/ERF, формы, СКД, макеты, роли, XDTO, базы, веб-публикация, web-test) + свои `bsl-check`, `vrunner` и `1c-test` (стратегия тестирования, preflight, шаблоны Vanessa);
-- **агенты**: основной `1c` и субагенты по этапам `1c-analyst` → `1c-developer` → `1c-deployer` → `1c-tester`,
+- **6 агентов**: основной `1c` и субагенты по этапам `1c-analyst` → `1c-developer` → `1c-deployer` → `1c-tester`,
   плюс `1c-test-author` (пишет регресс web-test и BDD-сценарии);
-- **команды**: `/1c-analyze`, `/1c-implement`, `/1c-deploy`, `/1c-webtest`, `/1c-bdd`, `/1c-check`;
+- **6 команд**: `/1c-analyze`, `/1c-implement`, `/1c-deploy`, `/1c-webtest`, `/1c-bdd`, `/1c-check`;
 - **MCP-серверы**: `1c-search` (поиск по XML-выгрузке), `1c-bsl` (BSL Language Server),
   `vrunner` ([vanessa-runner 3.x](https://github.com/vanessa-opensource/vanessa-runner), `vrunner-mcp`, по умолчанию выключен).
 
@@ -55,8 +55,25 @@ python scripts/opencode_port.py install --project-dir /путь/к/1С-прое�
 | BDD (Vanessa Automation) | `/1c-bdd <сценарий>` — `features/*.feature` на русском Gherkin, запуск через `vrunner run enterprise` с `tools/vanessa/VAParams.json` | `build/reports/va/` |
 | Модульные тесты | YAxUnit: `vrunner test yaxunit` | `build/reports/yaxunit.xml` |
 
-Как выбрать инструмент — навык [`1c-test`](own-skills/1c-test/SKILL.md). Права: `1c-tester` пишет только в `tests/**` и
+Как выбрать инструмент — навык [`1c-test`](own-skills/1c-test/SKILL.md) и [docs/testing-guide.md](docs/testing-guide.md).
+
+> **Vanessa Automation ≠ Vanessa-ADD.** `vrunner test vanessa` в vanessa-runner 3.x запускает Vanessa-ADD
+> (`bddRunner.epf`, VBParams). Vanessa Automation (`vanessa-automation.epf`, VAParams) запускается через
+> `vrunner run enterprise`, а результат читается из `build/reports/va/status.log` и `junit/`. Файл
+> `vanessa-automation.epf` скачивается отдельно в `tools/vanessa/`.
+ Права: `1c-tester` пишет только в `tests/**` и
 `build/reports/**`, `1c-test-author` — в `tests/**`, `features/**`, `tools/vanessa/**`, `build/reports/**`.
+
+## MCP-серверы
+
+| Сервер | Что даёт | По умолчанию |
+|--------|----------|--------------|
+| `1c-search` | `find_object`, `find_method`, `module_methods`, `find_usages`, `search_code`, `index_status` | включён |
+| `1c-bsl` | BSL LS в режиме MCP (`analyze_file`, `document_symbols`, …); без BSL LS — заглушка с подсказкой | включён |
+| `vrunner` | команды vanessa-runner 3.x (`vrunner-mcp`) | `disabled: true`, включить: `node mcp/register-opencode-mcp.mjs --vrunner` |
+
+Формат OpenCode v2: `mcp.servers`, `disabled`, таймауты в миллисекундах (`startup` 10 с / 30 с для BSL LS).
+Уточняющие вопросы агент задаёт встроенным инструментом `question` (сервер `1c-ask` перенесён в `legacy/`).
 
 ## Структура
 
@@ -70,7 +87,7 @@ python scripts/opencode_port.py install --project-dir /путь/к/1С-прое�
 | `opencode.json` | конфиг v2 для работы в самом репозитории (`skills`, `mcp.servers`, `default_agent`) |
 | `templates/AGENTS.md` | шаблон инструкций для 1С-проекта |
 | `scripts/opencode_port.py` | сборка из upstream и установка; ядро — `scripts/port_core.py` |
-| `docs/` | гайды и спецификации форматов 1С |
+| `docs/` | гайды и спецификации форматов 1С; [quickstart](docs/quickstart.md), [тестирование](docs/testing-guide.md) |
 | `legacy/` | артефакты старого goose-порта (не используются, см. [legacy/README.md](legacy/README.md)) |
 
 ## Обновление из upstream
@@ -80,7 +97,15 @@ python scripts/opencode_port.py build                         # git clone cc-1c-
 python scripts/opencode_port.py build --upstream ../cc-1c-skills
 ```
 
-[`UPSTREAM`](UPSTREAM) хранит коммит сборки. GitHub Action `upstream-sync` делает это раз в неделю и открывает PR.
+[`UPSTREAM`](UPSTREAM) хранит коммит сборки (сейчас cc-1c-skills `b102d9d`). Свои навыки берутся из `own-skills/`,
+адаптация под OpenCode — в `scripts/port_core.py`.
+
+> ⚠️ **GitHub Action `upstream-sync` в этой ветке сломан.** [`.github/workflows/upstream-sync.yml`](.github/workflows/upstream-sync.yml)
+> ещё вызывает удалённый `scripts/goose_port.py` и поднимает версию в `plugin.json` (перенесён в `legacy/goose/`).
+> Исправление готово, но не отправлено: токену `gh` нужно право `workflow` (`gh auth refresh -s workflow`). До
+> исправления не сливайте ветку в ветку по умолчанию перед еженедельным запуском (понедельник, 05:17 UTC) или
+> отключите workflow. Нужные правки: `python scripts/opencode_port.py build` вместо `goose_port.py build`, убрать шаг
+> «Версия плагина +1» и `plugin.json` из `git add`.
 
 ## Лицензия
 

@@ -150,7 +150,7 @@ export function bslVersion(found) {
 }
 
 export const INSTALL_HINT =
-  'BSL Language Server не установлен. Установите его один раз: запустите install-windows.cmd из папки плагина ' +
-  `или выполните \`node "${join(dirname(fileURLToPath(import.meta.url)), 'bsl-check.mjs')}" -Install\` ` +
+  'BSL Language Server не установлен. Установите его один раз: ' +
+  `выполните \`node "${join(dirname(fileURLToPath(import.meta.url)), 'bsl-check.mjs')}" -Install\` ` +
   `(около 170 МБ, ставится в ${TOOLS_DIR}; также поддерживается legacy-путь ${LEGACY_TOOLS_DIR}). ` +
   'Свой BSL LS можно указать переменной BSL_LS_PATH.';

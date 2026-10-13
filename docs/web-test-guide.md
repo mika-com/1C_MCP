@@ -13,6 +13,24 @@
 - База опубликована через Apache (`/web-publish`)
 - Node.js 18+ установлен
 - Зависимости и браузер установлены: `npm install --prefix "$HOME/.config/opencode" --no-fund --no-audit "playwright@^1.50.0" && npx --prefix "$HOME/.config/opencode" playwright install chromium`
+  (при установке в проект — `--prefix .opencode`)
+- На Linux нужен графический дисплей: web-test работает только с видимым браузером; без `DISPLAY` — `xvfb-run -a`
+
+Всё это проверяет preflight навыка `1c-test` (команда `/1c-webtest` запускает его сама):
+
+```bash
+node .opencode/skills/1c-test/scripts/preflight.mjs [id-базы|URL]
+```
+
+## В OpenCode
+
+- `/1c-webtest <что проверить>` — субагент `1c-tester`: preflight → сценарий → отчёт. Пишет только в `tests/**`
+  и `build/reports/**`.
+- Регрессионные наборы (`tests/web/`) пишет субагент `1c-test-author` по `regress.md` навыка `web-test`.
+- Отчёты — в `build/reports/web/`: `test ... --format=allure --report-dir=build/reports/web/allure`, JUnit —
+  `node .opencode/skills/1c-test/scripts/allure-to-junit.mjs build/reports/web/allure build/reports/web/junit.xml`.
+  Скриншот ошибки `exec`/`run` — `$TMPDIR/web-test-error-shot.png` (путь в ответе), его копируют в `build/reports/web/`.
+- Общая стратегия (web-test, Vanessa Automation, YAxUnit) — [testing-guide.md](testing-guide.md).
 
 ## Рабочий цикл
 

@@ -35,7 +35,7 @@ python scripts/opencode_port.py install --global
 ```
 
 Установщик:
-- копирует навыки в `<проект>/.opencode/skills/` (глобально — `~/.config/opencode/skills/`);
+- копирует 84 навыка в `<проект>/.opencode/skills/` (глобально — `~/.config/opencode/skills/`);
 - копирует агентов (`1c`, `1c-analyst`, `1c-developer`, `1c-deployer`, `1c-tester`, `1c-test-author`) в
   `.opencode/agents/` и команды `/1c-analyze`, `/1c-implement`, `/1c-deploy`, `/1c-webtest`, `/1c-bdd`, `/1c-check`
   в `.opencode/commands/`;
@@ -127,11 +127,17 @@ npx --prefix "$HOME/.config/opencode" playwright install chromium
 (команда `/1c-webtest` делает это сама). На Linux без графической сессии web-test запускается через `xvfb-run -a`.
 Отчёты и скриншоты — в `build/reports/web/`.
 
+## Тестирование
+
+См. [testing-guide.md](testing-guide.md): `/1c-webtest` (web-test с preflight), `/1c-bdd` (Vanessa Automation),
+YAxUnit через vrunner. Отчёты — в `build/reports/`.
+
 ## Что проверять после установки
 
 - агент видит навыки вроде `epf-init`, `meta-info`, `form-edit`, `bsl-check`;
 - в `~/.config/opencode/opencode.json` в `mcp.servers` появились `1c-search`, `1c-bsl`, `vrunner`;
-- в списке агентов есть `1c`;
+- в списке агентов есть `1c` и субагенты `1c-analyst`, `1c-developer`, `1c-deployer`, `1c-tester`, `1c-test-author`;
+- в списке команд есть `/1c-analyze`, `/1c-implement`, `/1c-deploy`, `/1c-webtest`, `/1c-bdd`, `/1c-check`;
 - в корне проекта корректный `.v8-project.json`, если вы работаете с базой;
 - `Node.js` доступен из PATH;
 - `Python` запускает `scripts/opencode_port.py`.
