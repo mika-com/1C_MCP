@@ -6,7 +6,11 @@ import { fileURLToPath } from 'url';
 import { die } from './util.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-export const SESSION_FILE = resolve(__dirname, '..', '..', '.browser-session.json');
+import { tmpdir as __wtTmp, userInfo as __wtUser } from 'os';
+import { createHash as __wtHash } from 'crypto';
+// OpenCode: файл сеанса — у каждого пользователя и каталога навыка свой (несколько сеансов RDP)
+const __wtName = (() => { try { return __wtUser().username; } catch { return 'user'; } })().replace(/[^\w.-]/g, '_');
+export const SESSION_FILE = resolve(process.env.WEB_TEST_SESSION_DIR || __wtTmp(), `web-test-session-${__wtName}-${__wtHash('sha1').update(resolve(__dirname)).digest('hex').slice(0, 10)}.json`);
 
 export function loadSession() {
   if (!existsSync(SESSION_FILE)) {

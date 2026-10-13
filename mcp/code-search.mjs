@@ -7,7 +7,7 @@
 
 import { readdirSync, readFileSync, statSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, relative, sep, resolve, basename } from 'node:path';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { startServer } from './lib/stdio-server.mjs';
@@ -200,9 +200,16 @@ function listBsl(dir, acc = []) {
   return acc;
 }
 
+// Кэш — свой у каждого пользователя (на Linux /tmp общий; на Windows %TEMP% и так у каждого свой).
+function cacheDir() {
+  let user = 'user';
+  try { user = userInfo().username.replace(/[^\w.-]/g, '_'); } catch { /* */ }
+  return join(tmpdir(), `opencode-1c-search-${user}`);
+}
+
 function cacheFile(root) {
   const h = createHash('sha1').update(resolve(root)).digest('hex').slice(0, 16);
-  return join(tmpdir(), 'opencode-1c-search', `${h}.json`);
+  return join(cacheDir(), `${h}.json`);
 }
 
 const indexes = new Map();   // root → { built, configs, objects, modules }
@@ -264,7 +271,7 @@ export function buildIndex(root, { force = false } = {}) {
   indexes.set(root, idx);
   if (parsed) {
     try {
-      mkdirSync(join(tmpdir(), 'opencode-1c-search'), { recursive: true });
+      mkdirSync(cacheDir(), { recursive: true });
       writeFileSync(cf, JSON.stringify({ version: INDEX_VERSION, files }));
     } catch { /* кэш необязателен */ }
   }

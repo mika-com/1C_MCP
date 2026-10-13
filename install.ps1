@@ -21,6 +21,19 @@
     powershell -ExecutionPolicy Bypass -File .\install.ps1 -Project D:\1c\my-config -WithVrunner
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File install.ps1 -Uninstall
+.EXAMPLE
+    # Сервер с несколькими пользователями (RDP), окно «от имени администратора», один раз:
+    powershell -ExecutionPolicy Bypass -File install.ps1 -Machine -Users 6
+    # затем каждый пользователь в своём сеансе (без прав администратора):
+    powershell -ExecutionPolicy Bypass -File C:\ProgramData\1c-opencode\repo\install.ps1
+
+.NOTES
+    По умолчанию установка ПОЛЬЗОВАТЕЛЬСКАЯ: %USERPROFILE%\.config\opencode, переменные среды пользователя,
+    pip --user, winget --scope user (если пакет его поддерживает), браузеры Playwright в профиле пользователя.
+    -Machine (нужны права администратора) готовит общие инструменты для всех пользователей сервера:
+    Git/Node.js/Python/Java через winget --scope machine, BSL LS, Chromium для Playwright и копию репозитория
+    в C:\ProgramData\1c-opencode (только чтение для пользователей). Навыки и MCP каждый пользователь
+    регистрирует себе сам, запустив install.ps1 из общей копии.
 #>
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Интерактивный установщик: цветной вывод для человека')]
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Внутренние функции установщика')]
@@ -32,7 +45,11 @@ param(
     [switch]$NoBslLs,
     [switch]$WithVrunner,
     [switch]$WithDesktop,
-    [switch]$Uninstall
+    [switch]$Uninstall,
+    # Общие инструменты для всех пользователей сервера (RDP); нужны права администратора
+    [switch]$Machine,
+    # Сколько пользователей одновременно работают на сервере — для расчёта памяти JVM BSL LS
+    [ValidateRange(1, 200)][int]$Users = 0
 )
 
 $ErrorActionPreference = 'Stop'
@@ -46,6 +63,10 @@ $env:PYTHONIOENCODING = 'utf-8'
 
 $script:Warnings = New-Object System.Collections.Generic.List[string]
 $OpenCodeHome = Join-Path $env:USERPROFILE '.config\opencode'
+$SharedRoot = Join-Path $env:ProgramData '1c-opencode'
+$SharedBslLs = Join-Path $SharedRoot 'tools\bsl-language-server'
+$SharedBrowsers = Join-Path $SharedRoot 'ms-playwright'
+$SharedPwVersionFile = Join-Path $SharedRoot 'playwright-version.txt'
 $InstallDir = $PSScriptRoot
 if (-not $InstallDir -or -not (Test-Path -LiteralPath (Join-Path $InstallDir 'scripts\opencode_port.py'))) {
     Write-Host '[ОШИБКА] Запускайте install.ps1 из папки скачанного проекта: powershell -ExecutionPolicy Bypass -File .\install.ps1' -ForegroundColor Red
@@ -79,8 +100,19 @@ function Install-WingetPackage([string]$Id, [string]$Title) {
     if (-not (Test-Command 'winget')) {
         Stop-Install "$Title не найден, а winget недоступен. Установите «Установщик приложений» (App Installer) из Microsoft Store или поставьте $Title вручную и запустите скрипт снова."
     }
-    Write-Info "Устанавливаю $Title через winget ($Id) ..."
-    & winget install --id $Id -e --silent --accept-package-agreements --accept-source-agreements --disable-interactivity | Out-Host
+    $common = @('install', '--id', $Id, '-e', '--silent', '--accept-package-agreements', '--accept-source-agreements', '--disable-interactivity')
+    if ($Machine) {
+        Write-Info "Устанавливаю $Title для всех пользователей (winget --scope machine, $Id) ..."
+        & winget @common --scope machine | Out-Host
+    } else {
+        # Сначала для текущего пользователя; если пакет так не ставится — обычная установка (может спросить UAC)
+        Write-Info "Устанавливаю $Title для текущего пользователя (winget --scope user, $Id) ..."
+        & winget @common --scope user | Out-Host
+        if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
+            Write-Info "Пакет $Id не поддерживает установку для пользователя — ставлю обычным способом (может появиться запрос UAC) ..."
+            & winget @common | Out-Host
+        }
+    }
     # -1978335189: уже установлено, обновлений нет
     if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne -1978335189) {
         Stop-Install "winget не смог установить $Title (код $LASTEXITCODE). Поставьте вручную и запустите скрипт снова."
@@ -122,6 +154,31 @@ function Invoke-Python([string[]]$Arguments) {
     Invoke-Native -File $py[0] -Arguments ($extra + $Arguments) | Out-Null
 }
 
+function Test-Admin {
+    $id = [Security.Principal.WindowsIdentity]::GetCurrent()
+    return ([Security.Principal.WindowsPrincipal]$id).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
+}
+
+function Get-RamGb {
+    try { return [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB) } catch { return 8 }
+}
+
+function Get-SessionCount {
+    # Сеансы пользователей на сервере (RDP + консоль); минимум 1
+    try {
+        $lines = @(& quser 2>$null | Select-Object -Skip 1)
+        if ($lines.Count -gt 0) { return $lines.Count }
+    } catch { Write-Verbose 'quser недоступен' }
+    return 1
+}
+
+function Get-XmxForUser([int]$RamGb, [int]$UserCount) {
+    # Под JVM BSL LS всех пользователей — не больше половины ОЗУ; на одного 1–4 ГБ
+    $per = [math]::Floor(($RamGb / 2) / [math]::Max($UserCount, 1))
+    $per = [math]::Min([math]::Max($per, 1), 4)
+    return "${per}g"
+}
+
 function Get-TargetArgument {
     if ($Project) { return @('--project-dir', $script:ProjectPath) }
     return @('--global')
@@ -134,9 +191,13 @@ if ($Project) {
     if (-not (Test-Path -LiteralPath $Project -PathType Container)) { Stop-Install "Каталог проекта не найден: $Project" }
     $script:ProjectPath = (Resolve-Path -LiteralPath $Project).Path
     Write-Info "Режим: в проект $script:ProjectPath"
+} elseif ($Machine) {
+    Write-Info "Режим: общие инструменты для всех пользователей ($SharedRoot)"
 } else {
-    Write-Info "Режим: глобально ($OpenCodeHome)"
+    Write-Info "Режим: для текущего пользователя ($env:USERNAME, $OpenCodeHome)"
 }
+if ($Machine -and -not (Test-Admin)) { Stop-Install '-Machine требует окна PowerShell «от имени администратора».' }
+if ($Machine -and ($Project -or $Uninstall)) { Stop-Install '-Machine не сочетается с -Project и -Uninstall.' }
 
 # ---------- Удаление ----------
 if ($Uninstall) {
@@ -176,7 +237,8 @@ if (-not $script:PythonCmd) {
 $pyExtra = @($script:PythonCmd | Select-Object -Skip 1)
 Write-Ok ("Python: " + ((& $script:PythonCmd[0] @pyExtra --version) -join ' '))
 
-if (-not $NoBslLs) {
+# Общий BSL LS (после -Machine) несёт свою JRE — Java пользователю не нужна
+if (-not $NoBslLs -and ($Machine -or -not [Environment]::GetEnvironmentVariable('BSL_LS_PATH', 'Machine'))) {
     $javaMajor = Get-JavaMajor
     if ($javaMajor -ge 17) { Write-Ok "Java $javaMajor" }
     else {
@@ -191,6 +253,68 @@ if ($WithDesktop) {
     $desktop = Join-Path $env:LOCALAPPDATA 'OpenCode'
     if (Test-Path -LiteralPath $desktop) { Write-Ok "OpenCode Desktop уже установлен ($desktop)" }
     else { Install-WingetPackage 'SST.OpenCodeDesktop' 'OpenCode Desktop' }
+}
+
+# ---------- Общая установка (-Machine) ----------
+if ($Machine) {
+    Write-Step "Общая копия репозитория: $SharedRoot\repo"
+    $sharedRepo = Join-Path $SharedRoot 'repo'
+    New-Item -ItemType Directory -Force -Path $SharedRoot | Out-Null
+    if ([IO.Path]::GetFullPath($InstallDir).TrimEnd('\') -ine [IO.Path]::GetFullPath($sharedRepo).TrimEnd('\')) {
+        & robocopy.exe $InstallDir $sharedRepo /MIR /NFL /NDL /NJH /NJS /NP /XD node_modules __pycache__ .git | Out-Null
+        if ($LASTEXITCODE -ge 8) { Stop-Install "robocopy не смог скопировать репозиторий (код $LASTEXITCODE)" }
+    }
+    try {
+        Get-ChildItem -LiteralPath $sharedRepo -Recurse -File -Include '*.ps1', '*.psm1', '*.cmd' -ErrorAction SilentlyContinue |
+            Unblock-File -ErrorAction SilentlyContinue
+    } catch { Write-Verbose 'Unblock-File недоступен' }
+    # Только чтение для пользователей; полный доступ — администраторам и SYSTEM (SID, не зависят от языка Windows)
+    & icacls.exe $SharedRoot /inheritance:r /grant:r '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /T /C /Q | Out-Null
+    Write-Ok "Скопирован, права: пользователи — чтение, администраторы — полный доступ"
+
+    if (-not $NoBslLs) {
+        Write-Step "BSL Language Server для всех: $SharedBslLs"
+        $exe = Join-Path $SharedBslLs 'bsl-language-server\bsl-language-server.exe'
+        if (Test-Path -LiteralPath $exe) { Write-Ok "Уже установлен: $exe" }
+        else {
+            $zip = Join-Path $env:TEMP "bsl-ls-$PID.zip"
+            Write-Info 'Скачиваю bsl-language-server_win.zip (~170 МБ) ...'
+            Invoke-WebRequest -UseBasicParsing -Uri 'https://github.com/1c-syntax/bsl-language-server/releases/latest/download/bsl-language-server_win.zip' -OutFile $zip
+            New-Item -ItemType Directory -Force -Path $SharedBslLs | Out-Null
+            Expand-Archive -LiteralPath $zip -DestinationPath $SharedBslLs -Force
+            Remove-Item -LiteralPath $zip -Force -ErrorAction SilentlyContinue
+            Write-Ok "Установлен: $SharedBslLs"
+        }
+        [Environment]::SetEnvironmentVariable('BSL_LS_PATH', $SharedBslLs, 'Machine')
+        $userCount = if ($Users -gt 0) { $Users } else { [math]::Max((Get-SessionCount), 2) }
+        $xmx = Get-XmxForUser (Get-RamGb) $userCount
+        [Environment]::SetEnvironmentVariable('BSL_LS_XMX', $xmx, 'Machine')
+        Write-Ok "BSL_LS_PATH и BSL_LS_XMX=$xmx (ОЗУ ~$(Get-RamGb) ГБ на $userCount польз.) — переменные машины"
+    }
+
+    if (-not $NoBrowser) {
+        Write-Step "Chromium для Playwright для всех: $SharedBrowsers"
+        $pwPrefix = Join-Path $SharedRoot 'node'
+        $env:PLAYWRIGHT_BROWSERS_PATH = $SharedBrowsers
+        $code = Invoke-Native -File 'npm' -Arguments @('install', '--prefix', $pwPrefix, '--no-fund', '--no-audit', '--loglevel=error', 'playwright@^1.50.0') -AllowFail
+        if ($code -eq 0) { $code = Invoke-Native -File 'npx' -Arguments @('--prefix', $pwPrefix, 'playwright', 'install', 'chromium') -AllowFail }
+        if ($code -eq 0) {
+            $pwVer = (& node -p "require(process.argv[1]).version" (Join-Path $pwPrefix 'node_modules\playwright\package.json'))
+            Set-Content -LiteralPath $SharedPwVersionFile -Value $pwVer -Encoding ASCII
+            [Environment]::SetEnvironmentVariable('PLAYWRIGHT_BROWSERS_PATH', $SharedBrowsers, 'Machine')
+            & icacls.exe $SharedRoot /grant:r '*S-1-5-32-545:(OI)(CI)RX' /T /C /Q | Out-Null
+            Write-Ok "Chromium для Playwright $pwVer; PLAYWRIGHT_BROWSERS_PATH — переменная машины"
+        } else { Write-Warn 'Playwright/Chromium для всех не установлены — пользователи поставят себе сами.' }
+    }
+
+    Write-Host ''
+    Write-Host '=== Общая установка готова ===' -ForegroundColor Green
+    Write-Info 'Каждый пользователь в СВОЁМ сеансе (без прав администратора) выполняет один раз:'
+    Write-Host "    powershell -ExecutionPolicy Bypass -File `"$sharedRepo\install.ps1`"" -ForegroundColor Cyan
+    Write-Info "Не переносите и не удаляйте $SharedRoot — MCP-серверы пользователей запускаются оттуда."
+    Write-Info 'Обновление: новая версия в исходную папку и повторный запуск с -Machine (пользователям — повторить свою установку).'
+    if ($script:Warnings.Count -gt 0) { foreach ($w in $script:Warnings) { Write-Host "  - $w" -ForegroundColor Yellow } }
+    return
 }
 
 # ---------- 2. Папка проекта ----------
@@ -231,7 +355,9 @@ else {
     $bslDir = Join-Path $OpenCodeHome 'tools\bsl-language-server'
     $found = @(Get-ChildItem -LiteralPath $bslDir -Recurse -Depth 2 -ErrorAction SilentlyContinue |
         Where-Object { $_.Name -eq 'bsl-language-server.exe' -or $_.Name -like 'bsl-language-server*.jar' })
-    if ($env:BSL_LS_PATH) { Write-Ok "Используется BSL_LS_PATH = $env:BSL_LS_PATH" }
+    $machineBsl = [Environment]::GetEnvironmentVariable('BSL_LS_PATH', 'Machine')
+    if ($machineBsl -and -not $env:BSL_LS_PATH) { $env:BSL_LS_PATH = $machineBsl }
+    if ($env:BSL_LS_PATH) { Write-Ok "Используется общий/заданный BSL LS: BSL_LS_PATH = $env:BSL_LS_PATH" }
     elseif ($found.Count -gt 0) { Write-Ok "Уже установлен: $($found[0].FullName) (обновить: node `"$InstallDir\own-skills\bsl-check\scripts\bsl-check.mjs`" -Install)" }
     else {
         $code = Invoke-Native -File 'node' -Arguments @((Join-Path $InstallDir 'own-skills\bsl-check\scripts\bsl-check.mjs'), '-Install') -AllowFail
@@ -241,13 +367,14 @@ else {
 
 if (-not $NoBslLs) {
     # Память JVM для больших конфигураций (BSL LS), если пользователь не задал сам
+    # Учитываем, что на сервере могут работать несколько пользователей (RDP): ОЗУ/2 делится на число сеансов
     if (-not [Environment]::GetEnvironmentVariable('BSL_LS_XMX', 'User') -and -not $env:BSL_LS_XMX) {
-        $ramGb = 8
-        try { $ramGb = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB) } catch { Write-Verbose 'ОЗУ не определено' }
-        $xmx = if ($ramGb -ge 32) { '6g' } elseif ($ramGb -ge 16) { '4g' } else { '2g' }
+        $ramGb = Get-RamGb
+        $userCount = if ($Users -gt 0) { $Users } else { Get-SessionCount }
+        $xmx = Get-XmxForUser $ramGb $userCount
         [Environment]::SetEnvironmentVariable('BSL_LS_XMX', $xmx, 'User')
-        Write-Ok "BSL_LS_XMX=$xmx (ОЗУ ~$ramGb ГБ; переменная пользователя, действует в новых сеансах OpenCode)"
-    }
+        Write-Ok "BSL_LS_XMX=$xmx (ОЗУ ~$ramGb ГБ, сеансов $userCount; переменная пользователя, действует в новых сеансах OpenCode)"
+    } else { Write-Ok "BSL_LS_XMX уже задана: $([Environment]::GetEnvironmentVariable('BSL_LS_XMX', 'User'))$env:BSL_LS_XMX" }
     Write-Info 'Зависшие процессы BSL LS: powershell -ExecutionPolicy Bypass -File scripts\kill-bsl-ls.ps1'
 }
 
@@ -256,11 +383,25 @@ Write-Step '6/6 Playwright и Chromium для web-test'
 if ($NoBrowser) { Write-Info 'Пропущено (-NoBrowser).' }
 else {
     $prefix = if ($Project) { Join-Path $script:ProjectPath '.opencode' } else { $OpenCodeHome }
-    $code = Invoke-Native -File 'npm' -Arguments @('install', '--prefix', $prefix, '--no-fund', '--no-audit', '--loglevel=error', 'playwright@^1.50.0') -AllowFail
-    if ($code -eq 0) {
+    # Общий Chromium (после install.ps1 -Machine): ставим ту же версию Playwright и браузер не качаем
+    $pwSpec = 'playwright@^1.50.0'
+    $sharedPw = [Environment]::GetEnvironmentVariable('PLAYWRIGHT_BROWSERS_PATH', 'Machine')
+    $useShared = $sharedPw -and (Test-Path -LiteralPath $SharedPwVersionFile) -and
+        -not [Environment]::GetEnvironmentVariable('PLAYWRIGHT_BROWSERS_PATH', 'User')
+    if ($useShared) { $pwSpec = "playwright@$((Get-Content -LiteralPath $SharedPwVersionFile -TotalCount 1).Trim())" }
+    $code = Invoke-Native -File 'npm' -Arguments @('install', '--prefix', $prefix, '--no-fund', '--no-audit', '--loglevel=error', $pwSpec) -AllowFail
+    if ($code -eq 0 -and $useShared) {
+        Write-Ok "Общий Chromium: $sharedPw ($pwSpec)"
+    } elseif ($code -eq 0) {
+        # Браузеры — в профиль пользователя (%LOCALAPPDATA%\ms-playwright), общий каталог не трогаем
+        if ($sharedPw) {
+            $own = Join-Path $env:LOCALAPPDATA 'ms-playwright'
+            [Environment]::SetEnvironmentVariable('PLAYWRIGHT_BROWSERS_PATH', $own, 'User')
+            $env:PLAYWRIGHT_BROWSERS_PATH = $own
+        }
         $code = Invoke-Native -File 'npx' -Arguments @('--prefix', $prefix, 'playwright', 'install', 'chromium') -AllowFail
     }
-    if ($code -eq 0) { Write-Ok "Playwright в $prefix\node_modules, Chromium скачан." }
+    if ($code -eq 0) { Write-Ok "Playwright в $prefix\node_modules, Chromium готов." }
     else { Write-Warn "Playwright/Chromium не установлены. Повторите: npm install --prefix `"$prefix`" playwright@^1.50.0; npx --prefix `"$prefix`" playwright install chromium" }
 }
 

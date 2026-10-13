@@ -182,7 +182,7 @@ def main():
     parser.add_argument('-Password', type=str, default='', help='1C password')
     parser.add_argument('-AppName', type=str, default='', help='Publication name (default: from infobase folder name)')
     parser.add_argument('-ApachePath', type=str, default='', help='Apache root (default: tools\\apache24)')
-    parser.add_argument('-Port', type=int, default=8081, help='Port (default: 8081)')
+    parser.add_argument('-Port', type=int, default=0, help='Port (default: first free from 8081)')
     parser.add_argument('-Manual', action='store_true', help='Do not download Apache — only check and give instructions')
     args = ci_parse_args(parser)
 
@@ -228,6 +228,18 @@ def main():
         apache_path = os.path.abspath(apache_path)
 
     port = args.Port
+    if not port:
+        # OpenCode: несколько пользователей на одном сервере — ищем свободный порт от 8081
+        _exe = os.path.normcase(os.path.normpath(os.path.join(apache_path, 'bin', 'httpd.exe')))
+        _ours = {p.pid for p in get_our_httpd(_exe)}
+        port = 8081
+        while port < 8181:
+            _holder = check_port_in_use(port)
+            if _holder is None or _holder in _ours:
+                break
+            port += 1
+        if port != 8081:
+            print(f'Порт 8081 занят (другой пользователь/сеанс?) — использую {port}')
 
     # --- Check / Install Apache ---
     httpd_exe = os.path.join(apache_path, 'bin', 'httpd.exe')

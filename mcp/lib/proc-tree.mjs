@@ -6,6 +6,7 @@
 
 import { spawn, spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { userInfo } from 'node:os';
 
 const IS_WIN = process.platform === 'win32';
 
@@ -29,7 +30,53 @@ export function processCommandLine(pid) {
   } catch { return ''; }
 }
 
+// Владелец и сеанс процесса. Windows: Win32_Process.GetOwner + SessionId; POSIX: uid.
+// Возвращает { user, sessionId, uid } или null (процесса нет / нет доступа).
+export function processOwner(pid) {
+  try {
+    if (IS_WIN) {
+      const ps = `$p = Get-CimInstance Win32_Process -Filter "ProcessId=${Number(pid)}"; if ($p) { ` +
+        '$o = Invoke-CimMethod -InputObject $p -MethodName GetOwner; ' +
+        '"$($o.Domain)\\$($o.User)`t$($p.SessionId)" }';
+      const r = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', ps],
+        { encoding: 'utf8', windowsHide: true, timeout: 20000 });
+      const [user, sid] = (r.stdout || '').trim().split('\t');
+      if (!user || user === '\\') return null;
+      return { user: user.toLowerCase(), sessionId: Number(sid) };
+    }
+    if (process.platform === 'linux') {
+      const m = readFileSync(`/proc/${Number(pid)}/status`, 'utf8').match(/^Uid:\s+(\d+)/m);
+      return m ? { uid: Number(m[1]) } : null;
+    }
+    const r = spawnSync('ps', ['-o', 'uid=', '-p', String(pid)], { encoding: 'utf8' });
+    const uid = Number((r.stdout || '').trim());
+    return Number.isFinite(uid) && (r.stdout || '').trim() ? { uid } : null;
+  } catch { return null; }
+}
+
+let selfOwner;
+export function currentOwner() {
+  if (selfOwner !== undefined) return selfOwner;
+  if (IS_WIN) {
+    selfOwner = processOwner(process.pid) || {
+      user: `${process.env.USERDOMAIN || ''}\\${process.env.USERNAME || userInfo().username}`.toLowerCase(), sessionId: NaN,
+    };
+  } else {
+    selfOwner = { uid: process.getuid() };
+  }
+  return selfOwner;
+}
+
+// Процесс принадлежит текущему пользователю И текущему сеансу (RDP)? Только такие процессы можно гасить.
+export function isOwnProcess(pid, { owner = processOwner, me = currentOwner() } = {}) {
+  const o = owner(pid);
+  if (!o) return false;
+  if (IS_WIN) return o.user === me.user && o.sessionId === me.sessionId;
+  return o.uid === me.uid;
+}
+
 // Синхронно убить дерево процессов с корнем pid (без ожиданий, годится для обработчика exit).
+// Вызывающий отвечает за то, что pid — свой (isOwnProcess); для собственного ребёнка это верно по построению.
 export function killTree(pid, { graceMs = 0 } = {}) {
   if (!pid) return;
   if (IS_WIN) {

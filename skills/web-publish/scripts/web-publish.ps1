@@ -76,7 +76,7 @@ param(
     [string]$ApachePath,
 
     [Parameter(Mandatory=$false)]
-    [int]$Port = 8081,
+    [int]$Port = 0,  # OpenCode: 0 — первый свободный от 8081
 
     [Parameter(Mandatory=$false)]
     [switch]$Manual
@@ -360,6 +360,19 @@ if ($confContent -match $globalPattern) {
     }
 }
 if ($listenHosts.Count -eq 0) { $listenHosts = @("") }
+# OpenCode: несколько пользователей на одном сервере — порт по умолчанию ищем свободный от 8081
+if ($Port -eq 0) {
+    $ourExe = (Resolve-Path $httpdExe -ErrorAction SilentlyContinue).Path
+    $Port = 8081
+    while ($Port -lt 8181) {
+        $c = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $c) { break }
+        $holder = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue
+        if ($ourExe -and $holder -and $holder.Path -eq $ourExe) { break }
+        $Port++
+    }
+    if ($Port -ne 8081) { Write-Host "Порт 8081 занят (другой пользователь/сеанс?) — использую $Port" -ForegroundColor Yellow }
+}
 $listenLines = ($listenHosts | ForEach-Object { if ($_) { "Listen ${_}:$Port" } else { "Listen $Port" } }) -join "`n"
 # URL — по первому адресу; «все интерфейсы» → localhost
 $firstHost = $listenHosts[0]

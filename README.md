@@ -42,6 +42,7 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 | `-NoBslLs` | без BSL LS и Java (и без LSP `bsl`) |
 | `-NoBrowser` | без Playwright/Chromium |
 | `-Uninstall` | удалить навыки, агентов, команды и MCP/LSP (с `-Project` — из проекта) |
+| `-Machine [-Users N]` | (администратор) общие инструменты и копия репозитория в `C:\ProgramData\1c-opencode` для всех пользователей сервера; см. [Несколько пользователей (RDP)](docs/quickstart.md#несколько-пользователей-rdp) |
 
 Параметры передаются и через `install.cmd`, например `install.cmd -Project D:\1c\проект -WithVrunner`.
 
@@ -146,7 +147,7 @@ python3 skills/print-form/scripts/mxl-render.py <...>/Templates/<Макет>/Ext
 | `templates/AGENTS.md` | шаблон инструкций для 1С-проекта |
 | `install.ps1`, `install.cmd` | установка на Windows одной командой из папки проекта |
 | `scripts/kill-bsl-ls.mjs`, `scripts/kill-bsl-ls.ps1` | завершить зависшие процессы BSL LS ([зависания на больших проектах](docs/quickstart.md#зависания-и-процессы-bsl-ls-на-больших-конфигурациях)) |
-| `tests/mcp/run.mjs` | тесты прокси `1c-bsl`: дерево процессов, таймаут, область индексации |
+| `tests/mcp/run.mjs`, `tests/mcp/multiuser.mjs` | тесты прокси `1c-bsl` (дерево процессов, таймаут, область индексации) и многопользовательской безопасности |
 | `scripts/opencode_port.py` | сборка из upstream и установка; ядро — `scripts/port_core.py` |
 | `docs/` | гайды и спецификации форматов 1С; [quickstart](docs/quickstart.md), [тестирование](docs/testing-guide.md) |
 | `legacy/` | артефакты старого goose-порта (не используются, см. [legacy/README.md](legacy/README.md)) |

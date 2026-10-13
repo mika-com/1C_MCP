@@ -144,6 +144,9 @@ TEXT_REPLACEMENTS = [
     ('AskUserQuestion', 'инструмент `question`'),
     # web-test: скриншот ошибки exec/run пишется во временный каталог (см. SCRIPT_PATCHES)
     ('"screenshot": "error-shot.png"', '"screenshot": "<$TMPDIR>/web-test-error-shot.png"'),
+    # web-publish: порт по умолчанию — первый свободный от 8081 (несколько пользователей RDP, см. SCRIPT_PATCHES)
+    ('| `-Port <порт>` | нет | Порт (по умолчанию `8081`) |',
+     '| `-Port <порт>` | нет | Порт (по умолчанию — первый свободный, начиная с `8081`; итоговый URL печатается) |'),
     ('читай результат через Read tool', 'читай результат инструментом чтения файлов'),
     ('Read tool', 'инструмент чтения файлов'),
     # web-test: run_in_background (Claude Code) -> shell OpenCode с background: true
@@ -319,8 +322,57 @@ SCRIPT_PATCHES = {
          "import { fileURLToPath } from 'url';\nimport { tmpdir } from 'os';\nimport * as browser from '../browser.mjs';"),
         ("const DEFAULT_ERROR_SHOT_PATH = resolve(__dirname, '..', '..', 'error-shot.png');",
          "const DEFAULT_ERROR_SHOT_PATH = resolve(tmpdir(), 'web-test-error-shot.png');"),
+        # web-test start/exec: файл сеанса (порт HTTP-сервера браузера) — свой у каждого пользователя и
+        # каталога навыка, а не общий файл в каталоге навыка (несколько пользователей RDP, общая установка).
+        ("export const SESSION_FILE = resolve(__dirname, '..', '..', '.browser-session.json');",
+         "import { tmpdir as __wtTmp, userInfo as __wtUser } from 'os';\n"
+         "import { createHash as __wtHash } from 'crypto';\n"
+         "// OpenCode: файл сеанса — у каждого пользователя и каталога навыка свой (несколько сеансов RDP)\n"
+         "const __wtName = (() => { try { return __wtUser().username; } catch { return 'user'; } })().replace(/[^\\w.-]/g, '_');\n"
+         "export const SESSION_FILE = resolve(process.env.WEB_TEST_SESSION_DIR || __wtTmp(), "
+         "`web-test-session-${__wtName}-${__wtHash('sha1').update(resolve(__dirname)).digest('hex').slice(0, 10)}.json`);"),
     ],
 }
+
+# web-publish: порт по умолчанию 8081 занят другим пользователем/сеансом (RDP) → берём следующий свободный
+# (порт нашего же Apache считается свободным — он будет перезапущен). Явный -Port работает как раньше.
+WEB_PUBLISH_PORT_PY = """    port = args.Port
+    if not port:
+        # OpenCode: несколько пользователей на одном сервере — ищем свободный порт от 8081
+        _exe = os.path.normcase(os.path.normpath(os.path.join(apache_path, 'bin', 'httpd.exe')))
+        _ours = {p.pid for p in get_our_httpd(_exe)}
+        port = 8081
+        while port < 8181:
+            _holder = check_port_in_use(port)
+            if _holder is None or _holder in _ours:
+                break
+            port += 1
+        if port != 8081:
+            print(f'Порт 8081 занят (другой пользователь/сеанс?) — использую {port}')
+"""
+WEB_PUBLISH_PORT_PS1 = """# OpenCode: несколько пользователей на одном сервере — порт по умолчанию ищем свободный от 8081
+if ($Port -eq 0) {
+    $ourExe = (Resolve-Path $httpdExe -ErrorAction SilentlyContinue).Path
+    $Port = 8081
+    while ($Port -lt 8181) {
+        $c = Get-NetTCPConnection -LocalPort $Port -State Listen -ErrorAction SilentlyContinue | Select-Object -First 1
+        if (-not $c) { break }
+        $holder = Get-Process -Id $c.OwningProcess -ErrorAction SilentlyContinue
+        if ($ourExe -and $holder -and $holder.Path -eq $ourExe) { break }
+        $Port++
+    }
+    if ($Port -ne 8081) { Write-Host "Порт 8081 занят (другой пользователь/сеанс?) — использую $Port" -ForegroundColor Yellow }
+}
+$listenLines ="""
+SCRIPT_PATCHES['.py'] += [
+    ("parser.add_argument('-Port', type=int, default=8081, help='Port (default: 8081)')",
+     "parser.add_argument('-Port', type=int, default=0, help='Port (default: first free from 8081)')"),
+    ("    port = args.Port\n", WEB_PUBLISH_PORT_PY),
+]
+SCRIPT_PATCHES['.ps1'] += [
+    ("    [int]$Port = 8081,", "    [int]$Port = 0,  # OpenCode: 0 — первый свободный от 8081"),
+    ("$listenLines =", WEB_PUBLISH_PORT_PS1),
+]
 
 
 def patch_scripts(skills_dir):

@@ -19,11 +19,11 @@
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { dirname, join, resolve, basename } from 'node:path';
 import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { tmpdir, userInfo } from 'node:os';
 import { createHash } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import { startServer } from './lib/stdio-server.mjs';
-import { spawnSupervised, killTree, isAlive, processCommandLine } from './lib/proc-tree.mjs';
+import { spawnSupervised, killTree, isAlive, processCommandLine, isOwnProcess } from './lib/proc-tree.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const env = process.env;
@@ -35,19 +35,34 @@ async function loadLocator() {
 }
 
 // ---- один экземпляр на каталог проекта ----
-export function lockPath(root) {
-  const h = createHash('sha1').update(resolve(root).toLowerCase()).digest('hex').slice(0, 12);
-  return join(env.BSL_LS_LOCK_DIR || join(tmpdir(), '1c-bsl-ls'), `${h}.json`);
+// Каталог lock-файлов — у каждого пользователя свой: %LOCALAPPDATA%\1c-opencode\bsl-ls (Windows),
+// $XDG_RUNTIME_DIR или /tmp/1c-bsl-ls-<uid> (POSIX). Ключ — пользователь + корень проекта, поэтому один и тот же
+// проект, открытый двумя пользователями (RDP), не конфликтует.
+export function lockDir() {
+  if (env.BSL_LS_LOCK_DIR) return env.BSL_LS_LOCK_DIR;
+  if (process.platform === 'win32') return join(env.LOCALAPPDATA || tmpdir(), '1c-opencode', 'bsl-ls');
+  if (env.XDG_RUNTIME_DIR) return join(env.XDG_RUNTIME_DIR, '1c-bsl-ls');
+  return join(tmpdir(), `1c-bsl-ls-${process.getuid()}`);
+}
+
+export function currentUserName() {
+  try { return userInfo().username.toLowerCase(); } catch { return (env.USERNAME || env.USER || 'user').toLowerCase(); }
+}
+
+export function lockPath(root, user = currentUserName()) {
+  const h = createHash('sha1').update(`${user}\n${resolve(root).toLowerCase()}`).digest('hex').slice(0, 12);
+  return join(lockDir(), `${h}.json`);
 }
 
 export function takeOverLock(root, { log = () => {} } = {}) {
   const file = lockPath(root);
-  mkdirSync(dirname(file), { recursive: true });
+  mkdirSync(dirname(file), { recursive: true, mode: 0o700 });
   if (existsSync(file)) {
     try {
       const old = JSON.parse(readFileSync(file, 'utf8'));
-      // PID мог достаться другому процессу — гасим, только если это наш прокси / BSL LS
-      const ours = (pid, re) => isAlive(pid) && re.test(processCommandLine(pid));
+      // Гасим, только если процесс жив, это наш прокси / BSL LS (PID мог достаться другому) и он принадлежит
+      // ТЕКУЩЕМУ пользователю в ТЕКУЩЕМ сеансе — процессы других пользователей RDP не трогаем никогда.
+      const ours = (pid, re) => isAlive(pid) && re.test(processCommandLine(pid)) && isOwnProcess(pid);
       if (old.pid && old.pid !== process.pid && ours(old.pid, /bsl-ls\.mjs/i)) {
         log(`гашу предыдущий экземпляр (pid ${old.pid})`);
         killTree(old.pid, { graceMs: 3000 });   // даём ему погасить своё дерево, затем добиваем
