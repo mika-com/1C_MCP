@@ -17,6 +17,18 @@
 | `1С:Предприятие 8.3` | Сборка, выгрузка, загрузка в базы и веб-публикация |
 | `Git` | Желателен для безопасной работы и отката изменений |
 
+## Windows: всё одной командой
+
+На Windows шаги 1–3, установку BSL LS и Chromium делает `install.ps1` из корня проекта. Скачайте проект (ZIP или
+`git clone`), откройте его папку и дважды щёлкните `install.cmd` или выполните в PowerShell:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+Папку проекта после установки не переносите: MCP-серверы запускаются из неё. Параметры (`-Project`, `-WithVrunner`,
+`-NoBslLs`, `-NoBrowser`, `-WithDesktop`, `-Uninstall`) — в [README](../README.md#windows-одной-командой).
+
 ## Шаг 1. Получите репозиторий
 
 ```bash

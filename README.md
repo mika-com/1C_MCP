@@ -13,6 +13,40 @@
 
 ## Быстрый старт
 
+### Windows одной командой
+
+1. Скачайте проект: ZIP-архив с GitHub (Code → Download ZIP, распакуйте) или
+   `git clone -b cleanup/opencode-v2 https://github.com/mika-com/1C_MCP_GOOSE.git`.
+2. Откройте папку проекта и дважды щёлкните **`install.cmd`**. Можно запустить и из PowerShell в этой папке:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1
+```
+
+Права администратора не нужны. Только winget может один раз запросить UAC, когда ставит Node.js, Python или Java.
+Скрипт берёт навыки из своей папки, поэтому **не удаляйте и не переносите её**: MCP-серверы и LSP запускаются оттуда.
+Порядок работы:
+- ставит через winget недостающие Git, Node.js LTS (20+), Python 3 и Java 17+;
+- ставит навыки, агентов и команды глобально в `%USERPROFILE%\.config\opencode`;
+- регистрирует там MCP и LSP;
+- скачивает BSL Language Server, а также Playwright и Chromium для `web-test`.
+
+Повторный запуск безопасен. Для обновления выполните `git pull` или распакуйте новый ZIP в ту же папку и запустите
+скрипт снова.
+
+| Параметр | Что делает |
+|----------|------------|
+| `-Project D:\1c\проект` | установить в проект (`<проект>\.opencode`) вместо глобальной установки |
+| `-WithVrunner` | включить MCP `vrunner` |
+| `-WithDesktop` | поставить OpenCode Desktop (`winget SST.OpenCodeDesktop`) |
+| `-NoBslLs` | без BSL LS и Java (и без LSP `bsl`) |
+| `-NoBrowser` | без Playwright/Chromium |
+| `-Uninstall` | удалить навыки, агентов, команды и MCP/LSP (с `-Project` — из проекта) |
+
+Параметры передаются и через `install.cmd`, например `install.cmd -Project D:\1c\проект -WithVrunner`.
+
+### Вручную (любая ОС)
+
 ```bash
 git clone https://github.com/mika-com/1C_MCP_GOOSE.git
 cd 1C_MCP_GOOSE
@@ -110,6 +144,7 @@ python3 skills/print-form/scripts/mxl-render.py <...>/Templates/<Макет>/Ext
 | `lsp/` | `bsl-lsp.mjs` — запуск BSL LS в режиме LSP для секции `lsp` |
 | `opencode.json` | конфиг v2 для работы в самом репозитории (`skills`, `mcp.servers`, `default_agent`) |
 | `templates/AGENTS.md` | шаблон инструкций для 1С-проекта |
+| `install.ps1`, `install.cmd` | установка на Windows одной командой из папки проекта |
 | `scripts/opencode_port.py` | сборка из upstream и установка; ядро — `scripts/port_core.py` |
 | `docs/` | гайды и спецификации форматов 1С; [quickstart](docs/quickstart.md), [тестирование](docs/testing-guide.md) |
 | `legacy/` | артефакты старого goose-порта (не используются, см. [legacy/README.md](legacy/README.md)) |
