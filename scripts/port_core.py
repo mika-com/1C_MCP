@@ -142,6 +142,8 @@ TEXT_REPLACEMENTS = [
     ('Спроси у пользователя через AskUserQuestion', 'Спроси у пользователя встроенным инструментом `question`'),
     ('через AskUserQuestion', 'встроенным инструментом `question`'),
     ('AskUserQuestion', 'инструмент `question`'),
+    # web-test: скриншот ошибки exec/run пишется во временный каталог (см. SCRIPT_PATCHES)
+    ('"screenshot": "error-shot.png"', '"screenshot": "<$TMPDIR>/web-test-error-shot.png"'),
     ('читай результат через Read tool', 'читай результат инструментом чтения файлов'),
     ('Read tool', 'инструмент чтения файлов'),
     # web-test: run_in_background (Claude Code) -> shell OpenCode с background: true
@@ -232,6 +234,19 @@ SKILL_NOTES = {
 }
 
 
+WEB_TEST_REPORTS_NOTE = (
+    '> **Отчёты и окружение (OpenCode).** Перед запуском выполни preflight навыка `1c-test` '
+    '(`node <1c-test>/scripts/preflight.mjs [база]`): Playwright, Chromium, дисплей, доступность веб-клиента. '
+    'Все артефакты — в `build/reports/web/`: регресс `test ... --format=allure --report-dir=build/reports/web/allure` '
+    '(скриншоты и видео попадают туда же), JUnit — `node <1c-test>/scripts/allure-to-junit.mjs '
+    'build/reports/web/allure build/reports/web/junit.xml`. Скриншот ошибки `exec`/`run` пишется в '
+    '`$TMPDIR/web-test-error-shot.png` (путь — в поле `screenshot` ответа): скопируй его в `build/reports/web/`.\n\n'
+)
+WEB_TEST_NOTES = {
+    'web-test': '## Execution modes',
+}
+
+
 BSL_CHECK_NOTE = (
     '> **Проверка кода перед загрузкой.** Перед загрузкой в базу проверь изменённые модули навыком '
     '`bsl-check` (BSL Language Server): `bsl-check -Path <каталог расширения или объекта>`. Он находит '
@@ -247,7 +262,8 @@ OWN_SKILLS = 'own-skills'
 
 
 def add_skill_notes(skills_dir):
-    for note, targets in ((SAFE_MODE_NOTE, SKILL_NOTES), (BSL_CHECK_NOTE, BSL_CHECK_NOTES)):
+    for note, targets in ((SAFE_MODE_NOTE, SKILL_NOTES), (BSL_CHECK_NOTE, BSL_CHECK_NOTES),
+                          (WEB_TEST_REPORTS_NOTE, WEB_TEST_NOTES)):
         for name, anchor in targets.items():
             path = os.path.join(skills_dir, name, 'SKILL.md')
             content = read(path)

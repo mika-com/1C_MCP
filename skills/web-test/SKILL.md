@@ -42,6 +42,8 @@ Read `.v8-project.json` from project root. Each database has `id` and optional `
 Construct URL as `http://localhost:8081/<id>` or use `webUrl` if set.
 Use `/web-publish` first if the database is not published.
 
+> **Отчёты и окружение (OpenCode).** Перед запуском выполни preflight навыка `1c-test` (`node <1c-test>/scripts/preflight.mjs [база]`): Playwright, Chromium, дисплей, доступность веб-клиента. Все артефакты — в `build/reports/web/`: регресс `test ... --format=allure --report-dir=build/reports/web/allure` (скриншоты и видео попадают туда же), JUnit — `node <1c-test>/scripts/allure-to-junit.mjs build/reports/web/allure build/reports/web/junit.xml`. Скриншот ошибки `exec`/`run` пишется в `$TMPDIR/web-test-error-shot.png` (путь — в поле `screenshot` ответа): скопируй его в `build/reports/web/`.
+
 ## Execution modes
 
 ### Autonomous mode (preferred for complete scenarios)
@@ -597,7 +599,7 @@ await page.keyboard.press('F8');  // example: create new item in focused referen
 
 On error (auto-screenshot taken):
 ```json
-{ "ok": false, "error": "Element not found", "output": "...", "screenshot": "error-shot.png", "elapsed": 1.5 }
+{ "ok": false, "error": "Element not found", "output": "...", "screenshot": "<$TMPDIR>/web-test-error-shot.png", "elapsed": 1.5 }
 ```
 
 ## Avoiding loops

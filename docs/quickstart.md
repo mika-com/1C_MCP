@@ -36,8 +36,9 @@ python scripts/opencode_port.py install --global
 
 Установщик:
 - копирует навыки в `<проект>/.opencode/skills/` (глобально — `~/.config/opencode/skills/`);
-- копирует агентов (`1c`, `1c-analyst`, `1c-developer`, `1c-deployer`, `1c-tester`) в `.opencode/agents/`
-  и команды `/1c-analyze`, `/1c-implement`, `/1c-deploy`, `/1c-webtest`, `/1c-check` в `.opencode/commands/`;
+- копирует агентов (`1c`, `1c-analyst`, `1c-developer`, `1c-deployer`, `1c-tester`, `1c-test-author`) в
+  `.opencode/agents/` и команды `/1c-analyze`, `/1c-implement`, `/1c-deploy`, `/1c-webtest`, `/1c-bdd`, `/1c-check`
+  в `.opencode/commands/`;
 - создаёт шаблон `AGENTS.md` в проекте, если его ещё нет;
 - регистрирует MCP-серверы в `~/.config/opencode/opencode.json` (формат v2, `mcp.servers`).
 
@@ -121,6 +122,10 @@ npx --prefix "$HOME/.config/opencode" playwright install chromium
 
 Если навыки установлены в проект, `scripts/opencode_port.py` перенастраивает `web-test`
 на локальный префикс `<проект>/.opencode`.
+
+Перед первым прогоном проверьте окружение: `node .opencode/skills/1c-test/scripts/preflight.mjs dev`
+(команда `/1c-webtest` делает это сама). На Linux без графической сессии web-test запускается через `xvfb-run -a`.
+Отчёты и скриншоты — в `build/reports/web/`.
 
 ## Что проверять после установки
 
