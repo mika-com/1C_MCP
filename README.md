@@ -1,118 +1,74 @@
-# 1C Skills for OpenCode
+# Агент 1С для OpenCode v2
 
-Набор из 82 навыков для разработки на 1С:Предприятие 8.3 в [OpenCode](https://opencode.ai/), собранный на базе
-[cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills) и дополненный локальными MCP-серверами для
-поиска по выгрузке, проверки BSL-кода и уточняющих вопросов.
+Агент для разработки на 1С:Предприятие 8.3 в [OpenCode](https://opencode.ai/v2/docs) (Desktop и CLI):
 
-Проект покрывает:
-- создание и анализ XML-исходников конфигураций, расширений, EPF, ERF, форм, СКД, ролей и XDTO;
-- загрузку и обновление информационных баз;
-- веб-публикацию и автоматизацию 1С через браузер;
-- проверку BSL-кода через BSL Language Server;
-- поиск по выгрузке через MCP вместо ручного `grep` по XML.
+- **83 навыка**: 81 из [cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills) (конфигурации, расширения,
+  EPF/ERF, формы, СКД, макеты, роли, XDTO, базы, веб-публикация, web-test) + свои `bsl-check` и `vrunner`;
+- **агенты**: основной `1c` и субагенты по этапам `1c-analyst` → `1c-developer` → `1c-deployer` → `1c-tester`;
+- **команды**: `/1c-analyze`, `/1c-implement`, `/1c-deploy`, `/1c-webtest`, `/1c-check`;
+- **MCP-серверы**: `1c-search` (поиск по XML-выгрузке), `1c-bsl` (BSL Language Server),
+  `vrunner` ([vanessa-runner 3.x](https://github.com/vanessa-opensource/vanessa-runner), `vrunner-mcp`, по умолчанию выключен).
 
-## OpenCode Setup
-
-### Быстрый старт
-
-1. Клонируйте репозиторий в удобный каталог.
-2. Установите навыки:
+## Быстрый старт
 
 ```bash
-python scripts/opencode_port.py install --project-dir .
-# или глобально:
-python scripts/opencode_port.py install --global
+git clone https://github.com/mika-com/1C_MCP_GOOSE.git
+cd 1C_MCP_GOOSE
+python scripts/opencode_port.py install --project-dir /путь/к/1С-проекту
 ```
 
-3. Зарегистрируйте MCP-серверы OpenCode:
+Откройте проект в OpenCode Desktop и выберите агента **1c**. Подробно — [docs/quickstart.md](docs/quickstart.md).
 
-```bash
-node mcp/register-opencode-mcp.mjs
-```
+| Требование | Зачем |
+|------------|-------|
+| OpenCode 2.x | агентная среда |
+| Python 3.9+ | скрипты навыков, установщик (`pip install -r requirements.txt` для рантайма python) |
+| Node.js 18+ | MCP-серверы, `web-test` |
+| 1С:Предприятие 8.3 | сборка, выгрузка, загрузка, веб-публикация |
+| BSL Language Server | `bsl-check`, `1c-bsl` (`node skills/bsl-check/scripts/bsl-check.mjs -Install`) |
+| vanessa-runner 3.x | необязательно: навык и MCP `vrunner` (`opm install vanessa-runner`) |
 
-4. Перезапустите OpenCode.
-
-OpenCode умеет читать навыки из `.agents/skills/`, `~/.config/opencode/skills/`, `.claude/skills/` и `.opencode/skills/`,
-поэтому проектная установка идёт в `.agents/skills/`, а глобальная — в `~/.config/opencode/skills/`.
-
-### Готовый конфиг
-
-В корне репозитория есть [opencode.json](opencode.json) с локальными MCP-серверами:
-- `1c-ask` — форма уточняющих вопросов;
-- `1c-search` — поиск объектов, методов и вызовов по XML-выгрузке;
-- `1c-bsl` — BSL Language Server.
-
-Если у вас уже есть свой `opencode.json`, используйте `node mcp/register-opencode-mcp.mjs`, чтобы аккуратно добавить
-или обновить только записи 1С.
-
-### Требования
-
-- `OpenCode`
-- `Python 3.9+`
-- `Node.js 18+`
-- `1С:Предприятие 8.3` для операций сборки/выгрузки/загрузки и работы с базами
-- `BSL Language Server` для `bsl-check` и `1c-bsl`
-
-## Использование
-
-Запускайте OpenCode из корня 1С-проекта и формулируйте задачу естественным языком. Для точного вызова можно просить
-конкретные навыки, например:
+## Как пользоваться
 
 ```text
-Используй skill epf-init и создай внешнюю обработку МояОбработка
-Используй skill meta-info и проанализируй Документ.ЗаказКлиента
-Используй MCP 1c-search и найди метод, который записывает номер заказа
+/1c-analyze Добавить в документ ЗаказКлиента реквизит «Приоритет» и вывести его в список
+/1c-implement <вставьте план>
+/1c-check src/cfe/МоёРасширение
+/1c-deploy в базу dev
 ```
 
-Настройки проекта по базам, платформе и веб-клиенту лежат в `.v8-project.json`.
-Пример — [`.v8-project.example.json`](.v8-project.example.json).
+Или обычным языком агенту `1c`: «найди, где формируется номер заказа», «создай внешнюю обработку ЗагрузкаЦен».
+Навык можно вызвать явно: `@epf-init`, `@meta-info`.
 
-## Web Test
-
-Навык `web-test` использует Playwright. При первой необходимости установите браузер:
-
-```bash
-npm install --prefix "$HOME/.config/opencode" --no-fund --no-audit "playwright@^1.50.0"
-npx --prefix "$HOME/.config/opencode" playwright install chromium
-```
-
-Для проектной установки `scripts/opencode_port.py install --project-dir .` автоматически перенастраивает `web-test`
-на локальный префикс `<проект>/.agents`.
+Базы, платформа и веб-клиент описываются в `.v8-project.json` (пример — [.v8-project.example.json](.v8-project.example.json)).
+Если в проекте есть `autumn-properties.json`, агент использует vanessa-runner.
 
 ## Структура
 
-- `skills/` — 82 OpenCode-совместимых навыка
-- `mcp/` — локальные MCP-серверы `1c-ask`, `1c-search`, `1c-bsl`
-- `opencode.json` — пример конфигурации OpenCode
-- `scripts/opencode_port.py` — установка навыков под OpenCode
-- `scripts/goose_port.py` — legacy-скрипт старого goose-порта
-- `goose/` — legacy-артефакты старой сборки
-- `docs/` — гайды и спецификации форматов 1С
+| Путь | Что |
+|------|-----|
+| `.opencode/agents/` | агенты OpenCode v2 (Markdown + frontmatter) |
+| `.opencode/commands/` | команды `/1c-*` |
+| `skills/` | собранные навыки (генерируются, руками не править) |
+| `own-skills/` | свои навыки (`bsl-check`, `vrunner`) — источник для `skills/` |
+| `mcp/` | MCP-серверы и `register-opencode-mcp.mjs` |
+| `opencode.json` | конфиг v2 для работы в самом репозитории (`skills`, `mcp.servers`, `default_agent`) |
+| `templates/AGENTS.md` | шаблон инструкций для 1С-проекта |
+| `scripts/opencode_port.py` | сборка из upstream и установка; ядро — `scripts/port_core.py` |
+| `docs/` | гайды и спецификации форматов 1С |
+| `legacy/` | артефакты старого goose-порта (не используются, см. [legacy/README.md](legacy/README.md)) |
 
-## Обновление из Upstream
-
-Каталог `skills/` продолжает генерироваться из `cc-1c-skills`:
+## Обновление из upstream
 
 ```bash
-python scripts/opencode_port.py build
+python scripts/opencode_port.py build                         # git clone cc-1c-skills main
 python scripts/opencode_port.py build --upstream ../cc-1c-skills
-python scripts/opencode_port.py build --ref <ветка-или-тег>
 ```
 
-Файл [`UPSTREAM`](UPSTREAM) хранит источник и коммит, из которого собрана текущая версия.
-
-## Совместимость
-
-Репозиторий переведён в OpenCode-first режим, но часть legacy-файлов для `goose` пока сохранена:
-- `plugin.json`
-- `mcp/register-extensions.mjs`
-- `hooks/`
-- `goose/`
-
-Они больше не являются основной точкой входа и нужны только для обратной совместимости и безопасной миграции.
+[`UPSTREAM`](UPSTREAM) хранит коммит сборки. GitHub Action `upstream-sync` делает это раз в неделю и открывает PR.
 
 ## Лицензия
 
-MIT — см. [LICENSE](LICENSE). Upstream-автор навыков и документации — Nick Shirokov,
-[cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills). OpenCode-адаптация распространяется
-на тех же условиях.
+MIT — см. [LICENSE](LICENSE). Навыки и документация — Nick Shirokov,
+[cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills). vanessa-runner — проект vanessa-opensource (MPL-2.0),
+сюда не входит, только вызывается.

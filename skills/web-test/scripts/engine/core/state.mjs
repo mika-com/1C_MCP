@@ -12,7 +12,7 @@ import { fileURLToPath } from 'url';
 
 // Project root: 6 levels up from <skills>/web-test/scripts/engine/core/state.mjs
 const __fn_state = fileURLToPath(import.meta.url);
-// goose: навыки могут лежать вне проекта (плагин), корень проекта — рабочий каталог
+// OpenCode: навыки могут лежать вне проекта, корень проекта — рабочий каталог
 export const projectRoot = process.env.V8_PROJECT_ROOT ? pathResolve(process.env.V8_PROJECT_ROOT) : process.cwd();
 
 /** Resolve a user-provided path relative to the project root (not cwd). */

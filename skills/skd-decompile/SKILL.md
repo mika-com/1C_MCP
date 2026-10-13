@@ -2,6 +2,7 @@
 name: skd-decompile
 description: Декомпиляция схемы компоновки данных 1С (СКД) в JSON-черновик в формате skd-compile. Используй для scaffold нового отчёта по образцу или структурного рефакторинга. Не для точечных правок. Вызывай только по явной просьбе пользователя.
 argument-hint: <TemplatePath> [-OutputPath <out.json>]
+disable-model-invocation: true
 ---
 
 # /skd-decompile — JSON-черновик из Template.xml СКД

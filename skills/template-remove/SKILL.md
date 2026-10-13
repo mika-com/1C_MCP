@@ -2,6 +2,7 @@
 name: template-remove
 description: Удалить макет из объекта 1С (обработка, отчёт, справочник, документ и др.). Вызывай только по явной просьбе пользователя.
 argument-hint: <ObjectName> <TemplateName>
+disable-model-invocation: true
 ---
 
 # /template-remove — Удаление макета

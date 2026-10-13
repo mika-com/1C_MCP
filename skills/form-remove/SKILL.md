@@ -2,6 +2,7 @@
 name: form-remove
 description: Удалить форму из объекта 1С (обработка, отчёт, справочник, документ и др.). Вызывай только по явной просьбе пользователя.
 argument-hint: <ObjectName> <FormName>
+disable-model-invocation: true
 ---
 
 # /form-remove — Удаление формы

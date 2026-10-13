@@ -8,11 +8,11 @@ argument-hint: <Name> [-ConfigPath <path>] [-Purpose Patch|Customization|AddOn] 
 
 > **OpenCode:** `{SKILL_DIR}` в командах — каталог текущего навыка. Подставь абсолютный путь к каталогу навыка, если среда не делает это автоматически. Команды запускай из корня проекта. Если `powershell.exe` недоступен (Linux/macOS), запусти одноимённый `.py`-скрипт через `python` (или `python3`) с теми же параметрами.
 
-Создаёт scaffold расширения: `Configuration.xml`, `Languages/Русский.xml`, опционально `Roles/`.
+Создаёт scaffold расширения: `Configuration.xml`, язык в `Languages/`, опционально `Roles/`.
 
 ## Подготовка
 
-Если есть выгрузка базовой конфигурации, передай `-ConfigPath` — скрипт автоматически определит `CompatibilityMode` и UUID языка из базовой конфигурации.
+Если есть выгрузка базовой конфигурации, передай `-ConfigPath` — скрипт автоматически возьмёт из базовой конфигурации `CompatibilityMode` и язык.
 
 ### Авто-определение ConfigPath
 
@@ -36,7 +36,7 @@ argument-hint: <Name> [-ConfigPath <path>] [-Purpose Patch|Customization|AddOn] 
 | `Version` | Версия расширения | — |
 | `Vendor` | Поставщик | — |
 | `CompatibilityMode` | Режим совместимости; при заданном `ConfigPath` определяется по базовой конфигурации и этот параметр не нужен | `Version8_3_24` |
-| `ConfigPath` | Путь к выгрузке базовой конфигурации (авто-определяет CompatibilityMode и Language UUID) | — |
+| `ConfigPath` | Путь к выгрузке базовой конфигурации (авто-определяет CompatibilityMode и язык) | — |
 | `NoRole` | Без основной роли | false |
 
 ## Команда

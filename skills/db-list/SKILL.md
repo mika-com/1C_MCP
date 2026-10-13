@@ -171,7 +171,7 @@ test    Тестовая      server   srv01/MyApp_Test
 
 ### Добавить базу
 
-Спроси у пользователя через инструмент `ask_user` (форма):
+Спроси у пользователя встроенным инструментом `question`:
 - id, name, type (file/server)
 - path (для file) или server + ref (для server)
 - user, password (необязательно)

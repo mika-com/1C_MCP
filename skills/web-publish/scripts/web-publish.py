@@ -221,7 +221,7 @@ def main():
     apache_path = args.ApachePath
     if not apache_path:
         script_dir = os.path.dirname(os.path.abspath(__file__))
-        project_root = os.getcwd()  # goose: корень проекта — рабочий каталог
+        project_root = os.getcwd()  # OpenCode: корень проекта — рабочий каталог
         apache_path = os.path.join(project_root, 'tools', 'apache24')
     # Ensure absolute path (agent may pass relative like "tools/apache24")
     if not os.path.isabs(apache_path):

@@ -1,5 +1,5 @@
 // stdio-server.mjs v1.0 — минимальный MCP-сервер на stdio (JSON-RPC 2.0, по строке на сообщение)
-// без зависимостей. Поддерживает tools, MCP roots (рабочая папка сеанса goose) и запросы к клиенту.
+// без зависимостей. Поддерживает tools, MCP roots (рабочая папка сеанса) и запросы к клиенту.
 
 import { createInterface } from 'node:readline';
 import { fileURLToPath } from 'node:url';
@@ -30,7 +30,7 @@ export function startServer({ name, version = '1.0.0', instructions = '', tools 
   const ctx = {
     state,
     request,
-    // Рабочая папка: аргумент инструмента → MCP root от goose → текущий каталог процесса.
+    // Рабочая папка: аргумент инструмента → MCP root от клиента → текущий каталог процесса.
     root: (arg) => arg || state.roots[0] || process.cwd(),
     refreshRoots,
   };

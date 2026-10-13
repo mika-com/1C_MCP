@@ -5,26 +5,33 @@ base/
 *.erf
 *.log
 
-# Локальный реестр баз данных 1С
+# Локальный реестр баз данных 1С (может содержать пароли)
 .v8-project.json
 
 # XSD-схемы платформы (/v8-xsd-fetch) — собственность 1С, не распространяем
 .v8-xsd/*
 !.v8-xsd/README.md
 
-# web-test: runtime-артефакты (Playwright ставится вне навыка — в ~/.agents или <проект>/.agents)
+# web-test: runtime-артефакты
 skills/web-test/scripts/node_modules/
 skills/web-test/.browser-session.json
+node_modules/
 
-# Навыки, установленные goose_port.py install в этот каталог (для проверки)
+# Локальная установка навыков для проверки (install --project-dir .)
 .agents/
+.opencode/skills/
+.opencode/node_modules/
+.opencode/package*.json
+.opencode/.1c-opencode
+opencode.json.bak
 
 # Python кэш
 __pycache__/
 
-# Локальные настройки goose
-.config/goose/settings.local.json
-
 # Скриншоты и видео (артефакты web-test)
 *.png
 *.mp4
+
+# Секреты
+.env
+.env.*

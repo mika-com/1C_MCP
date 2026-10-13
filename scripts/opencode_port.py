@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Сборка и установка навыков 1С для OpenCode.
+Сборка и установка агента 1С для OpenCode v2.
 
 Команды:
-  build     — пересобрать skills/ из upstream cc-1c-skills
-  install   — установить навыки в проект (.agents/skills/) или глобально (~/.config/opencode/skills/)
-  runtime   — жёстко переключить рантайм у установленных навыков
-  uninstall — удалить навыки, установленные командой install
+  build     — пересобрать skills/ из upstream cc-1c-skills (+ свои навыки из own-skills/)
+  install   — установить навыки, агентов и команды в проект (.opencode/) или глобально (~/.config/opencode/)
+              и зарегистрировать MCP-серверы (~/.config/opencode/opencode.json)
+  runtime   — переключить рантайм (powershell/python) у установленных навыков
+  uninstall — удалить установленное командой install
 
 Примеры:
   python scripts/opencode_port.py install --project-dir /path/to/my-1c-project
   python scripts/opencode_port.py install --project-dir . --runtime python
   python scripts/opencode_port.py install --global
-  python scripts/opencode_port.py runtime python --project-dir /path/to/my-1c-project
   python scripts/opencode_port.py build --upstream ../cc-1c-skills
 """
 
@@ -22,35 +22,32 @@ import shutil
 import subprocess
 import sys
 
-import goose_port as legacy
+import port_core as core
 
-GLOBAL_SKILLS = os.path.join('.config', 'opencode', 'skills')
-PROJECT_SKILLS = os.path.join('.agents', 'skills')
+GLOBAL_DIR = os.path.join('.config', 'opencode')
+PROJECT_DIR = '.opencode'
 GLOBAL_NODE_PREFIX = '"$HOME/.config/opencode"'
-PROJECT_NODE_PREFIX = f'"{legacy.SKILL_DIR}/../.."'
+PROJECT_NODE_PREFIX = f'"{core.SKILL_DIR}/../.."'
+OLD_NODE_PREFIXES = ('"$HOME/.agents"',)
+MARKER = '.1c-opencode'   # список установленных файлов агентов/команд
 
 
 def repo_root():
-    return legacy.repo_root()
-
-
-def scan_installed(skills_dir):
-    return legacy.scan_skills(skills_dir)
+    return core.repo_root()
 
 
 def target_base(args):
     return os.path.expanduser('~') if args.is_global else os.path.abspath(args.project_dir)
 
 
-def skills_dir(base, is_global):
-    rel = GLOBAL_SKILLS if is_global else PROJECT_SKILLS
-    return os.path.join(base, rel)
+def opencode_dir(base, is_global):
+    return os.path.join(base, GLOBAL_DIR if is_global else PROJECT_DIR)
 
 
 def install_tree(src, dst):
     os.makedirs(dst, exist_ok=True)
     ignore = shutil.ignore_patterns('node_modules', '__pycache__', '.browser-session.json')
-    for name in legacy.scan_skills(src):
+    for name in core.scan_skills(src):
         target = os.path.join(dst, name)
         if os.path.isdir(target):
             shutil.rmtree(target)
@@ -62,41 +59,47 @@ def adjust_web_test_prefix(dst, is_global):
     path = os.path.join(dst, 'web-test')
     if not os.path.isdir(path):
         return
-    for md in legacy.collect_md_files(path):
-        content = legacy.read(md)
+    for md in core.collect_md_files(path):
+        content = core.read(md)
         new = content
-        for current in (legacy.WEB_TEST_PREFIX, GLOBAL_NODE_PREFIX, PROJECT_NODE_PREFIX):
+        for current in (core.WEB_TEST_PREFIX, GLOBAL_NODE_PREFIX, PROJECT_NODE_PREFIX) + OLD_NODE_PREFIXES:
             new = new.replace(f'--prefix {current} ', f'--prefix {prefix} ')
         if new != content:
-            legacy.write(md, new)
+            core.write(md, new)
 
 
-def register_mcp(remove=False):
+def copy_md_dir(kind, oc_dir):
+    """Агенты и команды из .opencode/<kind>/ репозитория -> <opencode_dir>/<kind>/."""
+    src = os.path.join(repo_root(), '.opencode', kind)
+    dst = os.path.join(oc_dir, kind)
+    os.makedirs(dst, exist_ok=True)
+    copied = []
+    for name in sorted(os.listdir(src)):
+        if name.endswith('.md'):
+            shutil.copy2(os.path.join(src, name), os.path.join(dst, name))
+            copied.append(f'{kind}/{name}')
+    return copied
+
+
+def register_mcp(remove=False, vrunner=False):
     script = os.path.join(repo_root(), 'mcp', 'register-opencode-mcp.mjs')
     node = shutil.which('node')
-    if not node or not os.path.isfile(script):
+    if not node:
         if not remove:
-            print('Node.js не найден — MCP-серверы 1c-ask/1c-search/1c-bsl не зарегистрированы. '
+            print('Node.js не найден — MCP-серверы не зарегистрированы. '
                   f'После установки Node.js выполните: node "{script}"')
         return
-    subprocess.run([node, script] + (['--remove'] if remove else []), check=False)
-
-
-def print_next_steps(base, is_global):
-    if is_global:
-        print('\nOpenCode увидит навыки после перезапуска из глобального каталога ~/.config/opencode/skills/.')
-    else:
-        print('\nЗапустите OpenCode из каталога проекта — навыки будут доступны из .agents/skills/.')
-    print('MCP-серверы 1c-ask/1c-search/1c-bsl можно использовать через opencode.json.')
+    cmd = [node, script] + (['--remove'] if remove else []) + (['--vrunner'] if vrunner else [])
+    subprocess.run(cmd, check=False)
 
 
 def cmd_build(args):
-    return legacy.cmd_build(args)
+    return core.cmd_build(args)
 
 
 def cmd_install(args):
-    src = os.path.join(repo_root(), legacy.REPO_SKILLS)
-    skills = legacy.scan_skills(src)
+    src = os.path.join(repo_root(), core.REPO_SKILLS)
+    skills = core.scan_skills(src)
     if not skills:
         print(f'Ошибка: навыки не найдены в {src}. Сначала выполните build.', file=sys.stderr)
         return 1
@@ -104,28 +107,44 @@ def cmd_install(args):
     if not os.path.isdir(base):
         print(f"Ошибка: каталог '{base}' не найден.", file=sys.stderr)
         return 1
-    dst = skills_dir(base, args.is_global)
+    oc = opencode_dir(base, args.is_global)
+    dst = os.path.join(oc, 'skills')
     install_tree(src, dst)
     if args.runtime:
-        legacy.apply_runtime(dst, args.runtime)
+        core.apply_runtime(dst, args.runtime)
     adjust_web_test_prefix(dst, args.is_global)
-    if not args.no_mcp:
-        register_mcp(remove=False)
-    print(f'Установлено {len(skills)} навыков в {dst}')
+    files = copy_md_dir('agents', oc) + copy_md_dir('commands', oc)
+    core.write(os.path.join(oc, MARKER), '\n'.join(files) + '\n')
     if not args.is_global:
-        legacy.print_gitignore_recommendations(base)
-    print_next_steps(base, args.is_global)
+        agents_md = os.path.join(base, 'AGENTS.md')
+        if not os.path.exists(agents_md):
+            shutil.copy2(os.path.join(repo_root(), 'templates', 'AGENTS.md'), agents_md)
+            print(f'Создан шаблон {agents_md} — поправьте под свой проект.')
+    if not args.no_mcp:
+        register_mcp(remove=False, vrunner=args.vrunner)
+    print(f'Установлено: {len(skills)} навыков в {dst}, агентов и команд: {len(files)} в {oc}')
+    if not args.is_global:
+        core.print_gitignore_recommendations(base)
+    print('\nЗапустите OpenCode (Desktop или CLI) из каталога проекта и выберите агента «1c».')
     return 0
 
 
 def cmd_uninstall(args):
-    dst = skills_dir(target_base(args), args.is_global)
-    src_names = set(legacy.scan_skills(os.path.join(repo_root(), legacy.REPO_SKILLS)))
+    oc = opencode_dir(target_base(args), args.is_global)
+    dst = os.path.join(oc, 'skills')
+    names = set(core.scan_skills(os.path.join(repo_root(), core.REPO_SKILLS)))
     removed = 0
-    for name in scan_installed(dst):
-        if name in src_names:
+    for name in core.scan_skills(dst) if os.path.isdir(dst) else []:
+        if name in names:
             shutil.rmtree(os.path.join(dst, name))
             removed += 1
+    marker = os.path.join(oc, MARKER)
+    if os.path.isfile(marker):
+        for rel in core.read(marker).split():
+            p = os.path.join(oc, rel)
+            if os.path.isfile(p):
+                os.remove(p)
+        os.remove(marker)
     if not args.no_mcp:
         register_mcp(remove=True)
     print(f'Удалено навыков: {removed} из {dst}')
@@ -133,28 +152,24 @@ def cmd_uninstall(args):
 
 
 def cmd_runtime(args):
-    dst = skills_dir(target_base(args), args.is_global)
-    if not scan_installed(dst):
+    dst = os.path.join(opencode_dir(target_base(args), args.is_global), 'skills')
+    if not os.path.isdir(dst) or not core.scan_skills(dst):
         print(f'Ошибка: навыки не найдены в {dst}', file=sys.stderr)
         return 1
-    legacy.apply_runtime(dst, args.runtime)
+    core.apply_runtime(dst, args.runtime)
     return 0
 
 
 def main():
     parser = argparse.ArgumentParser(
-        description='Навыки 1С для OpenCode: сборка из upstream и установка навыков',
-        formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog='Примеры:' + __doc__.split('Примеры:', 1)[1],
-    )
-    sub = parser.add_subparsers(dest='cmd', required=True)
+        description='Агент 1С для OpenCode v2: сборка навыков и установка',
+        epilog=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = parser.add_subparsers(dest='command', required=True)
 
     def add_target(p):
         g = p.add_mutually_exclusive_group()
-        g.add_argument('--project-dir', default=os.getcwd(),
-                       help='целевой проект (по умолчанию: текущий каталог)')
-        g.add_argument('--global', dest='is_global', action='store_true',
-                       help='глобальная установка в ~/.config/opencode/skills/')
+        g.add_argument('--project-dir', default=os.getcwd(), help='каталог 1С-проекта (по умолчанию текущий)')
+        g.add_argument('--global', dest='is_global', action='store_true', help='установить в ~/.config/opencode/')
 
     p = sub.add_parser('build', help='пересобрать skills/ из upstream cc-1c-skills')
     p.add_argument('--upstream', help='путь к локальному клону cc-1c-skills (иначе git clone)')
@@ -162,30 +177,26 @@ def main():
     p.add_argument('--runtime', choices=['powershell', 'python'], default='powershell')
     p.set_defaults(func=cmd_build)
 
-    p = sub.add_parser('install', help='установить навыки в проект или глобально для OpenCode')
+    p = sub.add_parser('install', help='установить навыки, агентов, команды и MCP')
     add_target(p)
-    p.add_argument('--runtime', choices=['powershell', 'python'],
-                   help='жёстко прописать рантайм (по умолчанию PowerShell с откатом на Python)')
-    p.add_argument('--no-mcp', action='store_true',
-                   help='не обновлять opencode.json для 1c-ask/1c-search/1c-bsl')
+    p.add_argument('--runtime', choices=['powershell', 'python'], help='сразу переключить рантайм навыков')
+    p.add_argument('--no-mcp', action='store_true', help='не регистрировать MCP-серверы')
+    p.add_argument('--vrunner', action='store_true', help='включить MCP-сервер vrunner-mcp (vanessa-runner 3.x)')
     p.set_defaults(func=cmd_install)
 
-    p = sub.add_parser('runtime', help='переключить рантайм у навыков, установленных install')
+    p = sub.add_parser('runtime', help='переключить рантайм у установленных навыков')
     p.add_argument('runtime', choices=['powershell', 'python'])
     add_target(p)
     p.set_defaults(func=cmd_runtime)
 
-    p = sub.add_parser('uninstall', help='удалить навыки, установленные install')
+    p = sub.add_parser('uninstall', help='удалить установленное')
     add_target(p)
-    p.add_argument('--no-mcp', action='store_true',
-                   help='не удалять записи 1c-ask/1c-search/1c-bsl из opencode.json')
+    p.add_argument('--no-mcp', action='store_true', help='не трогать MCP-серверы')
     p.set_defaults(func=cmd_uninstall)
 
     args = parser.parse_args()
-    if not hasattr(args, 'is_global'):
-        args.is_global = False
     return args.func(args)
 
 
 if __name__ == '__main__':
-    sys.exit(main() or 0)
+    sys.exit(main())

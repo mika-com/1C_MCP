@@ -8,7 +8,7 @@ import * as browser from '../browser.mjs';
 import { elapsed, slugify } from './util.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
-const DEFAULT_ERROR_SHOT_PATH = resolve(tmpdir(), 'web-test-error-shot.png');  // goose
+const DEFAULT_ERROR_SHOT_PATH = resolve(tmpdir(), 'web-test-error-shot.png');
 
 // Where 1C-error screenshots go. The default is a single fixed file: fine for
 // interactive `exec`/`run` (last error wins, easy to find), wrong for a test run

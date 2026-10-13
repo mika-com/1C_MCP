@@ -1,9 +1,9 @@
 #!/usr/bin/env node
-// code-search.mjs v1.0 — MCP-сервер поиска по XML-выгрузке 1С для goose: объекты метаданных по смыслу
+// code-search.mjs v1.0 — MCP-сервер поиска по XML-выгрузке 1С для OpenCode: объекты метаданных по смыслу
 // (имя, синоним, реквизиты), методы с кодом, список методов модуля, места вызова, поиск по коду.
 // Заменяет grep/sed по выгрузке: ответы короткие и не забивают контекст модели.
 // Без зависимостей. Индекс строится при первом вызове и кэшируется во временном каталоге
-// (обновляются только изменённые файлы). Папку проекта берёт из MCP roots (рабочая папка goose).
+// (обновляются только изменённые файлы). Папку проекта берёт из MCP roots (рабочая папка сеанса), иначе — рабочий каталог процесса.
 
 import { readdirSync, readFileSync, statSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, relative, sep, resolve, basename } from 'node:path';
@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { startServer } from './lib/stdio-server.mjs';
 
 const INDEX_VERSION = 3;
-const SKIP_DIRS = new Set(['.git', 'node_modules', '.agents', '.goose', 'build', 'base', 'tools', 'test-tmp', '.v8-xsd']);
+const SKIP_DIRS = new Set(['.git', 'node_modules', '.agents', '.opencode', '.goose', 'build', 'base', 'tools', 'test-tmp', '.v8-xsd']);
 
 // Каталог выгрузки → вид объекта (рус.) и англ. синоним вида для поиска
 export const TYPES = {
@@ -202,7 +202,7 @@ function listBsl(dir, acc = []) {
 
 function cacheFile(root) {
   const h = createHash('sha1').update(resolve(root)).digest('hex').slice(0, 16);
-  return join(tmpdir(), 'goose-1c-search', `${h}.json`);
+  return join(tmpdir(), 'opencode-1c-search', `${h}.json`);
 }
 
 const indexes = new Map();   // root → { built, configs, objects, modules }
@@ -264,7 +264,7 @@ export function buildIndex(root, { force = false } = {}) {
   indexes.set(root, idx);
   if (parsed) {
     try {
-      mkdirSync(join(tmpdir(), 'goose-1c-search'), { recursive: true });
+      mkdirSync(join(tmpdir(), 'opencode-1c-search'), { recursive: true });
       writeFileSync(cf, JSON.stringify({ version: INDEX_VERSION, files }));
     } catch { /* кэш необязателен */ }
   }
@@ -474,7 +474,7 @@ export function indexStatus(idx) {
 // ---------------------------------------------------------------------------
 // MCP
 // ---------------------------------------------------------------------------
-const ROOT_ARG = { type: 'string', description: 'Корень проекта (по умолчанию — рабочая папка goose)' };
+const ROOT_ARG = { type: 'string', description: 'Корень проекта (по умолчанию — рабочая папка OpenCode)' };
 const TOOLS = [
   { name: 'find_object', description: 'Найти объект метаданных 1С по смыслу: по имени, синониму, реквизиту или табличной части. ' +
       'Пример: «история задач», «Документ.Задача», «номенклатура вес». Используй вместо grep по XML.',
@@ -506,7 +506,7 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import
       if (!existsSync(root)) throw new Error(`каталог не найден: ${root}`);
       const idx = buildIndex(root, { force: name === 'index_status' && a.refresh });
       if (!idx.configs.length) {
-        return `В ${root} не найдено выгрузок 1С (Configuration.xml). Выберите папку проекта в goose или передайте root.`;
+        return `В ${root} не найдено выгрузок 1С (Configuration.xml). Запустите OpenCode из папки проекта или передайте root.`;
       }
       switch (name) {
         case 'find_object': return findObject(idx, a);

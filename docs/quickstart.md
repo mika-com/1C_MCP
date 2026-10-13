@@ -12,7 +12,8 @@
 |-----------|-------------|
 | `OpenCode` | Агентная среда, которая загружает skills и использует MCP |
 | `Python 3.9+` | Скрипты навыков и установщик `scripts/opencode_port.py` |
-| `Node.js 18+` | MCP-серверы `1c-ask`, `1c-search`, `1c-bsl` и `web-test` |
+| `Node.js 18+` | MCP-серверы `1c-search`, `1c-bsl` и `web-test` |
+| `vanessa-runner 3.x` | Необязательно: навык и MCP `vrunner` |
 | `1С:Предприятие 8.3` | Сборка, выгрузка, загрузка в базы и веб-публикация |
 | `Git` | Желателен для безопасной работы и отката изменений |
 
@@ -25,47 +26,41 @@ cd 1C_MCP_GOOSE
 
 Если Git не нужен, можно скачать ZIP архива репозитория и распаковать его в любую папку.
 
-## Шаг 2. Установите навыки
-
-### В проект
-
-Используйте этот вариант, если хотите хранить skills рядом с проектом и сделать их доступными всей команде:
+## Шаг 2. Установите агента в проект
 
 ```bash
-python scripts/opencode_port.py install --project-dir .
-```
-
-Навыки будут установлены в `.agents/skills/` внутри проекта.
-
-### Глобально
-
-Если навыки нужны сразу во всех проектах:
-
-```bash
+python scripts/opencode_port.py install --project-dir /путь/к/1С-проекту
+# или глобально для всех проектов:
 python scripts/opencode_port.py install --global
 ```
 
-Навыки будут установлены в `~/.config/opencode/skills/`.
+Установщик:
+- копирует навыки в `<проект>/.opencode/skills/` (глобально — `~/.config/opencode/skills/`);
+- копирует агентов (`1c`, `1c-analyst`, `1c-developer`, `1c-deployer`, `1c-tester`) в `.opencode/agents/`
+  и команды `/1c-analyze`, `/1c-implement`, `/1c-deploy`, `/1c-webtest`, `/1c-check` в `.opencode/commands/`;
+- создаёт шаблон `AGENTS.md` в проекте, если его ещё нет;
+- регистрирует MCP-серверы в `~/.config/opencode/opencode.json` (формат v2, `mcp.servers`).
 
-## Шаг 3. Подключите MCP-серверы
+## Шаг 3. MCP-серверы
 
-В корне репозитория уже есть [opencode.json](../opencode.json), но если у вас свой конфиг OpenCode,
-проще аккуратно дописать только записи 1С:
+Регистрацию можно выполнить и отдельно:
 
 ```bash
-node mcp/register-opencode-mcp.mjs
+node mcp/register-opencode-mcp.mjs            # 1c-search, 1c-bsl (+ vrunner выключен)
+node mcp/register-opencode-mcp.mjs --vrunner  # включить vrunner-mcp (нужен vanessa-runner 3.x)
 ```
 
-Скрипт добавляет или обновляет:
-- `1c-ask` — уточняющие вопросы;
 - `1c-search` — поиск по выгрузке;
-- `1c-bsl` — проверка BSL-кода.
+- `1c-bsl` — BSL Language Server;
+- `vrunner` — команды vanessa-runner как инструменты (по умолчанию `disabled: true`).
 
-## Шаг 4. Перезапустите OpenCode
+Таймауты в OpenCode v2 — объект в миллисекундах (`startup`, `catalog`, `execution`). Уточняющие вопросы агент
+задаёт встроенным инструментом `question` — отдельный MCP-сервер для этого больше не нужен.
 
-После установки навыков и MCP перезапустите OpenCode, чтобы он перечитал:
-- `skills/` из `.agents/skills/` или `~/.config/opencode/skills/`;
-- локальный `opencode.json`.
+## Шаг 4. Запустите OpenCode
+
+Откройте каталог проекта в OpenCode Desktop (или `opencode` в терминале), выберите агента **1c**.
+Проверьте MCP: `/mcps` или `opencode mcp list`.
 
 ## Шаг 5. Откройте проект 1С
 
@@ -87,7 +82,7 @@ node mcp/register-opencode-mcp.mjs
 - `Проверь изменённые модули через bsl-check`
 - `Используй MCP 1c-search и найди вызовы процедуры ПередЗаписью`
 
-Если задача неоднозначна, агент должен использовать `1c-ask` и уточнить параметры.
+Если задача неоднозначна, агент задаст вопросы встроенным инструментом `question`.
 
 ## Шаг 7. Настройте `.v8-project.json`, если нужна база
 
@@ -125,12 +120,13 @@ npx --prefix "$HOME/.config/opencode" playwright install chromium
 ```
 
 Если навыки установлены в проект, `scripts/opencode_port.py` перенастраивает `web-test`
-на локальный префикс `<проект>/.agents`.
+на локальный префикс `<проект>/.opencode`.
 
 ## Что проверять после установки
 
 - агент видит навыки вроде `epf-init`, `meta-info`, `form-edit`, `bsl-check`;
-- в `opencode.json` появились записи `1c-ask`, `1c-search`, `1c-bsl`;
+- в `~/.config/opencode/opencode.json` в `mcp.servers` появились `1c-search`, `1c-bsl`, `vrunner`;
+- в списке агентов есть `1c`;
 - в корне проекта корректный `.v8-project.json`, если вы работаете с базой;
 - `Node.js` доступен из PATH;
 - `Python` запускает `scripts/opencode_port.py`.
@@ -139,10 +135,11 @@ npx --prefix "$HOME/.config/opencode" playwright install chromium
 
 | Проблема | Что делать |
 |----------|------------|
-| Агент не видит навыки | Проверьте, что skills установлены в `.agents/skills/` или `~/.config/opencode/skills/`, затем перезапустите OpenCode |
-| Нет `1c-search` / `1c-ask` / `1c-bsl` | Выполните `node mcp/register-opencode-mcp.mjs` и проверьте `opencode.json` |
+| Агент не видит навыки | Проверьте `.opencode/skills/` проекта или `~/.config/opencode/skills/` |
+| Нет `1c-search` / `1c-bsl` | Выполните `node mcp/register-opencode-mcp.mjs`, проверьте `opencode mcp list` |
+| `1c-bsl` «не подключён» | BSL LS стартует JVM — `timeout.startup` должен быть ≥ 30000 мс |
 | `Cannot find package 'playwright'` | Повторите установку Playwright из шага 8 |
-| `BSL Language Server не установлен` | Выполните `node skills/bsl-check/scripts/bsl-check.mjs -Install` или установите через Windows-установщик |
+| `BSL Language Server не установлен` | Выполните `node skills/bsl-check/scripts/bsl-check.mjs -Install`  |
 | Навыки не могут найти платформу | Укажите `v8path` в `.v8-project.json` |
 | Агент не понимает, с какой базой работать | Добавьте `default`, `aliases` или явно укажите базу в запросе |
 

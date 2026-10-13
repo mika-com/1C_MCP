@@ -1,9 +1,15 @@
 #!/usr/bin/env node
-// register-opencode-mcp.mjs — записывает локальные MCP-серверы проекта в opencode.json
+// register-opencode-mcp.mjs — записывает MCP-серверы 1С в конфиг OpenCode v2 (mcp.servers).
 //
-//   node register-opencode-mcp.mjs            — добавить/обновить 1c-ask, 1c-search, 1c-bsl
-//   node register-opencode-mcp.mjs --remove   — удалить их из opencode.json
-//   node register-opencode-mcp.mjs --config <путь>   — другой конфиг OpenCode
+//   node register-opencode-mcp.mjs                  — добавить/обновить 1c-search, 1c-bsl (+ vrunner выключенным)
+//   node register-opencode-mcp.mjs --vrunner        — то же, но vrunner-mcp включён (нужен vanessa-runner 3.x)
+//   node register-opencode-mcp.mjs --remove         — удалить серверы 1С из конфига
+//   node register-opencode-mcp.mjs --config <путь>  — другой конфиг (по умолчанию ~/.config/opencode/opencode.json)
+//
+// Формат OpenCode v2: серверы лежат в mcp.servers, отключение — "disabled": true (не "enabled"),
+// таймауты — объект в миллисекундах { startup, catalog, execution }.
+// Старые записи v1 (mcp["1c-ask"], mcp["1c-search"]…) и сервер 1c-ask удаляются: в v2 вопросы
+// пользователю задаются встроенным инструментом question.
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -12,65 +18,47 @@ import { fileURLToPath } from 'node:url';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 
-const SERVERS = [
-  {
-    key: '1c-ask',
-    file: 'ask-user.mjs',
-    timeout: 600,
-  },
-  {
-    key: '1c-search',
-    file: 'code-search.mjs',
-    timeout: 600,
-  },
-  {
-    key: '1c-bsl',
-    file: 'bsl-ls.mjs',
-    timeout: 300,
-  },
+export const SERVERS = [
+  // BSL LS поднимает JVM (~2 с и больше) — даём запас на startup (исправление из PR #7, в мс).
+  { key: '1c-search', file: 'code-search.mjs', timeout: { startup: 10000, catalog: 10000 } },
+  { key: '1c-bsl', file: 'bsl-ls.mjs', timeout: { startup: 30000, catalog: 30000 } },
 ];
+export const VRUNNER = { key: 'vrunner', command: ['vrunner-mcp'], timeout: { startup: 30000, catalog: 30000 } };
+export const LEGACY_KEYS = ['1c-ask', '1c-search', '1c-bsl'];
 
-function opencodeConfigPath(env = process.env) {
+export function opencodeConfigPath(env = process.env) {
   const root = env.XDG_CONFIG_HOME || join(homedir(), '.config');
   return join(root, 'opencode', 'opencode.json');
 }
 
-function readConfig(path) {
-  if (!existsSync(path)) {
-    return { $schema: 'https://opencode.ai/config.json', mcp: {} };
-  }
-  const text = readFileSync(path, 'utf8').replace(/^\uFEFF/, '').trim();
-  if (!text) {
-    return { $schema: 'https://opencode.ai/config.json', mcp: {} };
-  }
+function emptyConfig() {
+  return { $schema: 'https://opencode.ai/config.json', mcp: { servers: {} } };
+}
+
+export function parseConfig(text) {
+  text = (text || '').replace(/^\uFEFF/, '').trim();
+  if (!text) return emptyConfig();
   const parsed = JSON.parse(text);
   if (!parsed.$schema) parsed.$schema = 'https://opencode.ai/config.json';
-  if (!parsed.mcp || typeof parsed.mcp !== 'object' || Array.isArray(parsed.mcp)) {
-    parsed.mcp = {};
-  }
   return parsed;
 }
 
-function serverConfig(mcpDir, item) {
-  return {
-    type: 'local',
-    command: ['node', join(mcpDir, item.file)],
-    enabled: true,
-    timeout: item.timeout,
-  };
-}
-
-function updateConfig(config, mcpDir, { remove = false } = {}) {
+export function updateConfig(config, mcpDir, { remove = false, vrunner = false } = {}) {
   const next = structuredClone(config);
-  if (!next.mcp || typeof next.mcp !== 'object' || Array.isArray(next.mcp)) {
-    next.mcp = {};
+  if (!next.mcp || typeof next.mcp !== 'object' || Array.isArray(next.mcp)) next.mcp = {};
+  // миграция v1: серверы 1С прямо под mcp
+  for (const k of LEGACY_KEYS) delete next.mcp[k];
+  if (!next.mcp.servers || typeof next.mcp.servers !== 'object') next.mcp.servers = {};
+  const servers = next.mcp.servers;
+  delete servers['1c-ask'];
+  for (const s of SERVERS) {
+    if (remove) delete servers[s.key];
+    else servers[s.key] = { type: 'local', command: ['node', join(mcpDir, s.file)], timeout: s.timeout };
   }
-  for (const item of SERVERS) {
-    if (remove) {
-      delete next.mcp[item.key];
-    } else {
-      next.mcp[item.key] = serverConfig(mcpDir, item);
-    }
+  if (remove) delete servers[VRUNNER.key];
+  else {
+    servers[VRUNNER.key] = { type: 'local', command: VRUNNER.command, timeout: VRUNNER.timeout };
+    if (!vrunner) servers[VRUNNER.key].disabled = true;
   }
   return next;
 }
@@ -78,24 +66,22 @@ function updateConfig(config, mcpDir, { remove = false } = {}) {
 function main() {
   const argv = process.argv.slice(2);
   const remove = argv.includes('--remove');
+  const vrunner = argv.includes('--vrunner');
   const ci = argv.indexOf('--config');
   const cfg = ci >= 0 ? resolve(argv[ci + 1]) : opencodeConfigPath();
   const beforeText = existsSync(cfg) ? readFileSync(cfg, 'utf8') : '';
-  const before = readConfig(cfg);
-  const after = updateConfig(before, HERE, { remove });
+  const after = updateConfig(parseConfig(beforeText), HERE, { remove, vrunner });
   const afterText = JSON.stringify(after, null, 2) + '\n';
-
   if (beforeText.replace(/^\uFEFF/, '') === afterText) {
     console.log(`Без изменений: ${cfg}`);
     return 0;
   }
-
   mkdirSync(dirname(cfg), { recursive: true });
   if (existsSync(cfg)) copyFileSync(cfg, cfg + '.bak');
   writeFileSync(cfg, afterText, 'utf8');
   console.log(remove
     ? `MCP-серверы 1С удалены из ${cfg}`
-    : `MCP-серверы 1С (${SERVERS.map((e) => e.key).join(', ')}) записаны в ${cfg}`);
+    : `MCP-серверы 1С (1c-search, 1c-bsl, vrunner${vrunner ? '' : ' — выключен'}) записаны в ${cfg}`);
   return 0;
 }
 

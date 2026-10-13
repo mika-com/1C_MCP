@@ -2,6 +2,7 @@
 name: form-decompile
 description: Декомпиляция управляемой формы 1С (Form.xml) в JSON-черновик в формате form-compile. Используй для scaffold новой формы по образцу или структурного рефакторинга. Не для точечных правок. Вызывай только по явной просьбе пользователя.
 argument-hint: <FormPath> [-OutputPath <out.json>]
+disable-model-invocation: true
 ---
 
 # /form-decompile — JSON-черновик из Form.xml управляемой формы

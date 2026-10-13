@@ -1,4 +1,4 @@
-// bsl-ls.mjs v1.0 — поиск и установка BSL Language Server для навыков 1С в goose.
+// bsl-ls.mjs v1.0 — поиск и установка BSL Language Server для навыков 1С в OpenCode.
 // Используется навыком bsl-check и MCP-сервером mcp/bsl-ls.mjs.
 // BSL LS: https://github.com/1c-syntax/bsl-language-server (LGPL-3.0), ставится отдельно,
 // в репозиторий не входит.

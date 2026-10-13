@@ -2,6 +2,7 @@
 name: meta-decompile
 description: Декомпиляция объекта метаданных 1С в JSON-заготовку формата meta-compile. Используй когда нужно получить черновик DSL-описания нового объекта по образцу другого. Не сохраняет UUID/модули/формы. Вызывай только по явной просьбе пользователя.
 argument-hint: <ObjectPath> [-OutputPath <out.json>]
+disable-model-invocation: true
 ---
 
 # /meta-decompile — DSL-заготовка из XML объекта метаданных

@@ -29,7 +29,7 @@ $OutputEncoding = [System.Text.Encoding]::UTF8
 
 # --- Resolve ApachePath ---
 if (-not $ApachePath) {
-    $projectRoot = (Get-Location).Path  # goose: корень проекта — рабочий каталог
+    $projectRoot = (Get-Location).Path  # OpenCode: корень проекта — рабочий каталог
     $ApachePath = Join-Path $projectRoot "tools\apache24"
 }
 
