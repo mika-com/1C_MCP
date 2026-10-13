@@ -239,6 +239,18 @@ else {
     }
 }
 
+if (-not $NoBslLs) {
+    # Память JVM для больших конфигураций (BSL LS), если пользователь не задал сам
+    if (-not [Environment]::GetEnvironmentVariable('BSL_LS_XMX', 'User') -and -not $env:BSL_LS_XMX) {
+        $ramGb = 8
+        try { $ramGb = [math]::Round((Get-CimInstance Win32_ComputerSystem).TotalPhysicalMemory / 1GB) } catch { Write-Verbose 'ОЗУ не определено' }
+        $xmx = if ($ramGb -ge 32) { '6g' } elseif ($ramGb -ge 16) { '4g' } else { '2g' }
+        [Environment]::SetEnvironmentVariable('BSL_LS_XMX', $xmx, 'User')
+        Write-Ok "BSL_LS_XMX=$xmx (ОЗУ ~$ramGb ГБ; переменная пользователя, действует в новых сеансах OpenCode)"
+    }
+    Write-Info 'Зависшие процессы BSL LS: powershell -ExecutionPolicy Bypass -File scripts\kill-bsl-ls.ps1'
+}
+
 # ---------- 6. Playwright + Chromium ----------
 Write-Step '6/6 Playwright и Chromium для web-test'
 if ($NoBrowser) { Write-Info 'Пропущено (-NoBrowser).' }

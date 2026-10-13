@@ -25,12 +25,15 @@
         ],
         "timeout": {
           "startup": 30000,
-          "catalog": 30000
+          "catalog": 30000,
+          "execution": 120000
         }
       },
       "vrunner": {
         "type": "local",
         "command": [
+          "node",
+          "./mcp/run-supervised.mjs",
           "vrunner-mcp"
         ],
         "timeout": {

@@ -1,40 +1,178 @@
 #!/usr/bin/env node
-// bsl-ls.mjs — запуск BSL Language Server в режиме MCP для OpenCode.
-// Если BSL LS установлен (~/.config/opencode/tools/bsl-language-server, ~/.agents/tools/... или BSL_LS_PATH) — передаёт
-// stdio ему: инструменты analyze_file, document_symbols, definition, find_references,
-// call_hierarchy, type_info, global_member_info и др.
-// Если не установлен или выключен (BSL_LS_MCP=off) — маленький сервер-заглушка с подсказкой,
-// чтобы OpenCode не показывал ошибку запуска сервера в каждом сеансе.
+// bsl-ls.mjs — MCP-сервер 1c-bsl: прокси к `bsl-language-server mcp` для OpenCode.
+// Инструменты BSL LS: analyze_file, document_symbols, definition, find_references, call_hierarchy, hover,
+// type_info, global_member_info, register_workspace_folder и др.
+//
+// Защита от зависаний на больших конфигурациях (тысячи .bsl):
+//   * Область индексации. BSL LS индексирует каждую рабочую папку целиком (на 6–7 тыс. модулей — 15–30 мин).
+//     По умолчанию прокси НЕ отдаёт ему корень проекта (запрос roots/list отвечается пустым списком), и папку
+//     нужно зарегистрировать явно — `register_workspace_folder` с узким каталогом (расширение, обработка).
+//     BSL_LS_ROOT=<каталог>[;<каталог>] — отдать эти папки сразу; BSL_LS_ROOT=auto — старое поведение (корни клиента).
+//   * Таймаут вызова. Если BSL LS не ответил за BSL_LS_TIMEOUT_MS (по умолчанию 90000), клиент сразу получает
+//     понятную ошибку, а поздний ответ отбрасывается. Агент не висит.
+//   * Дерево процессов. При EOF stdin, SIGTERM/SIGINT, смерти родителя или выходе убивается всё дерево
+//     BSL LS (Windows — taskkill /T /F). Один экземпляр на каталог проекта: предыдущий (или осиротевший) гасится
+//     (BSL_LS_SINGLETON=0 — отключить).
+//   * Память JVM: BSL_LS_XMX (например 4g) — передаётся как -Xmx.
+// BSL_LS_MCP=off или BSL LS не установлен — маленький сервер-заглушка с подсказкой.
 
-import { spawn } from 'node:child_process';
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { dirname, join } from 'node:path';
-import { existsSync } from 'node:fs';
+import { dirname, join, resolve, basename } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
+import { createInterface } from 'node:readline';
 import { startServer } from './lib/stdio-server.mjs';
+import { spawnSupervised, killTree, isAlive, processCommandLine } from './lib/proc-tree.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
-// Навыки лежат в ../skills/ (клон репозитория); bsl-ls-locate.mjs рядом — запасной вариант.
-const locator = [join(here, '..', 'skills', 'bsl-check', 'scripts', 'bsl-ls.mjs'), join(here, 'bsl-ls-locate.mjs')]
-  .find((p) => existsSync(p));
-const { findBslLs, bslEnv, INSTALL_HINT } = await import(pathToFileURL(locator).href);
+const env = process.env;
 
-const found = process.env.BSL_LS_MCP === 'off' ? null : findBslLs();
+async function loadLocator() {
+  const p = [join(here, '..', 'skills', 'bsl-check', 'scripts', 'bsl-ls.mjs'),
+    join(here, '..', 'own-skills', 'bsl-check', 'scripts', 'bsl-ls.mjs')].find((x) => existsSync(x));
+  return p ? import(pathToFileURL(p).href) : null;
+}
 
-if (found) {
-  const child = spawn(found.cmd, [...found.args, 'mcp'], { stdio: 'inherit', env: bslEnv() });
-  child.on('exit', (code) => process.exit(code ?? 0));
-  child.on('error', (e) => { process.stderr.write(`[bsl-ls] ${e.message}\n`); process.exit(1); });
-  for (const sig of ['SIGINT', 'SIGTERM']) process.on(sig, () => child.kill(sig));
-} else {
-  const off = process.env.BSL_LS_MCP === 'off';
-  startServer({
-    name: 'bsl-ls-stub',
-    instructions: off ? '' : 'BSL Language Server не установлен: проверка и навигация по BSL-коду недоступны.',
-    tools: [{
-      name: 'bsl_ls_status',
-      description: 'Состояние BSL Language Server (проверка BSL-кода): как установить, если он не установлен.',
-      inputSchema: { type: 'object', properties: {} },
-    }],
-    onCall: () => (off ? 'BSL LS отключён переменной BSL_LS_MCP=off.' : INSTALL_HINT),
+// ---- один экземпляр на каталог проекта ----
+export function lockPath(root) {
+  const h = createHash('sha1').update(resolve(root).toLowerCase()).digest('hex').slice(0, 12);
+  return join(env.BSL_LS_LOCK_DIR || join(tmpdir(), '1c-bsl-ls'), `${h}.json`);
+}
+
+export function takeOverLock(root, { log = () => {} } = {}) {
+  const file = lockPath(root);
+  mkdirSync(dirname(file), { recursive: true });
+  if (existsSync(file)) {
+    try {
+      const old = JSON.parse(readFileSync(file, 'utf8'));
+      // PID мог достаться другому процессу — гасим, только если это наш прокси / BSL LS
+      const ours = (pid, re) => isAlive(pid) && re.test(processCommandLine(pid));
+      if (old.pid && old.pid !== process.pid && ours(old.pid, /bsl-ls\.mjs/i)) {
+        log(`гашу предыдущий экземпляр (pid ${old.pid})`);
+        killTree(old.pid, { graceMs: 3000 });   // даём ему погасить своё дерево, затем добиваем
+      }
+      if (old.childPid && ours(old.childPid, /bsl-language-server|bsl-ls|java/i)) {
+        log(`гашу осиротевший BSL LS (pid ${old.childPid})`);
+        killTree(old.childPid);
+      }
+    } catch { /* битый lock — перезапишем */ }
+  }
+  return file;
+}
+
+function writeLock(file, data) {
+  try { writeFileSync(file, JSON.stringify({ ...data, root: process.cwd(), started: new Date().toISOString() })); } catch { /* */ }
+}
+
+function releaseLock(file) {
+  try {
+    const cur = JSON.parse(readFileSync(file, 'utf8'));
+    if (cur.pid === process.pid) rmSync(file, { force: true });
+  } catch { /* */ }
+}
+
+// ---- область индексации ----
+export function configuredRoots(value = env.BSL_LS_ROOT) {
+  if (!value) return [];
+  if (value.trim().toLowerCase() === 'auto') return null;   // null — пропускать запрос к клиенту
+  return value.split(/[;\n]/).map((s) => s.trim()).filter(Boolean).map((p) => resolve(p))
+    .filter((p) => existsSync(p)).map((p) => ({ uri: pathToFileURL(p).href, name: basename(p) }));
+}
+
+// ---- прокси JSON-RPC (по строке на сообщение) с таймаутами ----
+export function createProxy({ toChild, toClient, timeoutMs, roots, log = () => {} }) {
+  const pending = new Map();   // id запроса клиента → { timer, method, tool }
+  const dropped = new Set();   // id, по которым клиент уже получил ошибку таймаута
+
+  const key = (id) => JSON.stringify(id);
+
+  function fromClient(line) {
+    let msg;
+    try { msg = JSON.parse(line); } catch { toChild(line); return; }
+    if (msg && msg.id !== undefined && msg.method) {
+      const tool = msg.method === 'tools/call' ? msg.params?.name : undefined;
+      const t = setTimeout(() => {
+        if (!pending.delete(key(msg.id))) return;
+        dropped.add(key(msg.id));
+        const sec = Math.round(timeoutMs / 1000);
+        const text = `BSL LS не ответил за ${sec} с (${tool || msg.method}). Скорее всего идёт индексация большой ` +
+          'рабочей папки. Не ждите и не повторяйте в цикле: проверьте код навыком bsl-check с узким -Path ' +
+          '(каталог расширения/объекта), или зарегистрируйте узкую папку register_workspace_folder и повторите позже. ' +
+          'Таймаут — переменная BSL_LS_TIMEOUT_MS.';
+        log(`таймаут ${tool || msg.method} (id ${key(msg.id)})`);
+        if (msg.method === 'tools/call') {
+          toClient(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { content: [{ type: 'text', text }], isError: true } }));
+        } else {
+          toClient(JSON.stringify({ jsonrpc: '2.0', id: msg.id, error: { code: -32001, message: text } }));
+        }
+      }, timeoutMs);
+      t.unref?.();
+      pending.set(key(msg.id), { timer: t });
+    }
+    toChild(line);
+  }
+
+  function fromChild(line) {
+    let msg;
+    try { msg = JSON.parse(line); } catch { toClient(line); return; }
+    // запрос сервера к клиенту за корнями — отвечаем сами, если область задана не auto
+    if (msg && msg.method === 'roots/list' && msg.id !== undefined && roots !== null) {
+      log(`roots/list → ${roots.length ? roots.map((r) => r.uri).join(', ') : 'пусто'}`);
+      toChild(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { roots } }));
+      return;
+    }
+    if (msg && msg.id !== undefined && !msg.method) {
+      const k = key(msg.id);
+      if (dropped.delete(k)) { log(`поздний ответ id ${k} отброшен`); return; }
+      const p = pending.get(k);
+      if (p) { clearTimeout(p.timer); pending.delete(k); }
+    }
+    toClient(line);
+  }
+
+  return { fromClient, fromChild, pending, dropped };
+}
+
+async function main() {
+  const loc = await loadLocator();
+  const found = env.BSL_LS_MCP === 'off' || !loc ? null : loc.findBslLs();
+  if (!found) {
+    const off = env.BSL_LS_MCP === 'off';
+    startServer({
+      name: 'bsl-ls-stub',
+      instructions: off ? '' : 'BSL Language Server не установлен: проверка и навигация по BSL-коду недоступны.',
+      tools: [{
+        name: 'bsl_ls_status',
+        description: 'Состояние BSL Language Server (проверка BSL-кода): как установить, если он не установлен.',
+        inputSchema: { type: 'object', properties: {} },
+      }],
+      onCall: () => (off ? 'BSL LS отключён переменной BSL_LS_MCP=off.' : (loc?.INSTALL_HINT || 'BSL LS не найден')),
+    });
+    return;
+  }
+
+  const log = (m) => process.stderr.write(`[1c-bsl] ${m}\n`);
+  const lock = env.BSL_LS_SINGLETON === '0' ? null : takeOverLock(process.cwd(), { log });
+  const timeoutMs = Math.max(5000, Number(env.BSL_LS_TIMEOUT_MS) || 90000);
+  const roots = configuredRoots();
+
+  const { child } = spawnSupervised(found.cmd, [...found.args, 'mcp'], {
+    tag: '1c-bsl', stdio: ['pipe', 'pipe', 'inherit'], env: loc.bslEnv(), watchStdin: true,
+    onCleanup: () => { if (lock) releaseLock(lock); },
   });
+  if (lock) writeLock(lock, { pid: process.pid, childPid: child.pid });
+
+  const proxy = createProxy({
+    toChild: (l) => { if (child.stdin.writable) child.stdin.write(l + '\n'); },
+    toClient: (l) => process.stdout.write(l + '\n'),
+    timeoutMs, roots, log,
+  });
+  createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line', (l) => { if (l.trim()) proxy.fromClient(l); });
+  createInterface({ input: child.stdout, crlfDelay: Infinity }).on('line', (l) => { if (l.trim()) proxy.fromChild(l); });
+  child.stdin.on('error', () => { /* ребёнок умер — обработает exit */ });
+}
+
+if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
+  await main();
 }

@@ -145,6 +145,8 @@ python3 skills/print-form/scripts/mxl-render.py <...>/Templates/<Макет>/Ext
 | `opencode.json` | конфиг v2 для работы в самом репозитории (`skills`, `mcp.servers`, `default_agent`) |
 | `templates/AGENTS.md` | шаблон инструкций для 1С-проекта |
 | `install.ps1`, `install.cmd` | установка на Windows одной командой из папки проекта |
+| `scripts/kill-bsl-ls.mjs`, `scripts/kill-bsl-ls.ps1` | завершить зависшие процессы BSL LS ([зависания на больших проектах](docs/quickstart.md#зависания-и-процессы-bsl-ls-на-больших-конфигурациях)) |
+| `tests/mcp/run.mjs` | тесты прокси `1c-bsl`: дерево процессов, таймаут, область индексации |
 | `scripts/opencode_port.py` | сборка из upstream и установка; ядро — `scripts/port_core.py` |
 | `docs/` | гайды и спецификации форматов 1С; [quickstart](docs/quickstart.md), [тестирование](docs/testing-guide.md) |
 | `legacy/` | артефакты старого goose-порта (не используются, см. [legacy/README.md](legacy/README.md)) |

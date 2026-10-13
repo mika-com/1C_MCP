@@ -26,8 +26,10 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 export const SERVERS = [
   // BSL LS поднимает JVM (~2 с и больше) — даём запас на startup (исправление из PR #7, в мс).
   { key: '1c-search', file: 'code-search.mjs', timeout: { startup: 10000, catalog: 10000 } },
-  { key: '1c-bsl', file: 'bsl-ls.mjs', timeout: { startup: 30000, catalog: 30000 } },
+  // execution больше собственного таймаута прокси (BSL_LS_TIMEOUT_MS, 90 с): ошибку отдаёт прокси, а не обрыв.
+  { key: '1c-bsl', file: 'bsl-ls.mjs', timeout: { startup: 30000, catalog: 30000, execution: 120000 } },
 ];
+// vrunner-mcp запускается через run-supervised.mjs: при закрытии сеанса гасится всё дерево процессов.
 export const VRUNNER = { key: 'vrunner', command: ['vrunner-mcp'], timeout: { startup: 30000, catalog: 30000 } };
 export const LEGACY_KEYS = ['1c-ask', '1c-search', '1c-bsl'];
 export const LSP_KEY = 'bsl';
@@ -68,7 +70,7 @@ export function updateConfig(config, mcpDir, { remove = false, vrunner = false, 
   }
   if (remove) delete servers[VRUNNER.key];
   else {
-    servers[VRUNNER.key] = { type: 'local', command: VRUNNER.command, timeout: VRUNNER.timeout };
+    servers[VRUNNER.key] = { type: 'local', command: ['node', join(mcpDir, 'run-supervised.mjs'), ...VRUNNER.command], timeout: VRUNNER.timeout };
     if (!vrunner) servers[VRUNNER.key].disabled = true;
   }
   // lsp: true/false/отсутствует — превращаем в объект, не теряя чужие серверы

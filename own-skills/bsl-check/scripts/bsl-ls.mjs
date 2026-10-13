@@ -33,6 +33,11 @@ export function bslEnv(base = process.env) {
     env.LC_ALL = 'C.UTF-8';
     env.LANG = 'C.UTF-8';
   }
+  // Память JVM для больших конфигураций: BSL_LS_XMX=4g → -Xmx4g (работает и для jar, и для сборки с JRE)
+  const xmx = (env.BSL_LS_XMX || '').trim();
+  if (/^\d+[kKmMgG]?$/.test(xmx) && !/-Xmx/.test(env.JAVA_TOOL_OPTIONS || '')) {
+    env.JAVA_TOOL_OPTIONS = `${env.JAVA_TOOL_OPTIONS ? env.JAVA_TOOL_OPTIONS + ' ' : ''}-Xmx${xmx}`;
+  }
   return env;
 }
 
