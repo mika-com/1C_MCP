@@ -40,7 +40,8 @@ python scripts/opencode_port.py install --global
   `.opencode/agents/` и команды `/1c-analyze`, `/1c-implement`, `/1c-deploy`, `/1c-webtest`, `/1c-bdd`, `/1c-check`
   в `.opencode/commands/`;
 - создаёт шаблон `AGENTS.md` в проекте, если его ещё нет;
-- регистрирует MCP-серверы в `~/.config/opencode/opencode.json` (формат v2, `mcp.servers`).
+- регистрирует MCP-серверы в `~/.config/opencode/opencode.json` (формат v2, `mcp.servers`) и LSP `bsl` для `.bsl`/`.os`
+  (`--no-lsp` — не записывать; в v2 секция `lsp` пока не исполняется, диагностика — через `1c-bsl` и `bsl-check`).
 
 ## Шаг 3. MCP-серверы
 

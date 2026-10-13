@@ -5,7 +5,7 @@
 Команды:
   build     — пересобрать skills/ из upstream cc-1c-skills (+ свои навыки из own-skills/)
   install   — установить навыки, агентов и команды в проект (.opencode/) или глобально (~/.config/opencode/)
-              и зарегистрировать MCP-серверы (~/.config/opencode/opencode.json)
+              и зарегистрировать MCP-серверы и LSP bsl (~/.config/opencode/opencode.json)
   runtime   — переключить рантайм (powershell/python) у установленных навыков
   uninstall — удалить установленное командой install
 
@@ -81,7 +81,7 @@ def copy_md_dir(kind, oc_dir):
     return copied
 
 
-def register_mcp(remove=False, vrunner=False):
+def register_mcp(remove=False, vrunner=False, lsp=True):
     script = os.path.join(repo_root(), 'mcp', 'register-opencode-mcp.mjs')
     node = shutil.which('node')
     if not node:
@@ -89,7 +89,8 @@ def register_mcp(remove=False, vrunner=False):
             print('Node.js не найден — MCP-серверы не зарегистрированы. '
                   f'После установки Node.js выполните: node "{script}"')
         return
-    cmd = [node, script] + (['--remove'] if remove else []) + (['--vrunner'] if vrunner else [])
+    cmd = ([node, script] + (['--remove'] if remove else []) + (['--vrunner'] if vrunner else [])
+           + ([] if lsp else ['--no-lsp']))
     subprocess.run(cmd, check=False)
 
 
@@ -121,7 +122,7 @@ def cmd_install(args):
             shutil.copy2(os.path.join(repo_root(), 'templates', 'AGENTS.md'), agents_md)
             print(f'Создан шаблон {agents_md} — поправьте под свой проект.')
     if not args.no_mcp:
-        register_mcp(remove=False, vrunner=args.vrunner)
+        register_mcp(remove=False, vrunner=args.vrunner, lsp=not args.no_lsp)
     print(f'Установлено: {len(skills)} навыков в {dst}, агентов и команд: {len(files)} в {oc}')
     if not args.is_global:
         core.print_gitignore_recommendations(base)
@@ -182,6 +183,7 @@ def main():
     p.add_argument('--runtime', choices=['powershell', 'python'], help='сразу переключить рантайм навыков')
     p.add_argument('--no-mcp', action='store_true', help='не регистрировать MCP-серверы')
     p.add_argument('--vrunner', action='store_true', help='включить MCP-сервер vrunner-mcp (vanessa-runner 3.x)')
+    p.add_argument('--no-lsp', action='store_true', help='не записывать LSP bsl (BSL LS) в конфиг OpenCode')
     p.set_defaults(func=cmd_install)
 
     p = sub.add_parser('runtime', help='переключить рантайм у установленных навыков')

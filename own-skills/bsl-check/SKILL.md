@@ -55,5 +55,8 @@ node "{SKILL_DIR}/scripts/bsl-check.mjs" -Path "<каталог или файл>
 | `definition`, `find_references`, `call_hierarchy` | Переход к определению, ссылки, граф вызовов (по позиции: файл, строка, символ — с нуля) |
 | `type_info`, `global_member_info`, `global_member_search` | Справка по типам и методам платформы (синтакс-помощник; нужна установленная платформа 1С) |
 
+Секция `lsp.bsl` конфига OpenCode (`lsp/bsl-lsp.mjs`) запускает тот же BSL LS как языковой сервер, но OpenCode v2
+её пока не исполняет — после правок проверяй код явно этим навыком или через `1c-bsl`.
+
 Для поиска объектов и методов по имени во всей выгрузке удобнее инструменты сервера `1c-search`
 (`find_object`, `find_method`, `find_usages`).

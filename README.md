@@ -73,6 +73,13 @@ python scripts/opencode_port.py install --project-dir /путь/к/1С-прое�
 | `vrunner` | команды vanessa-runner 3.x (`vrunner-mcp`) | `disabled: true`, включить: `node mcp/register-opencode-mcp.mjs --vrunner` |
 
 Формат OpenCode v2: `mcp.servers`, `disabled`, таймауты в миллисекундах (`startup` 10 с / 30 с для BSL LS).
+
+**LSP.** В `opencode.json` и установщике есть секция `lsp.bsl`: BSL Language Server для `.bsl` и `.os` через
+[`lsp/bsl-lsp.mjs`](lsp/bsl-lsp.mjs) — тот же поиск BSL LS, что у `1c-bsl` (`BSL_LS_PATH` →
+`~/.config/opencode/tools/bsl-language-server` → `~/.agents/tools/...`), режим `lsp` по stdio. **OpenCode v2 эту
+секцию принимает, но языковые серверы пока не запускает** (документация, «Migrate from V1»); она работает в OpenCode
+1.x и включится сама, когда v2 вернёт LSP. Рабочая диагностика в v2 — MCP `1c-bsl` (точечно по модулю) и навык
+`bsl-check` (каталог, отчёт). Не записывать LSP: `install --no-lsp` или `register-opencode-mcp.mjs --no-lsp`.
 Уточняющие вопросы агент задаёт встроенным инструментом `question` (сервер `1c-ask` перенесён в `legacy/`).
 
 ## Структура
@@ -83,7 +90,8 @@ python scripts/opencode_port.py install --project-dir /путь/к/1С-прое�
 | `.opencode/commands/` | команды `/1c-*` |
 | `skills/` | собранные навыки (генерируются, руками не править) |
 | `own-skills/` | свои навыки (`bsl-check`, `vrunner`, `1c-test`) — источник для `skills/` |
-| `mcp/` | MCP-серверы и `register-opencode-mcp.mjs` |
+| `mcp/` | MCP-серверы и `register-opencode-mcp.mjs` (пишет `mcp.servers` и `lsp.bsl`) |
+| `lsp/` | `bsl-lsp.mjs` — запуск BSL LS в режиме LSP для секции `lsp` |
 | `opencode.json` | конфиг v2 для работы в самом репозитории (`skills`, `mcp.servers`, `default_agent`) |
 | `templates/AGENTS.md` | шаблон инструкций для 1С-проекта |
 | `scripts/opencode_port.py` | сборка из upstream и установка; ядро — `scripts/port_core.py` |
