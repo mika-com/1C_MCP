@@ -35,7 +35,7 @@ python scripts/opencode_port.py install --global
 ```
 
 Установщик:
-- копирует 84 навыка в `<проект>/.opencode/skills/` (глобально — `~/.config/opencode/skills/`);
+- копирует 85 навыков в `<проект>/.opencode/skills/` (глобально — `~/.config/opencode/skills/`);
 - копирует агентов (`1c`, `1c-analyst`, `1c-developer`, `1c-deployer`, `1c-tester`, `1c-test-author`) в
   `.opencode/agents/` и команды `/1c-analyze`, `/1c-implement`, `/1c-deploy`, `/1c-webtest`, `/1c-bdd`, `/1c-check`
   в `.opencode/commands/`;

@@ -257,13 +257,23 @@ BSL_CHECK_NOTES = {
     'db-load-git': '## Примеры',
     'cfe-validate': '## Команда',
 }
+PRINT_FORM_NOTE = (
+    '> **Печатная форма (OpenCode).** Команда печати здесь — только каркас. Саму форму делай навыком '
+    '`print-form`: макет `template-add` → JSON DSL → `mxl-compile` → `mxl-validate` → предпросмотр PNG '
+    '(`mxl-render`) и модуль заполнения по эталону (`ПолучитьОбласть`, `Параметры.Заполнить`, `ПроверитьВывод`, '
+    '`УправлениеПечатью.ВывестиТабличныйДокументВКоллекцию`). Таблицу программно (`.Область().Текст`) не строй.\n\n'
+)
+PRINT_FORM_NOTES = {
+    'epf-bsp-init': '## Инструкции',
+    'epf-bsp-add-command': '## Инструкции',
+}
 # Свои навыки порта (их нет в upstream): копируются в skills/ при каждой сборке
 OWN_SKILLS = 'own-skills'
 
 
 def add_skill_notes(skills_dir):
     for note, targets in ((SAFE_MODE_NOTE, SKILL_NOTES), (BSL_CHECK_NOTE, BSL_CHECK_NOTES),
-                          (WEB_TEST_REPORTS_NOTE, WEB_TEST_NOTES)):
+                          (WEB_TEST_REPORTS_NOTE, WEB_TEST_NOTES), (PRINT_FORM_NOTE, PRINT_FORM_NOTES)):
         for name, anchor in targets.items():
             path = os.path.join(skills_dir, name, 'SKILL.md')
             content = read(path)

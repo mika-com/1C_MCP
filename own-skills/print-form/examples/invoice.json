@@ -1,0 +1,105 @@
+{
+  "page": "A4-portrait",
+  "columns": 34,
+  "columnWidths": { "1-34": "1x" },
+  "fonts": {
+    "default": { "face": "Arial", "size": 9 },
+    "bold": { "face": "Arial", "size": 9, "bold": true },
+    "title": { "face": "Arial", "size": 14, "bold": true },
+    "small": { "face": "Arial", "size": 7 }
+  },
+  "styles": {
+    "default": { "font": "default" },
+    "title": { "font": "title", "verticalAlignment": "Center" },
+    "label": { "font": "default" },
+    "value": { "font": "bold", "textPlacement": "Wrap" },
+    "underline": { "font": "default", "bottomBorder": "Solid" },
+    "thick-bottom": { "bottomBorder": { "style": "Solid", "width": 2 } },
+    "th": { "font": "bold", "border": "Solid", "horizontalAlignment": "Center", "verticalAlignment": "Center", "textPlacement": "Wrap", "backColor": "#F2F2F2" },
+    "td": { "font": "default", "border": "Solid", "textPlacement": "Wrap", "verticalAlignment": "Top" },
+    "td-c": { "font": "default", "border": "Solid", "horizontalAlignment": "Center", "verticalAlignment": "Top" },
+    "td-num": { "font": "default", "border": "Solid", "horizontalAlignment": "Right", "verticalAlignment": "Top", "format": "ЧЦ=15; ЧДЦ=2" },
+    "total-label": { "font": "bold", "horizontalAlignment": "Right" },
+    "total-num": { "font": "bold", "horizontalAlignment": "Right", "format": "ЧЦ=15; ЧДЦ=2" },
+    "words": { "font": "bold", "textPlacement": "Wrap" },
+    "sign-line": { "bottomBorder": "Solid" },
+    "hint": { "font": "small", "horizontalAlignment": "Center", "textColor": "#606060" }
+  },
+  "areas": [
+    {
+      "name": "Заголовок",
+      "rows": [
+        { "height": 30, "cells": [ { "col": 1, "span": 34, "style": "title", "template": "Счёт на оплату № [Номер] от [Дата]" } ] },
+        { "height": 6, "rowStyle": "thick-bottom", "cells": [] }
+      ]
+    },
+    {
+      "name": "Шапка",
+      "rows": [
+        { "cells": [
+          { "col": 1, "span": 6, "style": "label", "text": "Поставщик:" },
+          { "col": 7, "span": 28, "style": "value", "param": "ПредставлениеПоставщика" } ] },
+        { "cells": [
+          { "col": 1, "span": 6, "style": "label", "text": "Покупатель:" },
+          { "col": 7, "span": 28, "style": "value", "param": "ПредставлениеПокупателя" } ] },
+        { "cells": [
+          { "col": 1, "span": 6, "style": "label", "text": "Основание:" },
+          { "col": 7, "span": 28, "style": "value", "param": "Основание" } ] }
+      ]
+    },
+    {
+      "name": "ШапкаТаблицы",
+      "rows": [
+        { "height": 24, "cells": [
+          { "col": 1, "span": 2, "style": "th", "text": "№" },
+          { "col": 3, "span": 16, "style": "th", "text": "Товары (работы, услуги)" },
+          { "col": 19, "span": 3, "style": "th", "text": "Кол-во" },
+          { "col": 22, "span": 2, "style": "th", "text": "Ед." },
+          { "col": 24, "span": 5, "style": "th", "text": "Цена" },
+          { "col": 29, "span": 6, "style": "th", "text": "Сумма" } ] }
+      ]
+    },
+    {
+      "name": "Строка",
+      "rows": [
+        { "cells": [
+          { "col": 1, "span": 2, "style": "td-c", "param": "НомерСтроки" },
+          { "col": 3, "span": 16, "style": "td", "param": "Номенклатура", "detail": "СсылкаНоменклатура" },
+          { "col": 19, "span": 3, "style": "td-num", "param": "Количество" },
+          { "col": 22, "span": 2, "style": "td-c", "param": "ЕдиницаИзмерения" },
+          { "col": 24, "span": 5, "style": "td-num", "param": "Цена" },
+          { "col": 29, "span": 6, "style": "td-num", "param": "Сумма" } ] }
+      ]
+    },
+    {
+      "name": "Итого",
+      "rows": [
+        { "cells": [
+          { "col": 19, "span": 10, "style": "total-label", "text": "Итого:" },
+          { "col": 29, "span": 6, "style": "total-num", "param": "Всего" } ] },
+        { "cells": [
+          { "col": 19, "span": 10, "style": "total-label", "text": "В том числе НДС:" },
+          { "col": 29, "span": 6, "style": "total-num", "param": "ВсегоНДС" } ] },
+        { "cells": [
+          { "col": 1, "span": 34, "style": "label", "template": "Всего наименований [КоличествоНаименований], на сумму [ВсегоСтрокой] руб." } ] },
+        { "height": 26, "rowStyle": "thick-bottom", "cells": [
+          { "col": 1, "span": 34, "style": "words", "param": "СуммаПрописью" } ] }
+      ]
+    },
+    {
+      "name": "Подписи",
+      "rows": [
+        { "height": 22, "cells": [] },
+        { "cells": [
+          { "col": 1, "span": 5, "style": "bold", "text": "Руководитель" },
+          { "col": 6, "span": 8, "style": "sign-line" },
+          { "col": 15, "span": 2, "style": "label" },
+          { "col": 18, "span": 5, "style": "bold", "text": "Бухгалтер" },
+          { "col": 23, "span": 12, "style": "sign-line", "param": "Бухгалтер" } ] },
+        { "cells": [
+          { "col": 6, "span": 8, "style": "hint", "text": "подпись" },
+          { "col": 23, "span": 12, "style": "hint", "text": "расшифровка подписи" } ] }
+      ]
+    }
+  ]
+}

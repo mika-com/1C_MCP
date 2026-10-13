@@ -2,8 +2,9 @@
 
 Агент для разработки на 1С:Предприятие 8.3 в [OpenCode](https://opencode.ai/v2/docs) (Desktop и CLI):
 
-- **84 навыка**: 81 из [cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills) (конфигурации, расширения,
-  EPF/ERF, формы, СКД, макеты, роли, XDTO, базы, веб-публикация, web-test) + свои `bsl-check`, `vrunner` и `1c-test` (стратегия тестирования, preflight, шаблоны Vanessa);
+- **85 навыков**: 81 из [cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills) (конфигурации, расширения,
+  EPF/ERF, формы, СКД, макеты, роли, XDTO, базы, веб-публикация, web-test) + свои `bsl-check`, `vrunner`, `1c-test` (стратегия тестирования, preflight, шаблоны Vanessa) и `print-form`
+  (печатные формы «сначала макет» с PNG-предпросмотром макета);
 - **6 агентов**: основной `1c` и субагенты по этапам `1c-analyst` → `1c-developer` → `1c-deployer` → `1c-tester`,
   плюс `1c-test-author` (пишет регресс web-test и BDD-сценарии);
 - **6 команд**: `/1c-analyze`, `/1c-implement`, `/1c-deploy`, `/1c-webtest`, `/1c-bdd`, `/1c-check`;
@@ -61,8 +62,23 @@ python scripts/opencode_port.py install --project-dir /путь/к/1С-прое�
 > (`bddRunner.epf`, VBParams). Vanessa Automation (`vanessa-automation.epf`, VAParams) запускается через
 > `vrunner run enterprise`, а результат читается из `build/reports/va/status.log` и `junit/`. Файл
 > `vanessa-automation.epf` скачивается отдельно в `tools/vanessa/`.
- Права: `1c-tester` пишет только в `tests/**` и
+
+Права: `1c-tester` пишет только в `tests/**` и
 `build/reports/**`, `1c-test-author` — в `tests/**`, `features/**`, `tools/vanessa/**`, `build/reports/**`.
+
+## Печатные формы
+
+Агенты делают печатную форму **через макет**, а не программным построением таблицы: навык
+[`print-form`](own-skills/print-form/SKILL.md) ведёт путь «вопросы → `template-add` → JSON DSL → `mxl-compile` →
+`mxl-validate` → предпросмотр PNG (`mxl-render`) → модуль заполнения по эталону» (области, `Параметры.Заполнить`,
+`ПроверитьВывод` с повтором шапки таблицы, итоги, `ЧислоПрописью`) для внешней печатной формы БСП, документа с БСП
+и без. Существующий макет правится через `mxl-decompile` → JSON → `mxl-compile`. Предпросмотр:
+
+```bash
+python3 skills/print-form/scripts/mxl-render.py <...>/Templates/<Макет>/Ext/Template.xml --png build/reports/print/<Макет>.png
+```
+
+Для PNG нужен Playwright с Chromium (тот же, что у `web-test`). Подробнее — [docs/mxl-guide.md](docs/mxl-guide.md).
 
 ## MCP-серверы
 
@@ -89,7 +105,7 @@ python scripts/opencode_port.py install --project-dir /путь/к/1С-прое�
 | `.opencode/agents/` | агенты OpenCode v2 (Markdown + frontmatter) |
 | `.opencode/commands/` | команды `/1c-*` |
 | `skills/` | собранные навыки (генерируются, руками не править) |
-| `own-skills/` | свои навыки (`bsl-check`, `vrunner`, `1c-test`) — источник для `skills/` |
+| `own-skills/` | свои навыки (`bsl-check`, `vrunner`, `1c-test`, `print-form`) — источник для `skills/` |
 | `mcp/` | MCP-серверы и `register-opencode-mcp.mjs` (пишет `mcp.servers` и `lsp.bsl`) |
 | `lsp/` | `bsl-lsp.mjs` — запуск BSL LS в режиме LSP для секции `lsp` |
 | `opencode.json` | конфиг v2 для работы в самом репозитории (`skills`, `mcp.servers`, `default_agent`) |

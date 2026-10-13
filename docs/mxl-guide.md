@@ -10,6 +10,10 @@
 | `/mxl-validate` | `<TemplatePath>` или `<ProcessorName> <TemplateName>` | Валидация: индексы, ссылки, границы |
 | `/mxl-compile` | `<JsonPath> <OutputPath>` | Компиляция макета из JSON-определения в Template.xml |
 | `/mxl-decompile` | `<TemplatePath> [OutputPath]` | Декомпиляция Template.xml в JSON-определение |
+| `print-form` → `scripts/mxl-render.py` | `<Template.xml> [-o html] [--png png]` | Предпросмотр макета: HTML и PNG (Playwright/Chromium) — ширины, объединения, рамки, шрифты, области, параметры |
+
+Печатную форму целиком (макет + модуль заполнения + команда печати БСП) ведёт навык
+[`print-form`](../own-skills/print-form/SKILL.md): правило «сначала макет, код только заполняет».
 
 ## Сценарии использования
 
@@ -30,6 +34,7 @@
 2. `/mxl-compile` → Template.xml
 3. `/mxl-validate` → проверка корректности
 4. `/mxl-info` → верификация структуры (области, параметры)
+5. `mxl-render.py ... --png` → агент смотрит картинку и правит JSON, пока вид не совпадёт с образцом
 
 ### Создание макета по изображению
 
