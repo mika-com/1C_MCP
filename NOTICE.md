@@ -26,3 +26,12 @@ cc-1c-skills сохранены в [LICENSE](LICENSE) и должны сохра
 | [Playwright](https://github.com/microsoft/playwright) | Apache-2.0 | ставится через npm (`web-test`, предпросмотр PNG) |
 | [OpenCode](https://github.com/anomalyco/opencode) | MIT | агентная среда |
 | XSD-схемы платформы 1С | собственность 1С | не распространяются; `/v8-xsd-fetch` берёт их из установленной платформы |
+| Справка платформы 1С (синтакс-помощник, `*.hbk`) | собственность 1С | не распространяется и не входит в репозиторий; MCP `1c-help` читает её из платформы, установленной у пользователя, индекс хранится только локально (`%LOCALAPPDATA%\1c-opencode\help-cache`) |
+
+## Формат `.hbk`
+
+Парсер `mcp/lib/hbk.mjs` написан с нуля, внешних зависимостей нет, код сторонних проектов не копировался.
+Сведения о формате контейнера и оглавления взяты из открытых источников:
+[1c-syntax/bsl-context](https://github.com/1c-syntax/bsl-context) (LGPL-3.0),
+[alkoleft/hbk-viewer](https://github.com/alkoleft/hbk-viewer) (MIT) и публикаций сообщества на Infostart.
+Тестовые `.hbk` (`tests/mcp/lib/make-hbk.mjs`) синтетические: вымышленный тип «Виджет», без текста справки 1С.

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // register-opencode-mcp.mjs — записывает MCP-серверы 1С в конфиг OpenCode v2 (mcp.servers).
 //
-//   node register-opencode-mcp.mjs                  — добавить/обновить 1c-search, 1c-bsl (+ vrunner выключенным)
+//   node register-opencode-mcp.mjs                  — добавить/обновить 1c-search, 1c-bsl, 1c-help (+ vrunner выключенным)
 //   node register-opencode-mcp.mjs --vrunner        — то же, но vrunner-mcp включён (нужен vanessa-runner 3.x)
 //   node register-opencode-mcp.mjs --remove         — удалить серверы 1С (и LSP bsl) из конфига
 //   node register-opencode-mcp.mjs --no-lsp         — не записывать секцию lsp.bsl
@@ -28,6 +28,8 @@ export const SERVERS = [
   { key: '1c-search', file: 'code-search.mjs', timeout: { startup: 10000, catalog: 10000 } },
   // execution больше собственного таймаута прокси (BSL_LS_TIMEOUT_MS, 90 с): ошибку отдаёт прокси, а не обрыв.
   { key: '1c-bsl', file: 'bsl-ls.mjs', timeout: { startup: 30000, catalog: 30000, execution: 120000 } },
+  // синтакс-помощник: первый вызов строит индекс справки платформы (HELP_BUILD_TIMEOUT_MS, 120 с) — запас сверху.
+  { key: '1c-help', file: 'help.mjs', timeout: { startup: 10000, catalog: 10000, execution: 150000 } },
 ];
 // vrunner-mcp запускается через run-supervised.mjs: при закрытии сеанса гасится всё дерево процессов.
 export const VRUNNER = { key: 'vrunner', command: ['vrunner-mcp'], timeout: { startup: 30000, catalog: 30000 } };
@@ -103,7 +105,7 @@ function main() {
   writeFileSync(cfg, afterText, 'utf8');
   console.log(remove
     ? `MCP-серверы 1С удалены из ${cfg}`
-    : `MCP-серверы 1С (1c-search, 1c-bsl, vrunner${vrunner ? '' : ' — выключен'})${lsp ? ' и LSP bsl' : ''} записаны в ${cfg}`);
+    : `MCP-серверы 1С (1c-search, 1c-bsl, 1c-help, vrunner${vrunner ? '' : ' — выключен'})${lsp ? ' и LSP bsl' : ''} записаны в ${cfg}`);
   return 0;
 }
 

@@ -11,6 +11,8 @@
        регистрирует MCP-серверы и LSP bsl в %USERPROFILE%\.config\opencode\opencode.json.
     4. Скачивает BSL Language Server в %USERPROFILE%\.config\opencode\tools\bsl-language-server.
     5. Ставит Playwright и Chromium для навыка web-test.
+    6. Находит установленную платформу 1С для синтакс-помощника 1c-help (справка читается локально,
+       в проект не входит); переопределение — переменная V8_HELP_PATH (каталог bin платформы).
     Повторный запуск безопасен: уже установленное пропускается. Обновление — git pull (или новый ZIP) и повторный запуск.
 
 .EXAMPLE
@@ -177,6 +179,21 @@ function Get-XmxForUser([int]$RamGb, [int]$UserCount) {
     $per = [math]::Floor(($RamGb / 2) / [math]::Max($UserCount, 1))
     $per = [math]::Min([math]::Max($per, 1), 4)
     return "${per}g"
+}
+
+function Find-V8HelpDir {
+    # Каталоги bin установленных платформ 1С со справкой (shcntx_ru.hbk), новые — первыми
+    $roots = @($env:ProgramW6432, $env:ProgramFiles, ${env:ProgramFiles(x86)}) | Where-Object { $_ } | ForEach-Object { Join-Path $_ '1cv8' }
+    if ($env:LOCALAPPDATA) { $roots += Join-Path $env:LOCALAPPDATA 'Programs\1cv8' }
+    $found = foreach ($r in ($roots | Select-Object -Unique)) {
+        if (-not (Test-Path -LiteralPath $r)) { continue }
+        Get-ChildItem -LiteralPath $r -Directory -ErrorAction SilentlyContinue |
+            Where-Object { $_.Name -match '^\d+\.\d+\.\d+\.\d+$' } | ForEach-Object {
+                $bin = Join-Path $_.FullName 'bin'
+                if (Test-Path -LiteralPath (Join-Path $bin 'shcntx_ru.hbk')) { [pscustomobject]@{ Version = [version]$_.Name; Path = $bin } }
+            }
+    }
+    @($found | Sort-Object Version -Descending)
 }
 
 function Get-TargetArgument {
@@ -377,6 +394,25 @@ if (-not $NoBslLs) {
     } else { Write-Ok "BSL_LS_XMX уже задана: $([Environment]::GetEnvironmentVariable('BSL_LS_XMX', 'User'))$env:BSL_LS_XMX" }
     Write-Info 'Зависшие процессы BSL LS: powershell -ExecutionPolicy Bypass -File scripts\kill-bsl-ls.ps1'
 }
+
+# ---------- Синтакс-помощник 1c-help ----------
+# Справка 1С не входит в проект: 1c-help читает её из установленной платформы (shcntx_ru.hbk и др. в каталоге bin).
+$helpOverride = [Environment]::GetEnvironmentVariable('V8_HELP_PATH', 'User')
+if (-not $helpOverride) { $helpOverride = $env:V8_HELP_PATH }
+if ($helpOverride) {
+    if (Test-Path -LiteralPath $helpOverride) { Write-Ok "Синтакс-помощник 1c-help: V8_HELP_PATH = $helpOverride" }
+    else { Write-Warn "V8_HELP_PATH = $helpOverride — путь не существует, 1c-help не найдёт справку." }
+} else {
+    $v8Help = @(Find-V8HelpDir)
+    if ($v8Help.Count -gt 0) {
+        Write-Ok "Синтакс-помощник 1c-help: платформа $($v8Help[0].Version) ($($v8Help[0].Path))"
+        Write-Info 'Версия выбирается сама: v8path из .v8-project.json проекта или самая новая установленная. Закрепить другую — переменная V8_HELP_PATH (каталог bin).'
+    } else {
+        Write-Warn ("Платформа 1С со справкой (shcntx_ru.hbk) не найдена — 1c-help не сможет отвечать. Укажите каталог bin платформы: " +
+            "[Environment]::SetEnvironmentVariable('V8_HELP_PATH', 'C:\Program Files\1cv8\8.3.xx.xxxx\bin', 'User')")
+    }
+}
+Write-Info "Индекс справки строится при первом обращении и хранится в $env:LOCALAPPDATA\1c-opencode\help-cache"
 
 # ---------- 6. Playwright + Chromium ----------
 Write-Step '6/6 Playwright и Chromium для web-test'

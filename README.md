@@ -8,7 +8,8 @@
 - **6 агентов**: основной `1c` и субагенты по этапам `1c-analyst` → `1c-developer` → `1c-deployer` → `1c-tester`,
   плюс `1c-test-author` (пишет регресс web-test и BDD-сценарии);
 - **6 команд**: `/1c-analyze`, `/1c-implement`, `/1c-deploy`, `/1c-webtest`, `/1c-bdd`, `/1c-check`;
-- **MCP-серверы**: `1c-search` (поиск по XML-выгрузке), `1c-bsl` (BSL Language Server),
+- **MCP-серверы**: `1c-search` (поиск по XML-выгрузке), `1c-bsl` (BSL Language Server), `1c-help` (синтакс-помощник
+  по справке установленной платформы 1С),
   `vrunner` ([vanessa-runner 3.x](https://github.com/vanessa-opensource/vanessa-runner), `vrunner-mcp`, по умолчанию выключен).
 
 ## Быстрый старт
@@ -121,9 +122,20 @@ python3 skills/print-form/scripts/mxl-render.py <...>/Templates/<Макет>/Ext
 |--------|----------|--------------|
 | `1c-search` | `find_object`, `find_method`, `module_methods`, `find_usages`, `search_code`, `index_status` | включён |
 | `1c-bsl` | BSL LS в режиме MCP (`analyze_file`, `document_symbols`, …); без BSL LS — заглушка с подсказкой | включён |
+| `1c-help` | синтакс-помощник: `help_search`, `help_get` (синтаксис, параметры, возврат, доступность, версия, примеры), `help_members`, `help_status` — по справке **установленной** платформы | включён |
 | `vrunner` | команды vanessa-runner 3.x (`vrunner-mcp`) | `disabled: true`, включить: `node mcp/register-opencode-mcp.mjs --vrunner` |
 
 Формат OpenCode v2: `mcp.servers`, `disabled`, таймауты в миллисекундах (`startup` 10 с / 30 с для BSL LS).
+
+**Синтакс-помощник `1c-help`.** Справка 1С в репозиторий не входит и не распространяется: сервер читает файлы
+`shcntx_ru.hbk`, `shlang_ru.hbk`, `shquery_ru.hbk` из каталога `bin` платформы, установленной у пользователя.
+Платформа: `V8_HELP_PATH` (каталог `bin` или файл `.hbk`) → `v8path` из `.v8-project.json` → самая новая из
+`%ProgramFiles%\1cv8\<версия>\bin` (Linux: `/opt/1cv8/x86_64/<версия>`). Язык — `V8_HELP_LANG` (`ru`, `en` →
+`*_root.hbk`). Индекс оглавления строится при первом вызове в отдельном процессе (таймаут `HELP_BUILD_TIMEOUT_MS`,
+120 с) и хранится у пользователя: `%LOCALAPPDATA%\1c-opencode\help-cache\<версия>-<язык>.json`
+(Linux/macOS: `~/.cache/1c-opencode/help-cache`). Агенты `1c` и `1c-developer` проверяют через него незнакомые
+методы и свойства платформы, а не придумывают их. Парсер `.hbk` свой, без зависимостей
+([`mcp/lib/hbk.mjs`](mcp/lib/hbk.mjs)).
 
 **LSP.** В `opencode.json` и установщике есть секция `lsp.bsl`: BSL Language Server для `.bsl` и `.os` через
 [`lsp/bsl-lsp.mjs`](lsp/bsl-lsp.mjs) — тот же поиск BSL LS, что у `1c-bsl` (`BSL_LS_PATH` →
@@ -148,6 +160,7 @@ python3 skills/print-form/scripts/mxl-render.py <...>/Templates/<Макет>/Ext
 | `install.ps1`, `install.cmd` | установка на Windows одной командой из папки проекта |
 | `scripts/kill-bsl-ls.mjs`, `scripts/kill-bsl-ls.ps1` | завершить зависшие процессы BSL LS ([зависания на больших проектах](docs/quickstart.md#зависания-и-процессы-bsl-ls-на-больших-конфигурациях)) |
 | `tests/mcp/run.mjs`, `tests/mcp/multiuser.mjs` | тесты прокси `1c-bsl` (дерево процессов, таймаут, область индексации) и многопользовательской безопасности |
+| `tests/mcp/help.mjs` | тесты `1c-help` на синтетических `.hbk` (`tests/mcp/lib/make-hbk.mjs`, без содержимого справки 1С) |
 | `scripts/opencode_port.py` | сборка из upstream и установка; ядро — `scripts/port_core.py` |
 | `docs/` | гайды и спецификации форматов 1С: [quickstart](docs/quickstart.md), [тестирование](docs/testing-guide.md), [индекс спецификаций](docs/1c-specs-index.md); гайды [cf](docs/cf-guide.md), [cfe](docs/cfe-guide.md), [epf](docs/epf-guide.md), [db](docs/db-guide.md), [meta](docs/meta-guide.md), [form](docs/form-guide.md), [skd](docs/skd-guide.md), [mxl](docs/mxl-guide.md), [role](docs/role-guide.md), [subsystem](docs/subsystem-guide.md), [xdto](docs/xdto-guide.md), [web](docs/web-guide.md), [web-test](docs/web-test-guide.md), [.v8-project.json](docs/v8-project-guide.md) |
 

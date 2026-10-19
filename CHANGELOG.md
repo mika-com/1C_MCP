@@ -13,6 +13,10 @@
   команды `/1c-analyze`, `/1c-implement`, `/1c-deploy`, `/1c-webtest`, `/1c-bdd`, `/1c-check`.
 - MCP-серверы `1c-search` (поиск по XML-выгрузке), `1c-bsl` (BSL LS в режиме MCP), `vrunner` (выключен по умолчанию)
   в формате OpenCode v2 (`mcp.servers`, `disabled`, таймауты в мс); секция `lsp.bsl` (v2 пока LSP не запускает).
+- MCP-сервер `1c-help` — синтакс-помощник по справке установленной платформы (`*.hbk` читаются локально, в репозиторий
+  не входят): `help_search` (нечёткий поиск, рус./англ., `Тип.Метод`), `help_get`, `help_members`, `help_status`;
+  выбор платформы `V8_HELP_PATH` → `.v8-project.json` → самая новая установленная; индекс в
+  `%LOCALAPPDATA%\1c-opencode\help-cache` по версии; собственный парсер `.hbk` без зависимостей.
 - Установка на Windows одной командой: `install.cmd` / `install.ps1` (winget-зависимости, BSL LS, Playwright,
   `-Project`, `-WithVrunner`, `-WithDesktop`, `-NoBslLs`, `-NoBrowser`, `-Uninstall`, `-Machine`); на других ОС —
   `python scripts/opencode_port.py install`.
@@ -24,6 +28,7 @@
   инструменты через `install.ps1 -Machine`.
 
 ### Правила агентов
+- Незнакомые методы и свойства платформы — проверять через `1c-help`, не придумывать (`1c`, `1c-developer`).
 - Печатные формы «сначала макет» (`print-form`, предпросмотр PNG).
 - Выбор перехватчика для методов типовой конфигурации (`&ИзменениеИКонтроль` / `&Перед` / `&После` / `&Вместо`),
   `cfe-patch-method -Check` / `-Actualize` после обновления.

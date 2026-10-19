@@ -1,6 +1,6 @@
 # Проект 1С:Предприятие 8.3
 
-Этот проект работает с агентом `1c` для OpenCode (навыки cc-1c-skills, MCP `1c-search`, `1c-bsl`, `vrunner`).
+Этот проект работает с агентом `1c` для OpenCode (навыки cc-1c-skills, MCP `1c-search`, `1c-bsl`, `1c-help`, `vrunner`).
 
 - Корень XML-выгрузки: `src/` <!-- поправьте под свой проект -->
 - Базы, платформа и веб-публикация описаны в `.v8-project.json` (пример — `.v8-project.example.json`).

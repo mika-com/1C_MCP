@@ -12,7 +12,7 @@
 |-----------|-------------|
 | `OpenCode` | Агентная среда, которая загружает skills и использует MCP |
 | `Python 3.9+` | Скрипты навыков и установщик `scripts/opencode_port.py` |
-| `Node.js 18+` | MCP-серверы `1c-search`, `1c-bsl` и `web-test` |
+| `Node.js 18+` | MCP-серверы `1c-search`, `1c-bsl`, `1c-help` и `web-test` |
 | `vanessa-runner 3.x` | Необязательно: навык и MCP `vrunner` |
 | `1С:Предприятие 8.3` | Сборка, выгрузка, загрузка в базы и веб-публикация |
 | `Git` | Желателен для безопасной работы и отката изменений |
@@ -60,12 +60,18 @@ python scripts/opencode_port.py install --global
 Регистрацию можно выполнить и отдельно:
 
 ```bash
-node mcp/register-opencode-mcp.mjs            # 1c-search, 1c-bsl (+ vrunner выключен)
+node mcp/register-opencode-mcp.mjs            # 1c-search, 1c-bsl, 1c-help (+ vrunner выключен)
 node mcp/register-opencode-mcp.mjs --vrunner  # включить vrunner-mcp (нужен vanessa-runner 3.x)
 ```
 
 - `1c-search` — поиск по выгрузке;
 - `1c-bsl` — BSL Language Server;
+- `1c-help` — синтакс-помощник по справке установленной платформы 1С (`help_search`, `help_get`, `help_members`,
+  `help_status`). Справка читается локально из `bin` платформы (`shcntx_ru.hbk` и др.), в проект не входит.
+  Платформа выбирается так: `V8_HELP_PATH` → `v8path` из `.v8-project.json` → самая новая установленная
+  (`C:\Program Files\1cv8\<версия>\bin`, Linux `/opt/1cv8/x86_64/<версия>`). Первый вызов строит индекс
+  (до ~минуты на большой справке) в `%LOCALAPPDATA%\1c-opencode\help-cache`; дальше — из кэша.
+  Закрепить платформу: `[Environment]::SetEnvironmentVariable('V8_HELP_PATH', 'C:\Program Files\1cv8\8.3.25.1374\bin', 'User')`;
 - `vrunner` — команды vanessa-runner как инструменты (по умолчанию `disabled: true`).
 
 Таймауты в OpenCode v2 — объект в миллисекундах (`startup`, `catalog`, `execution`). Уточняющие вопросы агент
@@ -148,7 +154,7 @@ YAxUnit через vrunner. Отчёты — в `build/reports/`.
 ## Что проверять после установки
 
 - агент видит навыки вроде `epf-init`, `meta-info`, `form-edit`, `bsl-check`;
-- в `~/.config/opencode/opencode.json` в `mcp.servers` появились `1c-search`, `1c-bsl`, `vrunner`;
+- в `~/.config/opencode/opencode.json` в `mcp.servers` появились `1c-search`, `1c-bsl`, `1c-help`, `vrunner`;
 - в списке агентов есть `1c` и субагенты `1c-analyst`, `1c-developer`, `1c-deployer`, `1c-tester`, `1c-test-author`;
 - в списке команд есть `/1c-analyze`, `/1c-implement`, `/1c-deploy`, `/1c-webtest`, `/1c-bdd`, `/1c-check`;
 - в корне проекта корректный `.v8-project.json`, если вы работаете с базой;
@@ -162,6 +168,8 @@ YAxUnit через vrunner. Отчёты — в `build/reports/`.
 | Агент не видит навыки | Проверьте `.opencode/skills/` проекта или `~/.config/opencode/skills/` |
 | Нет `1c-search` / `1c-bsl` | Выполните `node mcp/register-opencode-mcp.mjs`, проверьте `opencode mcp list` |
 | `1c-bsl` «не подключён» | BSL LS стартует JVM — `timeout.startup` должен быть ≥ 30000 мс |
+| `1c-help`: «Справка недоступна» | Нет платформы 1С со `shcntx_ru.hbk`: задайте `V8_HELP_PATH` (каталог `bin`) или `v8path` в `.v8-project.json`; проверка — `help_status` |
+| `1c-help`: «сборка индекса … прервана» | Увеличьте `HELP_BUILD_TIMEOUT_MS` (мс) или повторите вызов; индекс строится один раз на версию платформы |
 | `Cannot find package 'playwright'` | Повторите установку Playwright из шага 8 |
 | `BSL Language Server не установлен` | Выполните `node skills/bsl-check/scripts/bsl-check.mjs -Install`  |
 | Навыки не могут найти платформу | Укажите `v8path` в `.v8-project.json` |
@@ -215,6 +223,7 @@ YAxUnit через vrunner. Отчёты — в `build/reports/`.
   открыт двумя пользователями, они друг друга не трогают.
 - `kill-bsl-ls.ps1` и `kill-bsl-ls.mjs` завершают только процессы текущего пользователя в текущем сеансе, даже если
   запущены от администратора. Все пользователи — только явно: `-AllUsers` (`--all-users`) в окне администратора.
+- Индекс `1c-help` — в `%LOCALAPPDATA%\1c-opencode\help-cache` каждого пользователя.
 - Кэш `1c-search` и файл сеанса `web-test` (порт локального HTTP-сервера браузера) у каждого пользователя свои.
   Сервер `web-test start` слушает случайный свободный порт на 127.0.0.1.
 
