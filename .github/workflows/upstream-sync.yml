@@ -1,4 +1,5 @@
-# Еженедельная синхронизация с upstream cc-1c-skills: пересборка skills/ и PR с изменениями.
+# Еженедельная синхронизация с upstream cc-1c-skills: пересборка skills/ и PR в ветку по умолчанию.
+# Workflow не привязан к имени репозитория или владельца: работает в любом форке/копии.
 # Для создания PR в настройках репозитория включите:
 # Settings → Actions → General → Workflow permissions → «Allow GitHub Actions to create and approve pull requests».
 name: Синхронизация с cc-1c-skills
@@ -20,7 +21,11 @@ jobs:
   sync:
     runs-on: ubuntu-latest
     steps:
+      # Всегда собираем от ветки по умолчанию репозитория (в т.ч. при ручном запуске из другой ветки):
+      # PR открывается в неё же. Имя репозитория и ветки нигде не зашито.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
 
       - uses: actions/setup-python@v5
         with:
@@ -45,6 +50,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           SHA: ${{ steps.diff.outputs.sha }}
+          BASE: ${{ github.event.repository.default_branch }}
         run: |
           branch=auto/upstream-sync
           git config user.name 'github-actions[bot]'
@@ -57,6 +63,6 @@ jobs:
           if gh pr view "$branch" --json state -q .state 2>/dev/null | grep -q OPEN; then
             gh pr edit "$branch" --body "$body"
           else
-            gh pr create --head "$branch" --base "${{ github.event.repository.default_branch }}" \
+            gh pr create --head "$branch" --base "$BASE" \
               --title "Синхронизация с cc-1c-skills ${SHA}" --body "$body"
           fi

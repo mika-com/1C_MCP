@@ -3,7 +3,7 @@
 # Upstream: https://github.com/Nikolay-Shirokov/cc-1c-skills (MIT)
 """
 Общая логика пересборки skills/ из upstream cc-1c-skills и адаптации SKILL.md под OpenCode v2.
-Точка входа для пользователя — scripts/opencode_port.py. Старый goose-скрипт: legacy/scripts/goose_port.py.
+Точка входа для пользователя — scripts/opencode_port.py.
 """
 import glob
 import json

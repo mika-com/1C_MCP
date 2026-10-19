@@ -28,7 +28,6 @@ GLOBAL_DIR = os.path.join('.config', 'opencode')
 PROJECT_DIR = '.opencode'
 GLOBAL_NODE_PREFIX = '"$HOME/.config/opencode"'
 PROJECT_NODE_PREFIX = f'"{core.SKILL_DIR}/../.."'
-OLD_NODE_PREFIXES = ('"$HOME/.agents"',)
 MARKER = '.1c-opencode'   # список установленных файлов агентов/команд
 
 
@@ -62,7 +61,7 @@ def adjust_web_test_prefix(dst, is_global):
     for md in core.collect_md_files(path):
         content = core.read(md)
         new = content
-        for current in (core.WEB_TEST_PREFIX, GLOBAL_NODE_PREFIX, PROJECT_NODE_PREFIX) + OLD_NODE_PREFIXES:
+        for current in (core.WEB_TEST_PREFIX, GLOBAL_NODE_PREFIX, PROJECT_NODE_PREFIX):
             new = new.replace(f'--prefix {current} ', f'--prefix {prefix} ')
         if new != content:
             core.write(md, new)

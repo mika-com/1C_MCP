@@ -18,7 +18,6 @@ skills/web-test/.browser-session.json
 node_modules/
 
 # Локальная установка навыков для проверки (install --project-dir .)
-.agents/
 .opencode/skills/
 .opencode/node_modules/
 .opencode/package*.json

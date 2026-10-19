@@ -38,7 +38,7 @@ if (!url) {
 add('URL базы', !!url, url || 'не определён', 'Укажите webUrl базы в .v8-project.json (навык db-list) или передайте URL аргументом');
 
 // 2. Playwright: ищем в тех же префиксах, куда его ставит навык web-test
-const prefixes = [join(root, '.opencode'), join(homedir(), '.config', 'opencode'), resolve(here, '..', '..', '..'), join(homedir(), '.agents'), root];
+const prefixes = [join(root, '.opencode'), join(homedir(), '.config', 'opencode'), resolve(here, '..', '..', '..'), root];
 let pw = null, pwFrom = '';
 for (const p of prefixes) {
   try {

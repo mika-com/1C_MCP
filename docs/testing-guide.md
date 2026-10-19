@@ -33,7 +33,7 @@
 подсказывает команду исправления:
 
 1. URL базы — из `.v8-project.json` (`webUrl` или `http://localhost:8081/<id>`) или аргумента;
-2. Playwright в `.opencode/`, `~/.config/opencode/` (и старом `~/.agents/`);
+2. Playwright в `.opencode/` или `~/.config/opencode/`;
 3. Chromium скачан;
 4. на Linux — есть `DISPLAY`/`WAYLAND_DISPLAY` (иначе `xvfb-run -a`);
 5. веб-клиент отвечает (иначе — навык `web-publish`, сам агент базу не публикует без согласия);

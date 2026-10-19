@@ -13,7 +13,7 @@ import { fileURLToPath } from 'node:url';
 import { startServer } from './lib/stdio-server.mjs';
 
 const INDEX_VERSION = 3;
-const SKIP_DIRS = new Set(['.git', 'node_modules', '.agents', '.opencode', '.goose', 'build', 'base', 'tools', 'test-tmp', '.v8-xsd']);
+const SKIP_DIRS = new Set(['.git', 'node_modules', '.agents', '.opencode', 'build', 'base', 'tools', 'test-tmp', '.v8-xsd']);
 
 // Каталог выгрузки → вид объекта (рус.) и англ. синоним вида для поиска
 export const TYPES = {

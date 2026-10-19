@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // bsl-lsp.mjs — запуск BSL Language Server в режиме LSP (stdio) для секции "lsp" конфига OpenCode.
 // Ищет BSL LS так же, как MCP-сервер 1c-bsl (mcp/bsl-ls.mjs) и навык bsl-check:
-// BSL_LS_PATH → ~/.config/opencode/tools/bsl-language-server → ~/.agents/tools/bsl-language-server.
+// BSL_LS_PATH → ~/.config/opencode/tools/bsl-language-server.
 // Настройки диагностик BSL LS сам берёт из .bsl-language-server.json в текущем каталоге (корень проекта).
 // Память JVM — BSL_LS_XMX. При закрытии stdin, сигнале или смерти родителя убивается всё дерево процессов.
 //

@@ -9,8 +9,8 @@
 //
 // Формат OpenCode v2: серверы лежат в mcp.servers, отключение — "disabled": true (не "enabled"),
 // таймауты — объект в миллисекундах { startup, catalog, execution }.
-// Старые записи v1 (mcp["1c-ask"], mcp["1c-search"]…) и сервер 1c-ask удаляются: в v2 вопросы
-// пользователю задаются встроенным инструментом question.
+// Записи формата v1 (серверы прямо под mcp) и устаревший сервер вопросов 1c-ask из ранних установок
+// удаляются: в v2 вопросы пользователю задаются встроенным инструментом question.
 //
 // Дополнительно пишется lsp.bsl — BSL Language Server как языковой сервер (.bsl, .os) через lsp/bsl-lsp.mjs,
 // который ищет BSL LS так же, как 1c-bsl. OpenCode v2 эту секцию принимает и сохраняет, но LSP не запускает
@@ -31,7 +31,8 @@ export const SERVERS = [
 ];
 // vrunner-mcp запускается через run-supervised.mjs: при закрытии сеанса гасится всё дерево процессов.
 export const VRUNNER = { key: 'vrunner', command: ['vrunner-mcp'], timeout: { startup: 30000, catalog: 30000 } };
-export const LEGACY_KEYS = ['1c-ask', '1c-search', '1c-bsl'];
+export const V1_KEYS = ['1c-ask', '1c-search', '1c-bsl'];
+export const STALE_SERVERS = ['1c-ask'];
 export const LSP_KEY = 'bsl';
 export const LSP_EXTENSIONS = ['.bsl', '.os'];
 
@@ -60,10 +61,10 @@ export function updateConfig(config, mcpDir, { remove = false, vrunner = false, 
   const next = structuredClone(config);
   if (!next.mcp || typeof next.mcp !== 'object' || Array.isArray(next.mcp)) next.mcp = {};
   // миграция v1: серверы 1С прямо под mcp
-  for (const k of LEGACY_KEYS) delete next.mcp[k];
+  for (const k of V1_KEYS) delete next.mcp[k];
   if (!next.mcp.servers || typeof next.mcp.servers !== 'object') next.mcp.servers = {};
   const servers = next.mcp.servers;
-  delete servers['1c-ask'];
+  for (const k of STALE_SERVERS) delete servers[k];
   for (const s of SERVERS) {
     if (remove) delete servers[s.key];
     else servers[s.key] = { type: 'local', command: ['node', join(mcpDir, s.file)], timeout: s.timeout };

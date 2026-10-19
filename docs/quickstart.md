@@ -32,8 +32,8 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 ## Шаг 1. Получите репозиторий
 
 ```bash
-git clone https://github.com/mika-com/1C_MCP_GOOSE.git
-cd 1C_MCP_GOOSE
+git clone https://github.com/mika-com/1C-Agent.git
+cd 1C-Agent
 ```
 
 Если Git не нужен, можно скачать ZIP архива репозитория и распаковать его в любую папку.

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // render-png.mjs — скриншот HTML-предпросмотра макета в PNG через Playwright (Chromium, headless).
 //   node render-png.mjs <in.html> <out.png>
-// Playwright ищется там же, куда его ставит web-test: <проект>/.opencode, ~/.config/opencode, ~/.agents.
+// Playwright ищется там же, куда его ставит web-test: <проект>/.opencode, ~/.config/opencode.
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
 import { join, resolve, dirname } from 'node:path';
@@ -12,7 +12,7 @@ const [inHtml, outPng] = process.argv.slice(2);
 if (!inHtml || !outPng) { console.error('Использование: node render-png.mjs <in.html> <out.png>'); process.exit(2); }
 const here = dirname(fileURLToPath(import.meta.url));
 const prefixes = [join(process.cwd(), '.opencode'), join(homedir(), '.config', 'opencode'),
-  resolve(here, '..', '..', '..'), join(homedir(), '.agents'), process.cwd()];
+  resolve(here, '..', '..', '..'), process.cwd()];
 let pw = null;
 for (const p of prefixes) {
   try { pw = createRequire(join(p, 'noop.js'))('playwright'); break; } catch { /* дальше */ }

@@ -1,4 +1,4 @@
-# Агент 1С для OpenCode v2
+# 1C-Agent — агент 1С для OpenCode v2
 
 Агент для разработки на 1С:Предприятие 8.3 в [OpenCode](https://opencode.ai/v2/docs) (Desktop и CLI):
 
@@ -16,7 +16,7 @@
 ### Windows одной командой
 
 1. Скачайте проект: ZIP-архив с GitHub (Code → Download ZIP, распакуйте) или
-   `git clone -b cleanup/opencode-v2 https://github.com/mika-com/1C_MCP_GOOSE.git`.
+   `git clone https://github.com/mika-com/1C-Agent.git`.
 2. Откройте папку проекта и дважды щёлкните **`install.cmd`**. Можно запустить и из PowerShell в этой папке:
 
 ```powershell
@@ -49,8 +49,8 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 ### Вручную (любая ОС)
 
 ```bash
-git clone https://github.com/mika-com/1C_MCP_GOOSE.git
-cd 1C_MCP_GOOSE
+git clone https://github.com/mika-com/1C-Agent.git
+cd 1C-Agent
 python scripts/opencode_port.py install --project-dir /путь/к/1С-проекту
 ```
 
@@ -127,11 +127,11 @@ python3 skills/print-form/scripts/mxl-render.py <...>/Templates/<Макет>/Ext
 
 **LSP.** В `opencode.json` и установщике есть секция `lsp.bsl`: BSL Language Server для `.bsl` и `.os` через
 [`lsp/bsl-lsp.mjs`](lsp/bsl-lsp.mjs) — тот же поиск BSL LS, что у `1c-bsl` (`BSL_LS_PATH` →
-`~/.config/opencode/tools/bsl-language-server` → `~/.agents/tools/...`), режим `lsp` по stdio. **OpenCode v2 эту
+`~/.config/opencode/tools/bsl-language-server`), режим `lsp` по stdio. **OpenCode v2 эту
 секцию принимает, но языковые серверы пока не запускает** (документация, «Migrate from V1»); она работает в OpenCode
 1.x и включится сама, когда v2 вернёт LSP. Рабочая диагностика в v2 — MCP `1c-bsl` (точечно по модулю) и навык
 `bsl-check` (каталог, отчёт). Не записывать LSP: `install --no-lsp` или `register-opencode-mcp.mjs --no-lsp`.
-Уточняющие вопросы агент задаёт встроенным инструментом `question` (сервер `1c-ask` перенесён в `legacy/`).
+Уточняющие вопросы агент задаёт встроенным инструментом OpenCode `question`.
 
 ## Структура
 
@@ -149,8 +149,7 @@ python3 skills/print-form/scripts/mxl-render.py <...>/Templates/<Макет>/Ext
 | `scripts/kill-bsl-ls.mjs`, `scripts/kill-bsl-ls.ps1` | завершить зависшие процессы BSL LS ([зависания на больших проектах](docs/quickstart.md#зависания-и-процессы-bsl-ls-на-больших-конфигурациях)) |
 | `tests/mcp/run.mjs`, `tests/mcp/multiuser.mjs` | тесты прокси `1c-bsl` (дерево процессов, таймаут, область индексации) и многопользовательской безопасности |
 | `scripts/opencode_port.py` | сборка из upstream и установка; ядро — `scripts/port_core.py` |
-| `docs/` | гайды и спецификации форматов 1С; [quickstart](docs/quickstart.md), [тестирование](docs/testing-guide.md) |
-| `legacy/` | артефакты старого goose-порта (не используются, см. [legacy/README.md](legacy/README.md)) |
+| `docs/` | гайды и спецификации форматов 1С: [quickstart](docs/quickstart.md), [тестирование](docs/testing-guide.md), [индекс спецификаций](docs/1c-specs-index.md); гайды [cf](docs/cf-guide.md), [cfe](docs/cfe-guide.md), [epf](docs/epf-guide.md), [db](docs/db-guide.md), [meta](docs/meta-guide.md), [form](docs/form-guide.md), [skd](docs/skd-guide.md), [mxl](docs/mxl-guide.md), [role](docs/role-guide.md), [subsystem](docs/subsystem-guide.md), [xdto](docs/xdto-guide.md), [web](docs/web-guide.md), [web-test](docs/web-test-guide.md), [.v8-project.json](docs/v8-project-guide.md) |
 
 ## Обновление из upstream
 
@@ -169,6 +168,9 @@ pull requests».
 
 ## Лицензия
 
-MIT — см. [LICENSE](LICENSE). Навыки и документация — Nick Shirokov,
-[cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills). vanessa-runner — проект vanessa-opensource (MPL-2.0),
-сюда не входит, только вызывается.
+MIT — см. [LICENSE](LICENSE) и [NOTICE.md](NOTICE.md). Навыки в `skills/` (кроме собственных `bsl-check`, `vrunner`,
+`1c-test`, `print-form`) и большая часть `docs/` основаны на [cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills)
+Nick Shirokov (MIT); его copyright сохранён в LICENSE. Внешние инструменты (BSL Language Server, vanessa-runner,
+Vanessa Automation, Playwright) в репозиторий не входят — ставятся отдельно, лицензии перечислены в NOTICE.md.
+
+История изменений — [CHANGELOG.md](CHANGELOG.md).

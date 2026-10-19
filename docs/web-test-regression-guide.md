@@ -11,7 +11,7 @@
 ## Предусловия
 
 - База опубликована через Apache (`/web-publish`).
-- Установлен Node.js 18+, зависимости и браузер подняты: `npm install --prefix .agents --no-fund --no-audit "playwright@^1.50.0" && npx --prefix .agents playwright install chromium`.
+- Установлен Node.js 18+, зависимости и браузер подняты: `npm install --prefix "$HOME/.config/opencode" --no-fund --no-audit "playwright@^1.50.0" && npx --prefix "$HOME/.config/opencode" playwright install chromium`.
 - ffmpeg — нужен только если хотите видеозапись прогона как доказательство падения. Без него падения фиксируются скриншотами. Установка описана в [web-test-recording-guide.md](web-test-recording-guide.md).
 
 ## Как это устроено
