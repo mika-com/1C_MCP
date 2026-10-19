@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    Завершить зависшие процессы BSL Language Server (1c-bsl, bsl-lsp, bsl-check) ТЕКУЩЕГО пользователя в ТЕКУЩЕМ сеансе.
+    Завершить зависшие процессы BSL Language Server (1c-bsl, bsl-autocheck, bsl-check) ТЕКУЩЕГО пользователя в ТЕКУЩЕМ сеансе.
 .DESCRIPTION
     На сервере с несколькими RDP-сеансами трогает только свои процессы: владелец (Win32_Process.GetOwner)
     совпадает с текущим пользователем и SessionId совпадает с сеансом этого окна. Процессы других
@@ -32,7 +32,7 @@ if ($AllUsers) {
     Write-Host 'ВНИМАНИЕ: -AllUsers — будут завершены процессы BSL LS ВСЕХ пользователей и сеансов.' -ForegroundColor Yellow
 }
 
-$pattern = 'bsl-language-server|[\\/]mcp[\\/]bsl-ls\.mjs|[\\/]lsp[\\/]bsl-lsp\.mjs'
+$pattern = 'bsl-language-server|[\\/]mcp[\\/]bsl-ls\.mjs'
 $candidates = @(Get-CimInstance Win32_Process | Where-Object {
         $_.CommandLine -and $_.CommandLine -match $pattern -and $_.CommandLine -notmatch 'kill-bsl-ls' -and $_.ProcessId -ne $PID })
 $procs = @()

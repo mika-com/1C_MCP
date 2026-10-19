@@ -5,7 +5,8 @@
 Команды:
   build     — пересобрать skills/ из upstream cc-1c-skills (+ свои навыки из own-skills/)
   install   — установить навыки, агентов и команды в проект (.opencode/) или глобально (~/.config/opencode/)
-              и зарегистрировать MCP-серверы и LSP bsl (~/.config/opencode/opencode.json)
+              и зарегистрировать MCP-серверы (~/.config/opencode/opencode.json) и плагин bsl-autocheck
+              (проверка BSL после каждой правки: <opencode>/plugins/bsl-autocheck.js)
   runtime   — переключить рантайм (powershell/python) у установленных навыков
   uninstall — удалить установленное командой install
 
@@ -17,7 +18,9 @@
 """
 
 import argparse
+import json
 import os
+import pathlib
 import shutil
 import subprocess
 import sys
@@ -80,7 +83,23 @@ def copy_md_dir(kind, oc_dir):
     return copied
 
 
-def register_mcp(remove=False, vrunner=False, lsp=True):
+PLUGIN_FILE = 'bsl-autocheck.js'
+
+
+def install_plugin(oc_dir):
+    """Плагин bsl-autocheck: OpenCode v2 сам загружает .js из <opencode>/plugins/. Кладём туда
+    короткий файл-переходник на plugins/bsl-autocheck.mjs репозитория (как MCP — код остаётся в репозитории)."""
+    src = pathlib.Path(repo_root(), 'plugins', 'bsl-autocheck.mjs').resolve()
+    dst_dir = os.path.join(oc_dir, 'plugins')
+    os.makedirs(dst_dir, exist_ok=True)
+    core.write(os.path.join(dst_dir, PLUGIN_FILE),
+               '// Создано scripts/opencode_port.py install — проверка BSL после каждой правки (1C-Agent).\n'
+               '// Код плагина: ' + str(src) + '\n'
+               f'export {{ default }} from {json.dumps(src.as_uri())};\n')
+    return [f'plugins/{PLUGIN_FILE}']
+
+
+def register_mcp(remove=False, vrunner=False):
     script = os.path.join(repo_root(), 'mcp', 'register-opencode-mcp.mjs')
     node = shutil.which('node')
     if not node:
@@ -88,8 +107,7 @@ def register_mcp(remove=False, vrunner=False, lsp=True):
             print('Node.js не найден — MCP-серверы не зарегистрированы. '
                   f'После установки Node.js выполните: node "{script}"')
         return
-    cmd = ([node, script] + (['--remove'] if remove else []) + (['--vrunner'] if vrunner else [])
-           + ([] if lsp else ['--no-lsp']))
+    cmd = [node, script] + (['--remove'] if remove else []) + (['--vrunner'] if vrunner else [])
     subprocess.run(cmd, check=False)
 
 
@@ -114,6 +132,12 @@ def cmd_install(args):
         core.apply_runtime(dst, args.runtime)
     adjust_web_test_prefix(dst, args.is_global)
     files = copy_md_dir('agents', oc) + copy_md_dir('commands', oc)
+    if args.no_autocheck:
+        stale = os.path.join(oc, 'plugins', PLUGIN_FILE)
+        if os.path.isfile(stale):
+            os.remove(stale)
+    else:
+        files += install_plugin(oc)
     core.write(os.path.join(oc, MARKER), '\n'.join(files) + '\n')
     if not args.is_global:
         agents_md = os.path.join(base, 'AGENTS.md')
@@ -121,7 +145,7 @@ def cmd_install(args):
             shutil.copy2(os.path.join(repo_root(), 'templates', 'AGENTS.md'), agents_md)
             print(f'Создан шаблон {agents_md} — поправьте под свой проект.')
     if not args.no_mcp:
-        register_mcp(remove=False, vrunner=args.vrunner, lsp=not args.no_lsp)
+        register_mcp(remove=False, vrunner=args.vrunner)
     print(f'Установлено: {len(skills)} навыков в {dst}, агентов и команд: {len(files)} в {oc}')
     if not args.is_global:
         core.print_gitignore_recommendations(base)
@@ -182,7 +206,7 @@ def main():
     p.add_argument('--runtime', choices=['powershell', 'python'], help='сразу переключить рантайм навыков')
     p.add_argument('--no-mcp', action='store_true', help='не регистрировать MCP-серверы')
     p.add_argument('--vrunner', action='store_true', help='включить MCP-сервер vrunner-mcp (vanessa-runner 3.x)')
-    p.add_argument('--no-lsp', action='store_true', help='не записывать LSP bsl (BSL LS) в конфиг OpenCode')
+    p.add_argument('--no-autocheck', action='store_true', help='не ставить плагин bsl-autocheck (проверка BSL после правок)')
     p.set_defaults(func=cmd_install)
 
     p = sub.add_parser('runtime', help='переключить рантайм у установленных навыков')

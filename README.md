@@ -25,11 +25,11 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 ```
 
 Права администратора не нужны. Только winget может один раз запросить UAC, когда ставит Node.js, Python или Java.
-Скрипт берёт навыки из своей папки, поэтому **не удаляйте и не переносите её**: MCP-серверы и LSP запускаются оттуда.
+Скрипт берёт навыки из своей папки, поэтому **не удаляйте и не переносите её**: MCP-серверы и плагин `bsl-autocheck` запускаются оттуда.
 Порядок работы:
 - ставит через winget недостающие Git, Node.js LTS (20+), Python 3 и Java 17+;
 - ставит навыки, агентов и команды глобально в `%USERPROFILE%\.config\opencode`;
-- регистрирует там MCP и LSP;
+- регистрирует там MCP и плагин `bsl-autocheck` (проверка BSL после каждой правки);
 - скачивает BSL Language Server, а также Playwright и Chromium для `web-test`.
 
 Повторный запуск безопасен. Для обновления выполните `git pull` или распакуйте новый ZIP в ту же папку и запустите
@@ -40,9 +40,9 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 | `-Project D:\1c\проект` | установить в проект (`<проект>\.opencode`) вместо глобальной установки |
 | `-WithVrunner` | включить MCP `vrunner` |
 | `-WithDesktop` | поставить OpenCode Desktop (`winget SST.OpenCodeDesktop`) |
-| `-NoBslLs` | без BSL LS и Java (и без LSP `bsl`) |
+| `-NoBslLs` | без BSL LS и Java (и без плагина `bsl-autocheck`) |
 | `-NoBrowser` | без Playwright/Chromium |
-| `-Uninstall` | удалить навыки, агентов, команды и MCP/LSP (с `-Project` — из проекта) |
+| `-Uninstall` | удалить навыки, агентов, команды, плагин и MCP (с `-Project` — из проекта) |
 | `-Machine [-Users N]` | (администратор) общие инструменты и копия репозитория в `C:\ProgramData\1c-opencode` для всех пользователей сервера; см. [Несколько пользователей (RDP)](docs/quickstart.md#несколько-пользователей-rdp) |
 
 Параметры передаются и через `install.cmd`, например `install.cmd -Project D:\1c\проект -WithVrunner`.
@@ -137,12 +137,25 @@ python3 skills/print-form/scripts/mxl-render.py <...>/Templates/<Макет>/Ext
 методы и свойства платформы, а не придумывают их. Парсер `.hbk` свой, без зависимостей
 ([`mcp/lib/hbk.mjs`](mcp/lib/hbk.mjs)).
 
-**LSP.** В `opencode.json` и установщике есть секция `lsp.bsl`: BSL Language Server для `.bsl` и `.os` через
-[`lsp/bsl-lsp.mjs`](lsp/bsl-lsp.mjs) — тот же поиск BSL LS, что у `1c-bsl` (`BSL_LS_PATH` →
-`~/.config/opencode/tools/bsl-language-server`), режим `lsp` по stdio. **OpenCode v2 эту
-секцию принимает, но языковые серверы пока не запускает** (документация, «Migrate from V1»); она работает в OpenCode
-1.x и включится сама, когда v2 вернёт LSP. Рабочая диагностика в v2 — MCP `1c-bsl` (точечно по модулю) и навык
-`bsl-check` (каталог, отчёт). Не записывать LSP: `install --no-lsp` или `register-opencode-mcp.mjs --no-lsp`.
+**Проверка BSL после каждой правки — плагин [`bsl-autocheck`](plugins/bsl-autocheck.mjs).** OpenCode v2 языковые
+серверы (секция `lsp`) не запускает, поэтому LSP из проекта убран (установщик удаляет старую запись `lsp.bsl` из
+конфига). Вместо него плагин OpenCode v2 (хук `tool.hook("execute.after")`) после `edit` / `write` / `patch` файла
+`.bsl`/`.os` запускает `bsl-language-server analyze` только по изменённым файлам и дописывает к результату
+инструмента до 20 строк замечаний — сначала ошибки, затем предупреждения. Модель видит их в том же шаге и исправляет.
+Параллельные правки проверяются одним запуском, таймаут 30 с (дерево процессов BSL LS гасится), файлы больше 1 МБ
+пропускаются, нет BSL LS — одна подсказка за сеанс. Процессы и временные файлы — свои у каждого пользователя (RDP).
+Установка: `install.ps1` / `opencode_port.py install` кладут переходник `plugins/bsl-autocheck.js` в
+`~/.config/opencode/plugins/` или `<проект>/.opencode/plugins/` (`--no-autocheck` — не ставить).
+
+| Настройка | Переменная среды | `.v8-project.json` → `bslAutocheck` | По умолчанию |
+|-----------|------------------|-------------------------------------|--------------|
+| выключить | `BSL_AUTOCHECK=0` | `"enabled": false` | включено |
+| порог | `BSL_AUTOCHECK_SEVERITY` | `"severity"` (`Error`, `Warning`, `Information`, `Hint`) | `Warning` |
+| таймаут, мс | `BSL_AUTOCHECK_TIMEOUT_MS` | `"timeoutMs"` | 30000 |
+| строк замечаний | `BSL_AUTOCHECK_LIMIT` | `"limit"` | 20 |
+| размер файла, КБ | `BSL_AUTOCHECK_MAX_KB` | `"maxKb"` | 1024 |
+
+Автопроверка не заменяет проверку каталога перед загрузкой в базу — её делает навык `bsl-check`.
 Уточняющие вопросы агент задаёт встроенным инструментом OpenCode `question`.
 
 ## Структура
@@ -153,13 +166,14 @@ python3 skills/print-form/scripts/mxl-render.py <...>/Templates/<Макет>/Ext
 | `.opencode/commands/` | команды `/1c-*` |
 | `skills/` | собранные навыки (генерируются, руками не править) |
 | `own-skills/` | свои навыки (`bsl-check`, `vrunner`, `1c-test`, `print-form`) — источник для `skills/` |
-| `mcp/` | MCP-серверы и `register-opencode-mcp.mjs` (пишет `mcp.servers` и `lsp.bsl`) |
-| `lsp/` | `bsl-lsp.mjs` — запуск BSL LS в режиме LSP для секции `lsp` |
+| `mcp/` | MCP-серверы и `register-opencode-mcp.mjs` (пишет `mcp.servers`, удаляет старую запись `lsp.bsl`) |
+| `plugins/` | плагин OpenCode v2 `bsl-autocheck.mjs` — проверка BSL после каждой правки (`.opencode/plugins/bsl-autocheck.js` — переходник для работы в репозитории) |
 | `opencode.json` | конфиг v2 для работы в самом репозитории (`skills`, `mcp.servers`, `default_agent`) |
 | `templates/AGENTS.md` | шаблон инструкций для 1С-проекта |
 | `install.ps1`, `install.cmd` | установка на Windows одной командой из папки проекта |
 | `scripts/kill-bsl-ls.mjs`, `scripts/kill-bsl-ls.ps1` | завершить зависшие процессы BSL LS ([зависания на больших проектах](docs/quickstart.md#зависания-и-процессы-bsl-ls-на-больших-конфигурациях)) |
 | `tests/mcp/run.mjs`, `tests/mcp/multiuser.mjs` | тесты прокси `1c-bsl` (дерево процессов, таймаут, область индексации) и многопользовательской безопасности |
+| `tests/plugins/bsl-autocheck.mjs` | тесты плагина на поддельном BSL LS (пачки, таймаут, вывод, нет BSL LS) и миграции `lsp.bsl` |
 | `tests/mcp/help.mjs` | тесты `1c-help` на синтетических `.hbk` (`tests/mcp/lib/make-hbk.mjs`, без содержимого справки 1С) |
 | `scripts/opencode_port.py` | сборка из upstream и установка; ядро — `scripts/port_core.py` |
 | `docs/` | гайды и спецификации форматов 1С: [quickstart](docs/quickstart.md), [тестирование](docs/testing-guide.md), [индекс спецификаций](docs/1c-specs-index.md); гайды [cf](docs/cf-guide.md), [cfe](docs/cfe-guide.md), [epf](docs/epf-guide.md), [db](docs/db-guide.md), [meta](docs/meta-guide.md), [form](docs/form-guide.md), [skd](docs/skd-guide.md), [mxl](docs/mxl-guide.md), [role](docs/role-guide.md), [subsystem](docs/subsystem-guide.md), [xdto](docs/xdto-guide.md), [web](docs/web-guide.md), [web-test](docs/web-test-guide.md), [.v8-project.json](docs/v8-project-guide.md) |

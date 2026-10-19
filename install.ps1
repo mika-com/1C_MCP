@@ -6,9 +6,10 @@
     1. Проверяет и при необходимости ставит через winget: Git, Node.js LTS (>= 20), Python 3,
        Java 17+ (для BSL LS в виде jar; Windows-сборка BSL LS несёт свою JRE), по флагу — OpenCode Desktop.
     2. Источник — папка, где лежит этот скрипт (скачанный ZIP или клон репозитория). Её нельзя удалять и
-       переносить после установки: MCP-серверы и LSP запускаются из неё.
+       переносить после установки: MCP-серверы и плагин bsl-autocheck запускаются из неё.
     3. Ставит навыки, агентов и команды: глобально в %USERPROFILE%\.config\opencode или в проект (-Project),
-       регистрирует MCP-серверы и LSP bsl в %USERPROFILE%\.config\opencode\opencode.json.
+       регистрирует MCP-серверы в %USERPROFILE%\.config\opencode\opencode.json (запись lsp.bsl прежних версий
+       удаляется) и плагин bsl-autocheck — проверку BSL после каждой правки (plugins\bsl-autocheck.js).
     4. Скачивает BSL Language Server в %USERPROFILE%\.config\opencode\tools\bsl-language-server.
     5. Ставит Playwright и Chromium для навыка web-test.
     6. Находит установленную платформу 1С для синтакс-помощника 1c-help (справка читается локально,
@@ -218,7 +219,7 @@ if ($Machine -and ($Project -or $Uninstall)) { Stop-Install '-Machine не со�
 
 # ---------- Удаление ----------
 if ($Uninstall) {
-    Write-Step 'Удаление навыков, агентов, команд и MCP/LSP'
+    Write-Step 'Удаление навыков, агентов, команд, плагина и MCP'
     $script:PythonCmd = Get-PythonCommand
     $porter = Join-Path $InstallDir 'scripts\opencode_port.py'
     if (-not $script:PythonCmd) { Stop-Install 'Python 3 не найден — удаление выполняет scripts\opencode_port.py.' }
@@ -347,7 +348,7 @@ if (Test-Path -LiteralPath (Join-Path $InstallDir '.git')) {
 } else {
     Write-Ok 'Распакованный архив.'
 }
-Write-Info 'Не удаляйте и не переносите эту папку: MCP-серверы и LSP запускаются из неё.'
+Write-Info 'Не удаляйте и не переносите эту папку: MCP-серверы и плагин bsl-autocheck запускаются из неё.'
 
 # ---------- 3. Python-зависимости ----------
 Write-Step '3/6 Python-зависимости навыков (lxml, Pillow, psutil)'
@@ -356,14 +357,15 @@ $py = $script:PythonCmd
 $code = Invoke-Native -File $py[0] -Arguments ($pyExtra + @('-m', 'pip', 'install', '--user', '--quiet', '--disable-pip-version-check', '-r', $req)) -AllowFail
 if ($code -eq 0) { Write-Ok 'Установлены.' } else { Write-Warn 'pip не смог поставить зависимости — нужны только для .py-рантайма навыков (pip install --user -r requirements.txt).' }
 
-# ---------- 4. Навыки, агенты, команды, MCP, LSP ----------
-Write-Step '4/6 Навыки, агенты, команды, MCP-серверы и LSP'
+# ---------- 4. Навыки, агенты, команды, MCP, плагин ----------
+Write-Step '4/6 Навыки, агенты, команды, MCP-серверы и плагин bsl-autocheck'
 $porter = Join-Path $InstallDir 'scripts\opencode_port.py'
 $installArgs = @($porter, 'install') + (Get-TargetArgument)
 if ($WithVrunner) { $installArgs += '--vrunner' }
-if ($NoBslLs) { $installArgs += '--no-lsp' }
+if ($NoBslLs) { $installArgs += '--no-autocheck' }
 Invoke-Python $installArgs
-Write-Ok "MCP и LSP записаны в $OpenCodeHome\opencode.json"
+Write-Ok "MCP записаны в $OpenCodeHome\opencode.json (старая запись lsp.bsl удалена, если была)"
+if (-not $NoBslLs) { Write-Ok 'Плагин bsl-autocheck: после каждой правки .bsl/.os агент получает ошибки BSL LS (отключить: BSL_AUTOCHECK=0)' }
 
 # ---------- 5. BSL Language Server ----------
 Write-Step '5/6 BSL Language Server'

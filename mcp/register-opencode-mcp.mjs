@@ -3,8 +3,7 @@
 //
 //   node register-opencode-mcp.mjs                  — добавить/обновить 1c-search, 1c-bsl, 1c-help (+ vrunner выключенным)
 //   node register-opencode-mcp.mjs --vrunner        — то же, но vrunner-mcp включён (нужен vanessa-runner 3.x)
-//   node register-opencode-mcp.mjs --remove         — удалить серверы 1С (и LSP bsl) из конфига
-//   node register-opencode-mcp.mjs --no-lsp         — не записывать секцию lsp.bsl
+//   node register-opencode-mcp.mjs --remove         — удалить серверы 1С из конфига
 //   node register-opencode-mcp.mjs --config <путь>  — другой конфиг (по умолчанию ~/.config/opencode/opencode.json)
 //
 // Формат OpenCode v2: серверы лежат в mcp.servers, отключение — "disabled": true (не "enabled"),
@@ -12,9 +11,8 @@
 // Записи формата v1 (серверы прямо под mcp) и устаревший сервер вопросов 1c-ask из ранних установок
 // удаляются: в v2 вопросы пользователю задаются встроенным инструментом question.
 //
-// Дополнительно пишется lsp.bsl — BSL Language Server как языковой сервер (.bsl, .os) через lsp/bsl-lsp.mjs,
-// который ищет BSL LS так же, как 1c-bsl. OpenCode v2 эту секцию принимает и сохраняет, но LSP не запускает
-// (docs «Migrate from V1»); она работает в OpenCode 1.x. В v2 диагностику даёт MCP 1c-bsl / навык bsl-check.
+// Миграция: секция lsp.bsl, которую писали ранние версии (lsp/bsl-lsp.mjs), удаляется — OpenCode v2 LSP не
+// запускает, проверку после правок делает плагин plugins/bsl-autocheck.mjs. Чужие LSP-серверы не трогаем.
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -36,10 +34,19 @@ export const VRUNNER = { key: 'vrunner', command: ['vrunner-mcp'], timeout: { st
 export const V1_KEYS = ['1c-ask', '1c-search', '1c-bsl'];
 export const STALE_SERVERS = ['1c-ask'];
 export const LSP_KEY = 'bsl';
-export const LSP_EXTENSIONS = ['.bsl', '.os'];
 
-export function lspConfig(mcpDir) {
-  return { command: ['node', join(mcpDir, '..', 'lsp', 'bsl-lsp.mjs')], extensions: LSP_EXTENSIONS };
+// Наша ли запись lsp.bsl (ранние версии писали node …/lsp/bsl-lsp.mjs)
+export function isOwnLsp(entry) {
+  const cmd = Array.isArray(entry?.command) ? entry.command.join(' ') : String(entry?.command || '');
+  return /bsl-lsp\.mjs/i.test(cmd);
+}
+
+// Убрать нашу запись lsp.bsl; пустую секцию lsp — целиком.
+export function removeOwnLsp(config) {
+  if (!config.lsp || typeof config.lsp !== 'object' || Array.isArray(config.lsp)) return config;
+  if (isOwnLsp(config.lsp[LSP_KEY])) delete config.lsp[LSP_KEY];
+  if (!Object.keys(config.lsp).length) delete config.lsp;
+  return config;
 }
 
 export function opencodeConfigPath(env = process.env) {
@@ -59,7 +66,7 @@ export function parseConfig(text) {
   return parsed;
 }
 
-export function updateConfig(config, mcpDir, { remove = false, vrunner = false, lsp = true } = {}) {
+export function updateConfig(config, mcpDir, { remove = false, vrunner = false } = {}) {
   const next = structuredClone(config);
   if (!next.mcp || typeof next.mcp !== 'object' || Array.isArray(next.mcp)) next.mcp = {};
   // миграция v1: серверы 1С прямо под mcp
@@ -76,13 +83,7 @@ export function updateConfig(config, mcpDir, { remove = false, vrunner = false, 
     servers[VRUNNER.key] = { type: 'local', command: ['node', join(mcpDir, 'run-supervised.mjs'), ...VRUNNER.command], timeout: VRUNNER.timeout };
     if (!vrunner) servers[VRUNNER.key].disabled = true;
   }
-  // lsp: true/false/отсутствует — превращаем в объект, не теряя чужие серверы
-  if (remove) {
-    if (next.lsp && typeof next.lsp === 'object') delete next.lsp[LSP_KEY];
-  } else if (lsp && next.lsp !== false) {
-    if (!next.lsp || typeof next.lsp !== 'object') next.lsp = {};
-    next.lsp[LSP_KEY] = lspConfig(mcpDir);
-  }
+  removeOwnLsp(next);
   return next;
 }
 
@@ -90,11 +91,10 @@ function main() {
   const argv = process.argv.slice(2);
   const remove = argv.includes('--remove');
   const vrunner = argv.includes('--vrunner');
-  const lsp = !argv.includes('--no-lsp');
   const ci = argv.indexOf('--config');
   const cfg = ci >= 0 ? resolve(argv[ci + 1]) : opencodeConfigPath();
   const beforeText = existsSync(cfg) ? readFileSync(cfg, 'utf8') : '';
-  const after = updateConfig(parseConfig(beforeText), HERE, { remove, vrunner, lsp });
+  const after = updateConfig(parseConfig(beforeText), HERE, { remove, vrunner });
   const afterText = JSON.stringify(after, null, 2) + '\n';
   if (beforeText.replace(/^\uFEFF/, '') === afterText) {
     console.log(`Без изменений: ${cfg}`);
@@ -105,7 +105,7 @@ function main() {
   writeFileSync(cfg, afterText, 'utf8');
   console.log(remove
     ? `MCP-серверы 1С удалены из ${cfg}`
-    : `MCP-серверы 1С (1c-search, 1c-bsl, 1c-help, vrunner${vrunner ? '' : ' — выключен'})${lsp ? ' и LSP bsl' : ''} записаны в ${cfg}`);
+    : `MCP-серверы 1С (1c-search, 1c-bsl, 1c-help, vrunner${vrunner ? '' : ' — выключен'}) записаны в ${cfg}`);
   return 0;
 }
 

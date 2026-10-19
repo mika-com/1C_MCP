@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-// kill-bsl-ls.mjs — завершить зависшие процессы BSL Language Server (1c-bsl, bsl-lsp) ТЕКУЩЕГО пользователя
+// kill-bsl-ls.mjs — завершить зависшие процессы BSL Language Server (1c-bsl, bsl-autocheck, bsl-check) ТЕКУЩЕГО пользователя
 // в ТЕКУЩЕМ сеансе. Процессы других пользователей (RDP) не трогаются, даже если запущено от администратора.
 //   node scripts/kill-bsl-ls.mjs              — завершить свои
 //   node scripts/kill-bsl-ls.mjs --dry-run    — только показать
@@ -12,7 +12,7 @@ import { resolve } from 'node:path';
 import { lockDir } from '../mcp/bsl-ls.mjs';
 
 const IS_WIN = process.platform === 'win32';
-export const PATTERN = /bsl-language-server|[\\/]mcp[\\/]bsl-ls\.mjs|[\\/]lsp[\\/]bsl-lsp\.mjs/i;
+export const PATTERN = /bsl-language-server|[\\/]mcp[\\/]bsl-ls\.mjs/i;
 
 function isAdmin() {
   if (!IS_WIN) return process.getuid() === 0;
@@ -27,7 +27,7 @@ export function listProcesses() {
   if (IS_WIN) {
     const ps = '$me=[Security.Principal.WindowsIdentity]::GetCurrent().Name.ToLowerInvariant(); ' +
       '$s=[Diagnostics.Process]::GetCurrentProcess().SessionId; ' +
-      "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'bsl-language-server|bsl-ls\\.mjs|bsl-lsp\\.mjs' } | ForEach-Object { " +
+      "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'bsl-language-server|bsl-ls\\.mjs' } | ForEach-Object { " +
       '$o = Invoke-CimMethod -InputObject $_ -MethodName GetOwner -ErrorAction SilentlyContinue; ' +
       '$n = if ($o.User) { "$($o.Domain)\\$($o.User)".ToLowerInvariant() } else { "" }; ' +
       '$own = ($n -eq $me -and $_.SessionId -eq $s); ' +

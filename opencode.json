@@ -55,17 +55,5 @@
         "disabled": true
       }
     }
-  },
-  "lsp": {
-    "bsl": {
-      "command": [
-        "node",
-        "./lsp/bsl-lsp.mjs"
-      ],
-      "extensions": [
-        ".bsl",
-        ".os"
-      ]
-    }
   }
 }

@@ -52,8 +52,12 @@ python scripts/opencode_port.py install --global
   `.opencode/agents/` и команды `/1c-analyze`, `/1c-implement`, `/1c-deploy`, `/1c-webtest`, `/1c-bdd`, `/1c-check`
   в `.opencode/commands/`;
 - создаёт шаблон `AGENTS.md` в проекте, если его ещё нет;
-- регистрирует MCP-серверы в `~/.config/opencode/opencode.json` (формат v2, `mcp.servers`) и LSP `bsl` для `.bsl`/`.os`
-  (`--no-lsp` — не записывать; в v2 секция `lsp` пока не исполняется, диагностика — через `1c-bsl` и `bsl-check`).
+- регистрирует MCP-серверы в `~/.config/opencode/opencode.json` (формат v2, `mcp.servers`); запись `lsp.bsl`
+  прежних версий удаляет (OpenCode v2 LSP не запускает);
+- ставит плагин `bsl-autocheck` (`<opencode>/plugins/bsl-autocheck.js`): после каждой правки `.bsl`/`.os` агент
+  получает ошибки и предупреждения BSL LS прямо в результате правки (`--no-autocheck` — не ставить,
+  `BSL_AUTOCHECK=0` — выключить; настройки — в [README](../README.md#mcp-серверы)). Перед загрузкой в базу
+  каталог всё равно проверяется навыком `bsl-check`.
 
 ## Шаг 3. MCP-серверы
 
@@ -167,6 +171,7 @@ YAxUnit через vrunner. Отчёты — в `build/reports/`.
 |----------|------------|
 | Агент не видит навыки | Проверьте `.opencode/skills/` проекта или `~/.config/opencode/skills/` |
 | Нет `1c-search` / `1c-bsl` | Выполните `node mcp/register-opencode-mcp.mjs`, проверьте `opencode mcp list` |
+| Нет строк `[bsl-autocheck]` после правки `.bsl` | Плагин ставится в `~/.config/opencode/plugins/` (или `.opencode/plugins/` проекта); проверьте `opencode plugin list`, `BSL_AUTOCHECK`, перезапустите OpenCode |
 | `1c-bsl` «не подключён» | BSL LS стартует JVM — `timeout.startup` должен быть ≥ 30000 мс |
 | `1c-help`: «Справка недоступна» | Нет платформы 1С со `shcntx_ru.hbk`: задайте `V8_HELP_PATH` (каталог `bin`) или `v8path` в `.v8-project.json`; проверка — `help_status` |
 | `1c-help`: «сборка индекса … прервана» | Увеличьте `HELP_BUILD_TIMEOUT_MS` (мс) или повторите вызов; индекс строится один раз на версию платформы |
@@ -193,7 +198,9 @@ YAxUnit через vrunner. Отчёты — в `build/reports/`.
   понятную ошибку.
 - **Процессы.** При закрытии сеанса, сигнале или смерти OpenCode всё дерево BSL LS завершается (на Windows через
   `taskkill /T /F`). На один каталог проекта работает один экземпляр: новый гасит старый и осиротевшие
-  (`BSL_LS_SINGLETON=0` — отключить). Так же запускаются LSP `bsl` и `vrunner-mcp` (`mcp/run-supervised.mjs`).
+  (`BSL_LS_SINGLETON=0` — отключить). Так же запускается `vrunner-mcp` (`mcp/run-supervised.mjs`).
+- **Автопроверка после правок** (`bsl-autocheck`) запускает BSL LS только по изменённым файлам, с таймаутом
+  `BSL_AUTOCHECK_TIMEOUT_MS` (30 с) и гашением дерева процессов; файлы больше `BSL_AUTOCHECK_MAX_KB` (1 МБ) пропускает.
 - **Память JVM:** `BSL_LS_XMX=4g`. `install.ps1` выставляет её по объёму ОЗУ, если переменная не задана.
 
 ## Несколько пользователей (RDP)
