@@ -120,12 +120,22 @@ python3 skills/print-form/scripts/mxl-render.py <...>/Templates/<Макет>/Ext
 
 | Сервер | Что даёт | По умолчанию |
 |--------|----------|--------------|
-| `1c-search` | `find_object`, `find_method`, `module_methods`, `find_usages`, `search_code`, `index_status` | включён |
+| `1c-search` | `semantic_search` (по смыслу, гибрид с ключевыми словами и реранкером; без LM Studio — ключевые слова), `semantic_index`, `find_object`, `find_method`, `module_methods`, `find_usages`, `search_code`, `index_status` | включён |
 | `1c-bsl` | BSL LS в режиме MCP (`analyze_file`, `document_symbols`, …); без BSL LS — заглушка с подсказкой | включён |
 | `1c-help` | синтакс-помощник: `help_search`, `help_get` (синтаксис, параметры, возврат, доступность, версия, примеры), `help_members`, `help_status` — по справке **установленной** платформы | включён |
 | `vrunner` | команды vanessa-runner 3.x (`vrunner-mcp`) | `disabled: true`, включить: `node mcp/register-opencode-mcp.mjs --vrunner` |
 
 Формат OpenCode v2: `mcp.servers`, `disabled`, таймауты в миллисекундах (`startup` 10 с / 30 с для BSL LS).
+
+**Семантический поиск `semantic_search`.** «Где реализовано X», когда имя метода неизвестно. Фрагменты — процедуры и
+функции (с комментарием и директивами) и объекты метаданных; векторы считает локальный LM Studio
+(`Qwen3-Embedding-4B`, `/v1/embeddings`), результат смешивается с поиском по ключевым словам (RRF) и
+переранжируется `Qwen3-Reranker-4B` (logprobs «yes/no» из `/v1/responses` LM Studio или `/v1/rerank`). Хранилище
+векторов — `%LOCALAPPDATA%\1c-opencode\semantic` (общее для сервера — `SEMANTIC_STORE_DIR`), обновляется
+по изменённым файлам, один построитель на хранилище, атомарная запись. Без LM Studio — поиск по ключевым словам и
+строка `[!]` с причиной. Настройка LM Studio по шагам (модели, Domain Type, шаблон реранкера, две GPU) —
+[docs/semantic-search.md](docs/semantic-search.md); включить: `install.cmd -Project <папка> -WithSemantic`,
+проверить: `scripts\check-lmstudio.ps1`.
 
 **Синтакс-помощник `1c-help`.** Справка 1С в репозиторий не входит и не распространяется: сервер читает файлы
 `shcntx_ru.hbk`, `shlang_ru.hbk`, `shquery_ru.hbk` из каталога `bin` платформы, установленной у пользователя.

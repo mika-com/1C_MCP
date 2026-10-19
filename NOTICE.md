@@ -14,7 +14,7 @@ cc-1c-skills сохранены в [LICENSE](LICENSE) и должны сохра
 
 Собственные компоненты 1C-Agent (MIT, © 2026 mika-com): `own-skills/` (`bsl-check`, `vrunner`, `1c-test`,
 `print-form`), `.opencode/`, `mcp/`, `plugins/`, `scripts/`, `tests/`, `install.ps1`, `install.cmd`, `templates/`,
-`docs/quickstart.md`, `docs/testing-guide.md`.
+`docs/quickstart.md`, `docs/testing-guide.md`, `docs/semantic-search.md`.
 
 ## Не включено (устанавливается или вызывается отдельно)
 
@@ -25,6 +25,9 @@ cc-1c-skills сохранены в [LICENSE](LICENSE) и должны сохра
 | [Vanessa Automation](https://github.com/Pr-Mex/vanessa-automation) | BSD-3-Clause | `vanessa-automation.epf` скачивается пользователем в `tools/vanessa/` |
 | [Playwright](https://github.com/microsoft/playwright) | Apache-2.0 | ставится через npm (`web-test`, предпросмотр PNG) |
 | [OpenCode](https://github.com/anomalyco/opencode) | MIT | агентная среда |
+| [LM Studio](https://lmstudio.ai) | проприетарная (бесплатна, см. условия LM Studio) | необязательный локальный сервер эмбеддингов и реранкера для `semantic_search`; ставится пользователем |
+| [Qwen3-Embedding-4B](https://huggingface.co/Qwen/Qwen3-Embedding-4B-GGUF) | Apache-2.0 | модель эмбеддингов; скачивается пользователем в LM Studio, не распространяется |
+| [Qwen3-Reranker-4B](https://huggingface.co/Qwen/Qwen3-Reranker-4B) (GGUF: [DevQuasar](https://huggingface.co/DevQuasar/Qwen.Qwen3-Reranker-4B-GGUF)) | Apache-2.0 | модель-реранкер; скачивается пользователем, не распространяется; формат промпта — по карточке модели |
 | XSD-схемы платформы 1С | собственность 1С | не распространяются; `/v8-xsd-fetch` берёт их из установленной платформы |
 | Справка платформы 1С (синтакс-помощник, `*.hbk`) | собственность 1С | не распространяется и не входит в репозиторий; MCP `1c-help` читает её из платформы, установленной у пользователя, индекс хранится только локально (`%LOCALAPPDATA%\1c-opencode\help-cache`) |
 

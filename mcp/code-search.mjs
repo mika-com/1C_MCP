@@ -4,6 +4,9 @@
 // Заменяет grep/sed по выгрузке: ответы короткие и не забивают контекст модели.
 // Без зависимостей. Индекс строится при первом вызове и кэшируется во временном каталоге
 // (обновляются только изменённые файлы). Папку проекта берёт из MCP roots (рабочая папка сеанса), иначе — рабочий каталог процесса.
+// Семантический поиск (semantic_search, semantic_index) — эмбеддинги через OpenAI-совместимый сервер (LM Studio),
+// переранжирование Qwen3-Reranker; без сервера — поиск по ключевым словам (mcp/lib/semantic.mjs, docs/semantic-search.md).
+// CLI: node code-search.mjs --semantic-build [--root DIR] [--force] | --semantic-status [--root DIR]
 
 import { readdirSync, readFileSync, statSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join, relative, sep, resolve, basename } from 'node:path';
@@ -11,6 +14,7 @@ import { tmpdir, userInfo } from 'node:os';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { startServer } from './lib/stdio-server.mjs';
+import * as sem from './lib/semantic.mjs';
 
 const INDEX_VERSION = 3;
 const SKIP_DIRS = new Set(['.git', 'node_modules', '.agents', '.opencode', 'build', 'base', 'tools', 'test-tmp', '.v8-xsd']);
@@ -62,7 +66,7 @@ function words(s) {
 // Простое «стеммирование»: сравниваем по основе (без окончания), чтобы «задачи» находило «задача»
 const stem = (w) => (w.length > 5 ? w.slice(0, w.length - 2) : w.length > 3 ? w.slice(0, w.length - 1) : w);
 
-function readText(file) {
+export function readText(file) {
   return readFileSync(file, 'utf8').replace(/^﻿/, '');
 }
 
@@ -479,10 +483,309 @@ export function indexStatus(idx) {
 }
 
 // ---------------------------------------------------------------------------
+// Семантический и гибридный поиск
+// ---------------------------------------------------------------------------
+const STOP = new Set(['где', 'как', 'что', 'это', 'для', 'при', 'или', 'кто', 'чем', 'того', 'если', 'чтобы', 'который', 'которая',
+  'которые', 'которое', 'реализован', 'реализована', 'реализовано', 'реализуется', 'реализация', 'находится', 'происходит',
+  'выполняется', 'делается', 'код', 'коде', 'метод', 'методе', 'процедура', 'функция', 'модуль', 'модуле', 'есть', 'нужно', 'надо',
+  'where', 'what', 'how', 'the', 'and', 'for', 'is', 'in', 'of']);
+
+const methodKey = (idx, mod, m) => `${rel(idx, mod.file)}|${m.name}`;
+const objectKey = (idx, o) => `${rel(idx, o.file)}|${objTitle(o)}`;
+
+// Источники фрагментов для семантического индекса: методы модулей и (по настройке) объекты метаданных
+export function semanticSources(idx, cfg) {
+  const byTitle = new Map(idx.objects.map((o) => [`${o.cfg}|${objTitle(o)}`, o]));
+  const out = [];
+  for (const mod of idx.modules) {
+    if (!mod.methods.length) continue;
+    const title = mod.id.split('.').slice(0, 2).join('.');
+    const o = byTitle.get(`${mod.cfg}|${title}`);
+    out.push({ kind: 'module', file: mod.file, rel: rel(idx, mod.file), moduleId: mod.id, objTitle: title,
+      objSyn: o && o.syn && o.syn !== o.name ? o.syn : '', methods: mod.methods });
+  }
+  if (cfg.includeObjects) {
+    for (const o of idx.objects) {
+      out.push({ kind: 'object', file: o.file, rel: rel(idx, o.file), title: objTitle(o), name: o.name, syn: o.syn, attrs: o.attrs, ts: o.ts });
+    }
+  }
+  return out;
+}
+
+// Ключевые слова: имя метода и модуля, имя/синоним объекта, идентификаторы из запроса в теле кода
+export function keywordRank(idx, query, { object, timeBudgetMs = 3000 } = {}) {
+  const qStems = words(query).filter((w) => !STOP.has(w)).map(stem);
+  const qFull = norm(query).replace(/\s+/g, '');
+  const res = new Map();
+  const add = (key, s, item) => { const cur = res.get(key); if (cur) cur.s += s; else res.set(key, { key, s, ...item }); };
+  const mods = selectModules(idx, object);
+  if (qStems.length) {
+    for (const mod of mods) {
+      const modStems = [...new Set(words(mod.id).map(stem))];
+      const modHit = qStems.filter((q) => modStems.some((w) => w.startsWith(q) || q.startsWith(w))).length / qStems.length;
+      for (const m of mod.methods) {
+        const s = scoreText(qStems, qFull, m.name, '', 10) + modHit * 3;
+        if (s >= 4) add(methodKey(idx, mod, m), s, { mod, m });
+      }
+    }
+    if (!object) {
+      for (const o of idx.objects) {
+        const s = scoreText(qStems, qFull, o.name, o.syn, 10);
+        if (s >= 5) add(objectKey(idx, o), s, { o });
+      }
+    }
+  }
+  // Идентификаторы (ПроверитьЛимит, Контрагент_Код) — ищем в теле методов, с ограничением по времени
+  const ids = [...new Set((query.match(/[A-Za-zА-Яа-яЁё_][\wА-Яа-яЁё]{4,}/g) || [])
+    .filter((t) => /[a-zа-яё][A-ZА-ЯЁ]|_/.test(t)))].slice(0, 5);
+  if (ids.length) {
+    const started = Date.now();
+    const nids = ids.map(norm);
+    for (const mod of mods) {
+      if (Date.now() - started > timeBudgetMs) break;
+      let text;
+      try { text = readText(mod.file); } catch { continue; }
+      const nt = norm(text);
+      if (!nids.some((id) => nt.includes(id))) continue;
+      const lines = nt.split(/\r?\n/);
+      for (const m of mod.methods) {
+        const body = lines.slice(m.line - 1, m.end).join('\n');
+        let hit = 0;
+        for (const id of nids) if (body.includes(id)) hit++;
+        if (hit) add(methodKey(idx, mod, m), hit * 6, { mod, m });
+      }
+    }
+  }
+  return [...res.values()].sort((a, b) => b.s - a.s).slice(0, 200);
+}
+
+const autoBuildAt = new Map();
+function maybeAutoBuild(idx, cfg) {
+  if (!cfg.autoBuild) return null;
+  const st = sem.buildState(idx.root);
+  if (st?.running) return st;
+  const last = autoBuildAt.get(idx.root) || 0;
+  if (Date.now() - last < 5 * 60000) return st;
+  autoBuildAt.set(idx.root, Date.now());
+  return sem.startBuild(idx.root, () => semanticSources(buildIndex(idx.root), cfg), cfg, { readText });
+}
+
+function buildingNote(st) {
+  if (!st) return '';
+  if (st.running) return ` (строится в фоне: ${st.done}/${st.total || '?'})`;
+  if (st.lockedBy) return ` (индекс строит другой процесс: ${st.lockedBy.user || '?'}, pid ${st.lockedBy.pid || '?'})`;
+  return st.error ? ` (последнее построение: ошибка — ${st.error})` : '';
+}
+
+function chunkTextFor(idx, cfg, cand, cache) {
+  if (cand.o) {
+    return sem.objectChunk({ title: objTitle(cand.o), name: cand.o.name, syn: cand.o.syn, attrs: cand.o.attrs, ts: cand.o.ts }, cfg.maxChunkChars).text;
+  }
+  let text = cache.get(cand.mod.file);
+  if (text === undefined) { try { text = readText(cand.mod.file); } catch { text = ''; } cache.set(cand.mod.file, text); }
+  const [src] = semanticSources({ ...idx, modules: [{ ...cand.mod, methods: [cand.m] }], objects: idx.objects }, { includeObjects: false });
+  return sem.moduleChunks(text, src, cfg.maxChunkChars)[0]?.text || '';
+}
+
+function firstComment(text, m) {
+  const lines = text.split(/\r?\n/);
+  for (let i = m.line - 2, n = 0; i >= 0 && n < 15; i--, n++) {
+    const t = lines[i].trim();
+    if (t.startsWith('&')) continue;
+    if (!t.startsWith('//')) break;
+    const c = t.replace(/^\/\/\s*/, '');
+    if (c && !/^[-=/*]+$/.test(c) && !/^(Параметры|Возвращаемое значение|Пример)/i.test(c)) {
+      // поднимаемся к началу комментария — первая содержательная строка
+      let j = i; let best = c;
+      while (j - 1 >= 0 && lines[j - 1].trim().startsWith('//')) {
+        j--;
+        const cc = lines[j].trim().replace(/^\/\/\s*/, '');
+        if (cc && !/^[-=/*]+$/.test(cc) && !/^(Параметры|Возвращаемое значение|Пример)/i.test(cc)) best = cc;
+      }
+      return best;
+    }
+  }
+  return '';
+}
+
+export async function semanticSearch(idx, a, { env = process.env } = {}) {
+  const query = String(a.query || '').trim();
+  if (!query) return 'Пустой запрос.';
+  const cfg = sem.loadConfig(idx.root, env);
+  const limit = Math.min(50, Math.max(1, Math.round(Number(a.limit) || cfg.topK)));
+  let mode = ['hybrid', 'semantic', 'keyword'].includes(a.mode) ? a.mode : 'hybrid';
+  const notes = [...cfg.notes];
+  let vec = null;
+  let reachable = false;
+  if (cfg.enabled === false) {
+    if (mode !== 'keyword') notes.push('семантический поиск выключен (SEMANTIC_SEARCH=0 или semanticSearch.enabled=false) — только ключевые слова');
+    mode = 'keyword';
+  } else {
+    const p = await sem.probe(cfg);
+    reachable = p.ok;
+    if (!p.ok) {
+      if (mode !== 'keyword') notes.push(`семантика недоступна (${cfg.baseUrl}: ${p.error}) — только ключевые слова`);
+      mode = 'keyword';
+    } else if (mode !== 'keyword') {
+      const st = maybeAutoBuild(idx, cfg);
+      const filter = a.object ? (relPath, id) => moduleMatches({ id }, a.object) : null;
+      try {
+        vec = await sem.vectorSearch(cfg, idx.root, query, { limit: 200, filter });
+      } catch (e) {
+        notes.push(`семантика недоступна (эмбеддинги ${cfg.embedModel}: ${e.message}) — только ключевые слова`);
+        vec = null; mode = 'keyword';
+      }
+      if (vec?.noIndex) {
+        notes.push(`семантический индекс ещё не построен${buildingNote(sem.buildState(idx.root) || st) || ' — запустите semantic_index action=build'}; пока только ключевые слова`);
+        vec = null; mode = 'keyword';
+      } else if (vec && vec.coverage.embedded < vec.coverage.total) {
+        notes.push(`семантический индекс неполный: ${vec.coverage.embedded} из ${vec.coverage.total} фрагментов${buildingNote(sem.buildState(idx.root))}`);
+      }
+    }
+  }
+
+  const kw = mode === 'semantic' ? [] : keywordRank(idx, query, { object: a.object });
+  // ключ → кандидат (из актуального индекса: строки методов могли сдвинуться)
+  const byRel = new Map(idx.modules.map((m) => [rel(idx, m.file), m]));
+  const objByRel = new Map(idx.objects.map((o) => [rel(idx, o.file), o]));
+  const cands = new Map();
+  for (const k of kw) cands.set(k.key, { key: k.key, mod: k.mod, m: k.m, o: k.o, kw: k.s });
+  for (const h of vec?.hits || []) {
+    const key = `${h.rel}|${h.n}`;
+    let c = cands.get(key);
+    if (!c) {
+      if (h.k === 'o') { const o = objByRel.get(h.rel); if (!o) continue; c = { key, o }; }
+      else {
+        const mod = byRel.get(h.rel);
+        const m = mod?.methods.find((x) => x.name === h.n);
+        if (!m) continue;
+        c = { key, mod, m };
+      }
+      cands.set(key, c);
+    }
+    c.vec = Math.max(c.vec ?? -1, h.score);
+  }
+  const lists = [];
+  if (vec?.hits.length) lists.push(vec.hits.map((h) => `${h.rel}|${h.n}`).filter((k) => cands.has(k)));
+  if (kw.length) lists.push(kw.map((k) => k.key));
+  const fused = sem.rrf(lists).map(({ key, s }) => ({ ...cands.get(key), rrf: s })).filter((c) => c.key);
+  if (!fused.length) {
+    return [...notes.map((n) => `[!] ${n}`), `Ничего не найдено по «${query}». Попробуйте другие слова, find_object или search_code.`].join('\n');
+  }
+
+  // Переранжирование верхних кандидатов
+  let reranked = false;
+  let rerankNote = '';
+  const top = fused.slice(0, Math.max(limit, cfg.rerankTopN));
+  if (a.rerank !== false && reachable && cfg.rerankBackend !== 'none' && top.length > 1) {
+    const cache = new Map();
+    const pool = top.slice(0, cfg.rerankTopN);
+    const docs = pool.map((c) => chunkTextFor(idx, cfg, c, cache));
+    const r = await sem.rerank(cfg, query, docs);
+    rerankNote = r.note;
+    r.scores.forEach((s, i) => { if (s !== null) pool[i].rr = s; });
+    reranked = r.scores.some((s) => s !== null);
+  }
+  if (rerankNote) notes.push(rerankNote);
+  const ordered = reranked
+    ? [...top.filter((c) => c.rr !== undefined).sort((x, y) => y.rr - x.rr), ...top.filter((c) => c.rr === undefined)]
+    : top;
+
+  const label = { hybrid: 'гибридный (векторы + ключевые слова)', semantic: 'семантический', keyword: 'по ключевым словам' }[mode];
+  const head = [`Режим: ${label}${reranked ? ` · переранжирование: ${cfg.rerankModel}` : ''}`, ...notes.map((n) => `[!] ${n}`)];
+  const out = [];
+  const textCache = new Map();
+  const codeN = a.with_code ? 3 : 0;
+  ordered.slice(0, limit).forEach((c, i) => {
+    const marks = [c.rr !== undefined ? `rerank ${c.rr.toFixed(2)}` : '', c.vec !== undefined ? `вектор ${c.vec.toFixed(2)}` : '',
+      c.kw !== undefined ? 'слова' : ''].filter(Boolean).join(' · ');
+    if (c.o) {
+      out.push(`${i + 1}. ${objTitle(c.o)}${c.o.syn && c.o.syn !== c.o.name ? ` «${c.o.syn}»` : ''} (объект метаданных)${cfgMark(idx, c.o.cfg)}\n` +
+        `   ${rel(idx, c.o.file)} · ${marks}`);
+      return;
+    }
+    let text = textCache.get(c.mod.file);
+    if (text === undefined) { try { text = readText(c.mod.file); } catch { text = ''; } textCache.set(c.mod.file, text); }
+    const cm = text ? firstComment(text, c.m) : '';
+    out.push(`${i + 1}. ${c.mod.id}${cfgMark(idx, c.mod.cfg)} → ${c.m.kind} ${c.m.name}${c.m.export ? ' Экспорт' : ''}${c.m.dir ? ` ${c.m.dir}` : ''}\n` +
+      `   ${rel(idx, c.mod.file)}:${c.m.line}-${c.m.end} · ${marks}${cm ? `\n   // ${short(cm, 140)}` : ''}`);
+    if (i < codeN) { try { out.push('```bsl\n' + methodCode(c.mod.file, c.m, 80) + '\n```'); } catch { /* */ } }
+  });
+  return `${head.join('\n')}\n${out.join('\n')}\n` +
+    (codeN ? '' : 'Код метода — find_method (name, object) или semantic_search с with_code=true.');
+}
+
+function fmtAge(ms) { const s = Math.round(ms / 1000); return s < 120 ? `${s} с` : `${Math.round(s / 60)} мин`; }
+
+export async function semanticIndex(idx, a = {}, { env = process.env } = {}) {
+  const cfg = sem.loadConfig(idx.root, env);
+  const action = ['status', 'build', 'rebuild'].includes(a.action) ? a.action : 'status';
+  const lines = [];
+  lines.push(`Сервер: ${cfg.baseUrl} · эмбеддинги: ${cfg.embedModel} (d=${cfg.dimensions}) · переранжирование: ${cfg.rerankBackend}` +
+    `${cfg.rerankBackend !== 'none' ? ` (${cfg.rerankModel}${cfg.rerankBaseUrl !== cfg.baseUrl ? `, ${cfg.rerankBaseUrl}` : ''})` : ''}`);
+  lines.push(`Включено: ${cfg.enabled === 'auto' ? 'авто (если сервер отвечает)' : cfg.enabled ? 'да' : 'нет'} · токен API: ${cfg.apiKey ? `задан (${cfg.apiKeyEnv})` : 'не задан'}`);
+  lines.push(`Хранилище: ${cfg.storeDir}`);
+  for (const n of cfg.notes) lines.push(`[!] ${n}`);
+  let p = { ok: false, error: 'выключено' };
+  if (cfg.enabled !== false) {
+    p = await sem.probe(cfg, { fresh: true });
+    if (p.ok) {
+      const miss = [cfg.embedModel, cfg.rerankBackend === 'lmstudio-logprobs' ? cfg.rerankModel : null]
+        .filter((m) => m && p.models.length && !p.models.includes(m));
+      lines.push(`Сервер отвечает; моделей в /models: ${p.models.length}${miss.length ? ` · [!] нет идентификаторов: ${miss.join(', ')} (загрузите: scripts\\lmstudio-load.ps1)` : ''}`);
+    } else lines.push(`[!] Сервер недоступен: ${p.error}`);
+  }
+  if ((action === 'build' || action === 'rebuild') && cfg.enabled !== false) {
+    if (!p.ok) lines.push('[!] Построение не запущено: сервер эмбеддингов недоступен.');
+    else {
+      const st = sem.startBuild(idx.root, () => semanticSources(buildIndex(idx.root), cfg), cfg, { force: action === 'rebuild', readText });
+      autoBuildAt.set(idx.root, Date.now());
+      const wait = Math.min(50, Math.max(0, Number(a.wait_seconds) || 0)) * 1000;
+      if (wait && st.running) await Promise.race([st.promise, new Promise((r) => setTimeout(r, wait))]);
+      lines.push(st.running ? 'Построение запущено в фоне — можно продолжать работу; ход — semantic_index (status).' : 'Построение завершено.');
+    }
+  }
+  const store = sem.getStore(cfg).refresh();
+  const man = sem.loadManifest(cfg, idx.root);
+  if (man) {
+    let total = 0; let have = 0;
+    const seen = new Set();
+    for (const f of Object.values(man.files)) for (const c of f.c) { if (seen.has(c[0])) continue; seen.add(c[0]); total++; if (store.has(c[0])) have++; }
+    lines.push(`Индекс проекта: ${have} из ${total} фрагментов с векторами (${total ? Math.round((have / total) * 100) : 0}%), файлов ${Object.keys(man.files).length}, обновлён ${man.updated}`);
+  } else lines.push('Индекс проекта: ещё не построен.');
+  lines.push(`Векторов в хранилище: ${store.size}`);
+  const st = sem.buildState(idx.root);
+  if (st) {
+    if (st.running) lines.push(`Построение: ${st.phase}, ${st.done}/${st.total || '?'}, идёт ${fmtAge(Date.now() - st.startedAt)}${st.failed ? `, пропущено ${st.failed}` : ''}`);
+    else if (st.lockedBy) lines.push(`Построение: занято другим процессом (${st.lockedBy.user || '?'}@${st.lockedBy.host || '?'}, pid ${st.lockedBy.pid || '?'}, ${fmtAge(st.lockedBy.ageMs || 0)} назад обновлял блокировку)`);
+    else lines.push(`Последнее построение: ${st.error ? `ошибка — ${st.error}` : `готово за ${fmtAge(st.finishedAt - st.startedAt)}`}${st.failed ? `, пропущено фрагментов ${st.failed}` : ''}`);
+  } else {
+    const lk = sem.readLock(join(sem.vectorDir(cfg), 'build.lock'));
+    if (lk && !lk.stale) lines.push(`Построение идёт в другом процессе (${lk.user || '?'}, pid ${lk.pid || '?'}).`);
+  }
+  return lines.join('\n');
+}
+
+// ---------------------------------------------------------------------------
 // MCP
 // ---------------------------------------------------------------------------
 const ROOT_ARG = { type: 'string', description: 'Корень проекта (по умолчанию — рабочая папка OpenCode)' };
 const TOOLS = [
+  { name: 'semantic_search', description: 'Поиск кода и объектов 1С ПО СМЫСЛУ: «где реализовано/проверяется/рассчитывается X», ' +
+      '«как устроено Y», когда точного имени метода не знаешь. Гибрид: векторы (эмбеддинги LM Studio) + ключевые слова, ' +
+      'затем переранжирование. Без LM Studio — только ключевые слова (в ответе будет пометка [!]). ' +
+      'Возвращает модуль, метод, файл:строки, первую строку комментария; with_code=true — код трёх первых.',
+    inputSchema: { type: 'object', properties: {
+      query: { type: 'string', description: 'Описание на естественном языке, например «где проверяется кредитный лимит контрагента»' },
+      mode: { type: 'string', enum: ['hybrid', 'semantic', 'keyword'], description: 'hybrid (по умолчанию), semantic — только векторы, keyword — только слова' },
+      object: { type: 'string', description: 'Сузить: «ОбщийМодуль.Продажи», «Документ.ЗаказКлиента»' },
+      limit: { type: 'number', description: 'Сколько результатов (по умолчанию 10)' },
+      rerank: { type: 'boolean', description: 'Переранжировать реранкером (по умолчанию да)' },
+      with_code: { type: 'boolean' }, root: ROOT_ARG }, required: ['query'] } },
+  { name: 'semantic_index', description: 'Состояние семантического индекса (status) или запуск построения в фоне (build — только изменённые файлы, ' +
+      'rebuild — заново разобрать все файлы; уже посчитанные векторы переиспользуются). Индекс обновляется и сам при semantic_search.',
+    inputSchema: { type: 'object', properties: { action: { type: 'string', enum: ['status', 'build', 'rebuild'] },
+      wait_seconds: { type: 'number', description: 'Подождать завершения до N секунд (не больше 50)' }, root: ROOT_ARG } } },
   { name: 'find_object', description: 'Найти объект метаданных 1С по смыслу: по имени, синониму, реквизиту или табличной части. ' +
       'Пример: «история задач», «Документ.Задача», «номенклатура вес». Используй вместо grep по XML.',
     inputSchema: { type: 'object', properties: { query: { type: 'string' }, type: { type: 'string', description: 'Вид объекта: Справочник, Документ, РегистрСведений…' }, limit: { type: 'number' }, root: ROOT_ARG }, required: ['query'] } },
@@ -500,30 +803,71 @@ const TOOLS = [
 ];
 
 const INSTRUCTIONS = 'Поиск по XML-выгрузке 1С. Для поиска объектов, методов и вызовов используй эти инструменты, а не grep/sed/cat ' +
-  'по файлам выгрузки: ответы короткие. find_object — объект по смыслу; find_method — метод с кодом; module_methods — состав модуля; ' +
+  'по файлам выгрузки: ответы короткие. semantic_search — где реализовано X (по смыслу, когда имя неизвестно); ' +
+  'find_object — объект по имени/синониму; find_method — метод с кодом; module_methods — состав модуля; ' +
   'find_usages — кто вызывает; search_code — строка в коде.';
 
+function semanticStatusLine(idx) {
+  try {
+    const cfg = sem.loadConfig(idx.root);
+    if (cfg.enabled === false) return 'Семантический поиск: выключен';
+    const man = sem.loadManifest(cfg, idx.root);
+    const st = sem.buildState(idx.root);
+    return `Семантический поиск: ${cfg.baseUrl}, ${cfg.embedModel}; индекс ${man ? `есть (${man.chunks ?? '?'} фрагментов)` : 'не построен'}` +
+      `${st?.running ? `, строится ${st.done}/${st.total || '?'}` : ''} — подробно: semantic_index`;
+  } catch (e) { return `Семантический поиск: ${e.message}`; }
+}
+
+async function handleCall(name, a, root) {
+  if (!existsSync(root)) throw new Error(`каталог не найден: ${root}`);
+  const idx = buildIndex(root, { force: name === 'index_status' && a.refresh });
+  if (!idx.configs.length) {
+    return `В ${root} не найдено выгрузок 1С (Configuration.xml). Запустите OpenCode из папки проекта или передайте root.`;
+  }
+  switch (name) {
+    case 'semantic_search': return semanticSearch(idx, a);
+    case 'semantic_index': return semanticIndex(idx, a);
+    case 'find_object': return findObject(idx, a);
+    case 'find_method': return findMethod(idx, a);
+    case 'module_methods': return moduleMethods(idx, a);
+    case 'find_usages': return findUsages(idx, a);
+    case 'search_code': return searchCode(idx, a);
+    case 'index_status': return `${indexStatus(idx)}\n${semanticStatusLine(idx)}`;
+    default: throw new Error(`неизвестный инструмент ${name}`);
+  }
+}
+
+// CLI: долгое первое построение удобно запустить из консоли, не из сеанса OpenCode
+async function cli(argv) {
+  const val = (k) => { const i = argv.indexOf(k); return i >= 0 ? argv[i + 1] : undefined; };
+  const root = resolve(val('--root') || process.cwd());
+  const idx = buildIndex(root);
+  if (!idx.configs.length) { console.error(`В ${root} не найдено выгрузок 1С (Configuration.xml). Укажите --root.`); return 2; }
+  if (argv.includes('--semantic-status')) { console.log(await semanticIndex(idx, { action: 'status' })); return 0; }
+  const cfg = sem.loadConfig(root);
+  if (cfg.enabled === false) { console.error('Семантический поиск выключен (SEMANTIC_SEARCH=0 / semanticSearch.enabled=false).'); return 3; }
+  const p = await sem.probe(cfg, { fresh: true });
+  if (!p.ok) { console.error(`Сервер эмбеддингов недоступен: ${cfg.baseUrl} — ${p.error}`); return 3; }
+  console.log(`Построение индекса ${root} → ${cfg.storeDir} (${cfg.embedModel}, d=${cfg.dimensions})`);
+  let lastLog = 0;
+  const st = sem.startBuild(root, () => semanticSources(idx, cfg), cfg, { force: argv.includes('--force'), readText,
+    log: (m) => { if (Date.now() - lastLog > 5000 || !/^\d+\/\d+$/.test(m)) { lastLog = Date.now(); console.log(`  ${m}`); } } });
+  await st.promise;
+  console.log(await semanticIndex(idx, { action: 'status' }));
+  if (st.lockedBy) { console.error('Индекс сейчас строит другой процесс — повторите позже.'); return 4; }
+  return st.error ? 1 : 0;
+}
+
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
-  startServer({
-    name: '1c-code-search',
-    instructions: INSTRUCTIONS,
-    tools: TOOLS,
-    onCall: (name, a, ctx) => {
-      const root = ctx.root(a.root);
-      if (!existsSync(root)) throw new Error(`каталог не найден: ${root}`);
-      const idx = buildIndex(root, { force: name === 'index_status' && a.refresh });
-      if (!idx.configs.length) {
-        return `В ${root} не найдено выгрузок 1С (Configuration.xml). Запустите OpenCode из папки проекта или передайте root.`;
-      }
-      switch (name) {
-        case 'find_object': return findObject(idx, a);
-        case 'find_method': return findMethod(idx, a);
-        case 'module_methods': return moduleMethods(idx, a);
-        case 'find_usages': return findUsages(idx, a);
-        case 'search_code': return searchCode(idx, a);
-        case 'index_status': return indexStatus(idx);
-        default: throw new Error(`неизвестный инструмент ${name}`);
-      }
-    },
-  });
+  const argv = process.argv.slice(2);
+  if (argv.includes('--semantic-build') || argv.includes('--semantic-status')) {
+    cli(argv).then((code) => process.exit(code), (e) => { console.error(e.stack || e.message); process.exit(1); });
+  } else {
+    startServer({
+      name: '1c-code-search',
+      instructions: INSTRUCTIONS,
+      tools: TOOLS,
+      onCall: (name, a, ctx) => handleCall(name, a, ctx.root(a.root)),
+    });
+  }
 }

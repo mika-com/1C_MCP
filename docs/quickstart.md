@@ -68,7 +68,9 @@ node mcp/register-opencode-mcp.mjs            # 1c-search, 1c-bsl, 1c-help (+ vr
 node mcp/register-opencode-mcp.mjs --vrunner  # включить vrunner-mcp (нужен vanessa-runner 3.x)
 ```
 
-- `1c-search` — поиск по выгрузке;
+- `1c-search` — поиск по выгрузке; `semantic_search` — по смыслу через LM Studio (необязательно:
+  [semantic-search.md](semantic-search.md), `install.cmd -Project <папка> -WithSemantic`; без LM Studio — по
+  ключевым словам);
 - `1c-bsl` — BSL Language Server;
 - `1c-help` — синтакс-помощник по справке установленной платформы 1С (`help_search`, `help_get`, `help_members`,
   `help_status`). Справка читается локально из `bin` платформы (`shcntx_ru.hbk` и др.), в проект не входит.
@@ -231,6 +233,9 @@ YAxUnit через vrunner. Отчёты — в `build/reports/`.
 - `kill-bsl-ls.ps1` и `kill-bsl-ls.mjs` завершают только процессы текущего пользователя в текущем сеансе, даже если
   запущены от администратора. Все пользователи — только явно: `-AllUsers` (`--all-users`) в окне администратора.
 - Индекс `1c-help` — в `%LOCALAPPDATA%\1c-opencode\help-cache` каждого пользователя.
+- Семантический поиск: LM Studio — один на сервер (127.0.0.1:1234), векторы — у каждого пользователя или общие
+  (`install.cmd -Machine -WithSemantic` → `C:\ProgramData\1c-opencode\semantic`), индекс строит один процесс
+  (lock-файл), см. [semantic-search.md](semantic-search.md#несколько-пользователей-rdp).
 - Кэш `1c-search` и файл сеанса `web-test` (порт локального HTTP-сервера браузера) у каждого пользователя свои.
   Сервер `web-test start` слушает случайный свободный порт на 127.0.0.1.
 

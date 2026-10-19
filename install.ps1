@@ -14,6 +14,10 @@
     5. Ставит Playwright и Chromium для навыка web-test.
     6. Находит установленную платформу 1С для синтакс-помощника 1c-help (справка читается локально,
        в проект не входит); переопределение — переменная V8_HELP_PATH (каталог bin платформы).
+    7. -WithSemantic: семантический поиск 1c-search через LM Studio (docs\semantic-search.md) — переменные среды
+       SEMANTIC_*, раздел semanticSearch в новом .v8-project.json проекта, проверка scripts\check-lmstudio.ps1.
+       С -Machine — общее хранилище векторов C:\ProgramData\1c-opencode\semantic для всех пользователей.
+       Токен API LM Studio установщик не спрашивает и не записывает: LMSTUDIO_API_KEY задаёт сам пользователь.
     Повторный запуск безопасен: уже установленное пропускается. Обновление — git pull (или новый ZIP) и повторный запуск.
 
 .EXAMPLE
@@ -24,6 +28,9 @@
     powershell -ExecutionPolicy Bypass -File .\install.ps1 -Project D:\1c\my-config -WithVrunner
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File install.ps1 -Uninstall
+.EXAMPLE
+    # семантический поиск через LM Studio на этой машине (127.0.0.1:1234)
+    install.cmd -Project D:\1c\my-config -WithSemantic
 .EXAMPLE
     # Сервер с несколькими пользователями (RDP), окно «от имени администратора», один раз:
     powershell -ExecutionPolicy Bypass -File install.ps1 -Machine -Users 6
@@ -40,6 +47,7 @@
 #>
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSAvoidUsingWriteHost', '', Justification = 'Интерактивный установщик: цветной вывод для человека')]
 [Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '', Justification = 'Внутренние функции установщика')]
+[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSReviewUnusedParameter', '', Justification = 'Параметры Semantic* используются во внутренних функциях (область видимости скрипта)')]
 [CmdletBinding()]
 param(
     # Каталог 1С-проекта; без него установка глобальная (%USERPROFILE%\.config\opencode)
@@ -52,7 +60,13 @@ param(
     # Общие инструменты для всех пользователей сервера (RDP); нужны права администратора
     [switch]$Machine,
     # Сколько пользователей одновременно работают на сервере — для расчёта памяти JVM BSL LS
-    [ValidateRange(1, 200)][int]$Users = 0
+    [ValidateRange(1, 200)][int]$Users = 0,
+    # Семантический поиск 1c-search через LM Studio / OpenAI-совместимый сервер (docs\semantic-search.md)
+    [switch]$WithSemantic,
+    [string]$SemanticUrl = 'http://127.0.0.1:1234/v1',
+    [string]$SemanticEmbedModel = 'qwen3-embedding-4b',
+    [string]$SemanticRerankModel = 'qwen3-reranker-4b',
+    [ValidateSet('lmstudio-logprobs', 'rerank-api', 'none')][string]$SemanticRerankBackend = 'lmstudio-logprobs'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -70,6 +84,8 @@ $SharedRoot = Join-Path $env:ProgramData '1c-opencode'
 $SharedBslLs = Join-Path $SharedRoot 'tools\bsl-language-server'
 $SharedBrowsers = Join-Path $SharedRoot 'ms-playwright'
 $SharedPwVersionFile = Join-Path $SharedRoot 'playwright-version.txt'
+$SharedSemanticStore = Join-Path $SharedRoot 'semantic'
+$SemanticEnvVars = @('SEMANTIC_SEARCH', 'SEMANTIC_BASE_URL', 'SEMANTIC_EMBED_MODEL', 'SEMANTIC_RERANK_MODEL', 'SEMANTIC_RERANK_BACKEND')
 $InstallDir = $PSScriptRoot
 if (-not $InstallDir -or -not (Test-Path -LiteralPath (Join-Path $InstallDir 'scripts\opencode_port.py'))) {
     Write-Host '[ОШИБКА] Запускайте install.ps1 из папки скачанного проекта: powershell -ExecutionPolicy Bypass -File .\install.ps1' -ForegroundColor Red
@@ -202,6 +218,48 @@ function Get-TargetArgument {
     return @('--global')
 }
 
+function Set-SemanticEnvironment([string]$Scope) {
+    # Только несекретные настройки; значения по умолчанию не пишем, чтобы .v8-project.json проекта мог их менять
+    $pairs = [ordered]@{ SEMANTIC_SEARCH = '1' }
+    if ($SemanticUrl -ne 'http://127.0.0.1:1234/v1') { $pairs.SEMANTIC_BASE_URL = $SemanticUrl.TrimEnd('/') }
+    if ($SemanticEmbedModel -ne 'qwen3-embedding-4b') { $pairs.SEMANTIC_EMBED_MODEL = $SemanticEmbedModel }
+    if ($SemanticRerankModel -ne 'qwen3-reranker-4b') { $pairs.SEMANTIC_RERANK_MODEL = $SemanticRerankModel }
+    if ($SemanticRerankBackend -ne 'lmstudio-logprobs') { $pairs.SEMANTIC_RERANK_BACKEND = $SemanticRerankBackend }
+    foreach ($k in $pairs.Keys) {
+        [Environment]::SetEnvironmentVariable($k, $pairs[$k], $Scope)
+        Set-Item -Path "Env:$k" -Value $pairs[$k]
+    }
+    Write-Ok ("Переменные ($Scope): " + (($pairs.Keys | ForEach-Object { "$_=$($pairs[$_])" }) -join ', '))
+}
+
+function Write-SemanticProjectConfig([string]$Dir) {
+    $f = Join-Path $Dir '.v8-project.json'
+    $section = [ordered]@{ semanticSearch = [ordered]@{ enabled = 'auto'; baseUrl = $SemanticUrl.TrimEnd('/'); embedModel = $SemanticEmbedModel
+            rerankBackend = $SemanticRerankBackend; rerankModel = $SemanticRerankModel; topK = 10 } }
+    if (-not (Test-Path -LiteralPath $f)) {
+        $json = $section | ConvertTo-Json -Depth 5
+        [IO.File]::WriteAllText($f, $json, (New-Object System.Text.UTF8Encoding($false)))
+        Write-Ok "Создан $f (раздел semanticSearch)"
+    } elseif ((Get-Content -LiteralPath $f -Raw -Encoding UTF8) -match '"semanticSearch"') {
+        Write-Ok "В $f уже есть раздел semanticSearch — не трогаю"
+    } else {
+        # существующий файл с базами и паролями не переписываем — только подсказка
+        Write-Info "Добавьте в $f (необязательно; без раздела действуют значения по умолчанию):"
+        Write-Host (($section | ConvertTo-Json -Depth 5) -replace '^\{\s*', '' -replace '\s*\}$', '') -ForegroundColor Gray
+    }
+}
+
+function Invoke-SemanticCheck {
+    $check = Join-Path $InstallDir 'scripts\check-lmstudio.ps1'
+    $code = Invoke-Native -File 'powershell.exe' -Arguments @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $check, '-BaseUrl', $SemanticUrl,
+        '-EmbedModel', $SemanticEmbedModel, '-RerankModel', $SemanticRerankModel, '-RerankBackend', $SemanticRerankBackend) -AllowFail
+    switch ($code) {
+        0 { Write-Ok 'LM Studio: эмбеддинги и реранкер работают' }
+        1 { Write-Warn 'LM Studio: эмбеддинги работают, реранкер — нет (поиск будет без переранжирования). См. вывод выше и docs\semantic-search.md.' }
+        default { Write-Warn 'LM Studio недоступен или модели не загружены — 1c-search будет искать по ключевым словам, пока сервер не заработает. docs\semantic-search.md' }
+    }
+}
+
 Write-Host ''
 Write-Host '=== Агент 1С для OpenCode v2: установка для Windows ===' -ForegroundColor Cyan
 Write-Info "Источник: $InstallDir"
@@ -225,6 +283,9 @@ if ($Uninstall) {
     if (-not $script:PythonCmd) { Stop-Install 'Python 3 не найден — удаление выполняет scripts\opencode_port.py.' }
     if (-not (Test-Path -LiteralPath $porter)) { Stop-Install "Не найден $porter." }
     Invoke-Python (@($porter, 'uninstall') + (Get-TargetArgument))
+    foreach ($k in $SemanticEnvVars) {
+        if ([Environment]::GetEnvironmentVariable($k, 'User')) { [Environment]::SetEnvironmentVariable($k, $null, 'User'); Write-Info "Удалена переменная $k" }
+    }
     Write-Ok 'Готово.'
     Write-Info "Не удалялись (удалите вручную при необходимости): папка проекта $InstallDir,"
     Write-Info "$OpenCodeHome\tools\bsl-language-server, $OpenCodeHome\node_modules (Playwright), программы из winget."
@@ -325,6 +386,17 @@ if ($Machine) {
         } else { Write-Warn 'Playwright/Chromium для всех не установлены — пользователи поставят себе сами.' }
     }
 
+    if ($WithSemantic) {
+        # После icacls выше: общий каталог векторов — изменение для пользователей (векторы считаются один раз на всех)
+        Write-Step "Общее хранилище семантического индекса: $SharedSemanticStore"
+        New-Item -ItemType Directory -Force -Path $SharedSemanticStore | Out-Null
+        & icacls.exe $SharedSemanticStore /grant:r '*S-1-5-32-545:(OI)(CI)M' /T /C /Q | Out-Null
+        [Environment]::SetEnvironmentVariable('SEMANTIC_STORE_DIR', $SharedSemanticStore, 'Machine')
+        Write-Ok 'SEMANTIC_STORE_DIR — переменная машины; пользователи: изменение (только этот каталог)'
+        Set-SemanticEnvironment 'Machine'
+        Invoke-SemanticCheck
+    }
+
     Write-Host ''
     Write-Host '=== Общая установка готова ===' -ForegroundColor Green
     Write-Info 'Каждый пользователь в СВОЁМ сеансе (без прав администратора) выполняет один раз:'
@@ -415,6 +487,21 @@ if ($helpOverride) {
     }
 }
 Write-Info "Индекс справки строится при первом обращении и хранится в $env:LOCALAPPDATA\1c-opencode\help-cache"
+
+# ---------- Семантический поиск 1c-search (LM Studio) ----------
+if ($WithSemantic) {
+    Write-Step 'Семантический поиск 1c-search (LM Studio)'
+    Set-SemanticEnvironment 'User'
+    if ($Project) { Write-SemanticProjectConfig $script:ProjectPath }
+    $machineStore = [Environment]::GetEnvironmentVariable('SEMANTIC_STORE_DIR', 'Machine')
+    if ($machineStore) { Write-Ok "Общее хранилище векторов: $machineStore" } else { Write-Info "Хранилище векторов: $env:LOCALAPPDATA\1c-opencode\semantic (своё у пользователя)" }
+    if ([Environment]::GetEnvironmentVariable('LMSTUDIO_API_KEY', 'User') -or $env:LMSTUDIO_API_KEY) { Write-Ok 'LMSTUDIO_API_KEY задан' }
+    else { Write-Info "Если в LM Studio включено Require Authentication: [Environment]::SetEnvironmentVariable('LMSTUDIO_API_KEY', '<токен>', 'User')" }
+    Invoke-SemanticCheck
+    $buildRoot = if ($Project) { $script:ProjectPath } else { '<папка проекта>' }
+    Write-Info "Первое построение индекса (долго на большой конфигурации; можно и не ждать — построится в фоне при первом поиске):"
+    Write-Host "    node `"$InstallDir\mcp\code-search.mjs`" --semantic-build --root `"$buildRoot`"" -ForegroundColor Cyan
+}
 
 # ---------- 6. Playwright + Chromium ----------
 Write-Step '6/6 Playwright и Chromium для web-test'

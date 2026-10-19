@@ -23,7 +23,8 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 
 export const SERVERS = [
   // BSL LS поднимает JVM (~2 с и больше) — даём запас на startup (исправление из PR #7, в мс).
-  { key: '1c-search', file: 'code-search.mjs', timeout: { startup: 10000, catalog: 10000 } },
+  // семантический поиск: эмбеддинг запроса (SEMANTIC_TIMEOUT_MS, 15 с) + реранк (SEMANTIC_RERANK_TIMEOUT_MS, 45 с), semantic_index ждёт до 50 с.
+  { key: '1c-search', file: 'code-search.mjs', timeout: { startup: 10000, catalog: 10000, execution: 120000 } },
   // execution больше собственного таймаута прокси (BSL_LS_TIMEOUT_MS, 90 с): ошибку отдаёт прокси, а не обрыв.
   { key: '1c-bsl', file: 'bsl-ls.mjs', timeout: { startup: 30000, catalog: 30000, execution: 120000 } },
   // синтакс-помощник: первый вызов строит индекс справки платформы (HELP_BUILD_TIMEOUT_MS, 120 с) — запас сверху.

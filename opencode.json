@@ -14,7 +14,8 @@
         ],
         "timeout": {
           "startup": 10000,
-          "catalog": 10000
+          "catalog": 10000,
+          "execution": 120000
         }
       },
       "1c-bsl": {

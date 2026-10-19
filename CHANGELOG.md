@@ -2,6 +2,31 @@
 
 Формат — [Keep a Changelog](https://keepachangelog.com/ru/1.1.0/), версии — [SemVer](https://semver.org/lang/ru/).
 
+## [Unreleased]
+
+### Добавлено
+- Семантический поиск в MCP `1c-search` (`mcp/lib/semantic.mjs`): инструменты `semantic_search` (режимы `hybrid`,
+  `semantic`, `keyword`; фильтр `object`, `with_code`) и `semantic_index` (`status`, `build`, `rebuild`).
+  Фрагменты — процедуры/функции BSL с комментарием и директивами и объекты метаданных; эмбеддинги через
+  `/v1/embeddings` (LM Studio, `Qwen3-Embedding-4B`, MRL 1024, инструкция `Instruct: …\nQuery: …`); гибрид с
+  ключевыми словами через RRF; реранкер `lmstudio-logprobs` (`Qwen3-Reranker-4B`, P(yes) из `/v1/responses`,
+  параллельно 4) или `rerank-api` (`/v1/rerank`).
+- Хранилище векторов: content-addressed (хэш текста фрагмента), int8, атомарная запись сегментов, один построитель
+  (`build.lock` с heartbeat), инкрементальное обновление по mtime/хэшу, частичный индекс доступен во время
+  построения; общее хранилище для RDP-сервера — `SEMANTIC_STORE_DIR`.
+- CLI `node mcp/code-search.mjs --semantic-build [--root] [--force]` и `--semantic-status`.
+- Скрипты `scripts/check-lmstudio.ps1` (проверка эмбеддингов и реранкера), `scripts/lmstudio-load.ps1` (загрузка
+  моделей с постоянными идентификаторами, без TTL), `scripts/lmstudio-autostart.ps1` (необязательный автозапуск
+  через планировщик); `install.ps1 -WithSemantic` (`-SemanticUrl`, `-SemanticEmbedModel`, `-SemanticRerankModel`,
+  `-SemanticRerankBackend`; с `-Machine` — общее хранилище векторов).
+- Настройки: переменные `SEMANTIC_*`, раздел `semanticSearch` в `.v8-project.json`; токен — только `LMSTUDIO_API_KEY`.
+- Документация [docs/semantic-search.md](docs/semantic-search.md); правила агентов `1c`, `1c-analyst` и шаблон
+  `AGENTS.md`: «где реализовано X» — сначала `semantic_search`.
+
+### Изменено
+- `1c-search`: таймаут вызова в конфиге OpenCode — `execution: 120000`; `index_status` показывает состояние
+  семантического индекса. Без LM Studio поведение прежнее, `semantic_search` отвечает по ключевым словам с `[!]`.
+
 ## [1.0.0] — 2026-10-19
 
 Первый публичный выпуск 1C-Agent — агента 1С:Предприятие 8.3 для OpenCode v2 (Desktop и CLI).
