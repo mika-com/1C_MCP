@@ -29,6 +29,7 @@ import { join, resolve, relative, dirname, isAbsolute, basename, sep } from 'nod
 import { fileURLToPath } from 'node:url';
 import { findBslLs, bslEnv } from '../own-skills/bsl-check/scripts/bsl-ls.mjs';
 import { killTree } from '../mcp/lib/proc-tree.mjs';
+import { writeAutocheckState } from '../mcp/lib/agent-meta.mjs';
 
 const IS_WIN = process.platform === 'win32';
 export const EDIT_TOOLS = new Set(['edit', 'write', 'patch', 'apply_patch', 'multiedit']);
@@ -173,6 +174,52 @@ export async function bslAnalyze(files, { root = process.cwd(), timeoutMs = DEFA
 
 export function killRunning() { for (const pid of running) killTree(pid); running.clear(); }
 
+// ---------- UTF-8 в оболочке (Windows PowerShell по умолчанию пишет в OEM/cp866) ----------
+
+// Хук OpenCode v2: ctx.shell.hook('create.before', …). В этой среде живой OpenCode не запускался —
+// контракт сверен с документацией v2 (event.command / event.shell / event.env).
+export const PS_UTF8_PREAMBLE = '$OutputEncoding = [Console]::InputEncoding = [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false; ';
+
+export function applyShellUtf8(event) {
+  if (!event || typeof event.command !== 'string' || !event.command) return false;
+  const shell = String(event.shell || '');
+  if (event.env && typeof event.env === 'object') {
+    if (!event.env.PYTHONIOENCODING) event.env.PYTHONIOENCODING = 'utf-8';
+    if (!event.env.PYTHONUTF8) event.env.PYTHONUTF8 = '1';
+  }
+  const shellPs = /powershell|pwsh/i.test(shell);
+  const shellCmd = /(^|[\\/])cmd(\.exe)?$/i.test(shell.trim()) || /^cmd(\.exe)?$/i.test(shell.trim());
+  if (shellPs) {
+    if (/UTF8Encoding \$false/.test(event.command) || /\[Console\]::OutputEncoding\s*=/.test(event.command)) return false;
+    event.command = PS_UTF8_PREAMBLE + event.command;
+    return true;
+  }
+  if (shellCmd) {
+    if (/chcp\s+65001/i.test(event.command)) return false;
+    event.command = 'chcp 65001 >nul & ' + event.command;
+    return true;
+  }
+  return false;
+}
+
+async function registerShellUtf8(ctx) {
+  const run = (event) => { try { applyShellUtf8(event); } catch { /* команда без command */ } };
+  if (ctx.shell && typeof ctx.shell.hook === 'function') {
+    try { await ctx.shell.hook('create.before', run); } catch { /* хост без shell-хука */ }
+  }
+  if (ctx.tool && typeof ctx.tool.hook === 'function') {
+    await ctx.tool.hook('execute.before', (event) => {
+      if (!event?.input || typeof event.input !== 'object') return;
+      const shell = event.shell || event.input.shell;
+      if (!shell) return;
+      const key = typeof event.input.command === 'string' ? 'command' : (typeof event.input.cmd === 'string' ? 'cmd' : null);
+      if (!key) return;
+      const fake = { command: event.input[key], shell, env: event.env || event.input.env };
+      if (applyShellUtf8(fake)) event.input[key] = fake.command;
+    });
+  }
+}
+
 // ---------- пачки ----------
 
 // check(file) → Promise<{ status, diags: [...] }>. Файлы, пришедшие в окне debounceMs, — одна пачка;
@@ -284,6 +331,8 @@ export function createPlugin({ analyze = bslAnalyze, env = process.env } = {}) {
       const key = IS_WIN ? resolve(root).toLowerCase() : resolve(root);
       if (active.has(key)) return undefined;
       active.add(key);
+      writeAutocheckState(root, env);
+      await registerShellUtf8(ctx);
       const state = {};
       let settings = loadSettings(root, env, ctx?.options);
       const checker = createChecker({

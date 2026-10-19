@@ -22,6 +22,7 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { readContainer, readZipIndex, readZipEntry, readFirstZipEntry, parseToc, parsePage, decodeHtml, normalizePath } from './lib/hbk.mjs';
 import { killTree } from './lib/proc-tree.mjs';
+import { agentVersion, instructionSuffix } from './lib/agent-meta.mjs';
 
 
 const SELF = fileURLToPath(import.meta.url);
@@ -428,7 +429,7 @@ export const TOOLS = [
 
 const INSTRUCTIONS = 'Синтакс-помощник установленной платформы 1С. Перед использованием незнакомого или неочевидного метода, ' +
   'свойства, конструктора или функции глобального контекста проверь его здесь: help_search → help_get (синтаксис, параметры, ' +
-  'доступность на клиенте/сервере, версия). Не придумывай методы: если в справке нет — так и скажи.';
+  'доступность на клиенте/сервере, версия). Не придумывай методы: если в справке нет — так и скажи.' + instructionSuffix();
 
 export async function handleCall(name, a, ctx = { root: (r) => r || process.cwd() }, env = process.env) {
   const platform = resolvePlatform({ root: ctx.root(a.root), version: a.version, env });
@@ -446,7 +447,7 @@ export async function handleCall(name, a, ctx = { root: (r) => r || process.cwd(
     case 'help_status': {
       const byKind = {};
       for (const e of idx.entries) byKind[e.k] = (byKind[e.k] || 0) + 1;
-      return [head, `Файлы: ${idx.files.map((f) => basename(f.path)).join(', ')}`, `Записей: ${idx.entries.length} (` +
+      return [`1C-Agent ${agentVersion()}`, head, `Файлы: ${idx.files.map((f) => basename(f.path)).join(', ')}`, `Записей: ${idx.entries.length} (` +
         Object.entries(byKind).map(([k, n]) => `${KIND_RU[k] || k} ${n}`).join(', ') + ')',
       `Индекс: ${file} (собран ${new Date(idx.built).toISOString()})`].join('\n');
     }
@@ -504,6 +505,6 @@ if (process.argv[1] && resolve(process.argv[1]) === SELF) {
   } else {
     for (const sig of ['SIGTERM', 'SIGINT', 'SIGHUP']) process.on(sig, () => process.exit(0)); // → 'exit' гасит сборку
     const { startServer } = await import('./lib/stdio-server.mjs');
-    startServer({ name: '1c-help', instructions: INSTRUCTIONS, tools: TOOLS, onCall: (name, a, ctx) => handleCall(name, a, ctx) });
+    startServer({ name: '1c-help', version: agentVersion(), instructions: INSTRUCTIONS, tools: TOOLS, onCall: (name, a, ctx) => handleCall(name, a, ctx) });
   }
 }

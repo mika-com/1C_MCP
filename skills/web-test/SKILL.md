@@ -44,6 +44,8 @@ Use `/web-publish` first if the database is not published.
 
 > **Отчёты и окружение (OpenCode).** Перед запуском выполни preflight навыка `1c-test` (`node <1c-test>/scripts/preflight.mjs [база]`): Playwright, Chromium, дисплей, доступность веб-клиента. Все артефакты — в `build/reports/web/`: регресс `test ... --format=allure --report-dir=build/reports/web/allure` (скриншоты и видео попадают туда же), JUnit — `node <1c-test>/scripts/allure-to-junit.mjs build/reports/web/allure build/reports/web/junit.xml`. Скриншот ошибки `exec`/`run` пишется в `$TMPDIR/web-test-error-shot.png` (путь — в поле `screenshot` ответа): скопируй его в `build/reports/web/`.
 
+> **Отчёты и окружение (OpenCode).** Перед запуском выполни preflight навыка `1c-test` (`node <1c-test>/scripts/preflight.mjs [база]`): Playwright, Chromium, дисплей, доступность веб-клиента. Все артефакты — в `build/reports/web/`: регресс `test ... --format=allure --report-dir=build/reports/web/allure` (скриншоты и видео попадают туда же), JUnit — `node <1c-test>/scripts/allure-to-junit.mjs build/reports/web/allure build/reports/web/junit.xml`. Скриншот ошибки `exec`/`run` пишется в `$TMPDIR/web-test-error-shot.png` (путь — в поле `screenshot` ответа): скопируй его в `build/reports/web/`. На одну проверку смотри 1–2 скриншота, не пачку полноразмерных PNG: сначала текст и DOM. Цикл прогона в основном агенте не крути — его ведёт субагент `1c-tester`.
+
 ## Execution modes
 
 ### Autonomous mode (preferred for complete scenarios)

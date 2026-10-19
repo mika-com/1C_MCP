@@ -118,6 +118,13 @@ param(
     [Parameter(Mandatory=$false)]
     [string[]]$AdditionalIbcmdArguments = @()
 )
+# 1C-Agent: stdout UTF-8 (Windows PowerShell по умолчанию пишет в OEM/cp866)
+try {
+	$utf8 = New-Object System.Text.UTF8Encoding $false
+	[Console]::InputEncoding = $utf8
+	[Console]::OutputEncoding = $utf8
+	$OutputEncoding = $utf8
+} catch {}
 
 # Необработанная ошибка (напр. привязка параметра) внутри try/finally без catch завершала
 # скрипт с кодом 0 — ложный успех без запуска платформы. Любая такая ошибка — код 1.
@@ -169,6 +176,23 @@ function Find-ProjectDatabase {
     }
     return $null
 }
+
+# OpenCode: пользователь и пароль — из .v8-project.json или V8_DB_USER / V8_DB_PASSWORD,
+# если их не передали в командной строке. Явные -UserName/-Password сильнее. Значение пароля не печатаем.
+if (-not $UserName -or -not $Password) {
+    $dbRecCred = Find-ProjectDatabase
+    $credFrom = @()
+    if (-not $UserName) {
+        if ($dbRecCred -and $dbRecCred.user) { $UserName = [string]$dbRecCred.user; $credFrom += 'user from .v8-project.json' }
+        elseif ($env:V8_DB_USER) { $UserName = $env:V8_DB_USER; $credFrom += 'user from V8_DB_USER' }
+    }
+    if (-not $Password) {
+        if ($dbRecCred -and $dbRecCred.password) { $Password = [string]$dbRecCred.password; $credFrom += 'password from .v8-project.json' }
+        elseif ($env:V8_DB_PASSWORD) { $Password = $env:V8_DB_PASSWORD; $credFrom += 'password from V8_DB_PASSWORD' }
+    }
+    if ($credFrom.Count) { Write-Host ("Infobase credentials (" + ($credFrom -join ', ') + ") — not passed on the command line.") }
+}
+
 
 function Resolve-RepositorySettings {
     # Возвращает @{ Path; User; Password; FromRegistry }. Явные -Repository* всегда сильнее реестра.

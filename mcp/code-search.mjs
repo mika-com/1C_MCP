@@ -14,6 +14,7 @@ import { tmpdir, userInfo } from 'node:os';
 import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { startServer } from './lib/stdio-server.mjs';
+import { agentVersion, instructionSuffix, agentBanner, autocheckStatusText } from './lib/agent-meta.mjs';
 import * as sem from './lib/semantic.mjs';
 
 const INDEX_VERSION = 3;
@@ -805,7 +806,7 @@ const TOOLS = [
 const INSTRUCTIONS = 'Поиск по XML-выгрузке 1С. Для поиска объектов, методов и вызовов используй эти инструменты, а не grep/sed/cat ' +
   'по файлам выгрузки: ответы короткие. semantic_search — где реализовано X (по смыслу, когда имя неизвестно); ' +
   'find_object — объект по имени/синониму; find_method — метод с кодом; module_methods — состав модуля; ' +
-  'find_usages — кто вызывает; search_code — строка в коде.';
+  'find_usages — кто вызывает; search_code — строка в коде.' + instructionSuffix();
 
 function semanticStatusLine(idx) {
   try {
@@ -822,7 +823,9 @@ async function handleCall(name, a, root) {
   if (!existsSync(root)) throw new Error(`каталог не найден: ${root}`);
   const idx = buildIndex(root, { force: name === 'index_status' && a.refresh });
   if (!idx.configs.length) {
-    return `В ${root} не найдено выгрузок 1С (Configuration.xml). Запустите OpenCode из папки проекта или передайте root.`;
+    const msg = `В ${root} не найдено выгрузок 1С (Configuration.xml). Запустите OpenCode из папки проекта или передайте root.`;
+    if (name === 'index_status') return `${agentBanner()}\n${msg}\n${autocheckStatusText()}`;
+    return msg;
   }
   switch (name) {
     case 'semantic_search': return semanticSearch(idx, a);
@@ -832,7 +835,7 @@ async function handleCall(name, a, root) {
     case 'module_methods': return moduleMethods(idx, a);
     case 'find_usages': return findUsages(idx, a);
     case 'search_code': return searchCode(idx, a);
-    case 'index_status': return `${indexStatus(idx)}\n${semanticStatusLine(idx)}`;
+    case 'index_status': return `${agentBanner()}\n${indexStatus(idx)}\n${semanticStatusLine(idx)}\n${autocheckStatusText()}`;
     default: throw new Error(`неизвестный инструмент ${name}`);
   }
 }
@@ -865,6 +868,7 @@ if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import
   } else {
     startServer({
       name: '1c-code-search',
+      version: agentVersion(),
       instructions: INSTRUCTIONS,
       tools: TOOLS,
       onCall: (name, a, ctx) => handleCall(name, a, ctx.root(a.root)),

@@ -8,6 +8,13 @@ param(
 
 	[string]$OutputPath
 )
+# 1C-Agent: stdout UTF-8 (Windows PowerShell по умолчанию пишет в OEM/cp866)
+try {
+	$utf8 = New-Object System.Text.UTF8Encoding $false
+	[Console]::InputEncoding = $utf8
+	[Console]::OutputEncoding = $utf8
+	$OutputEncoding = $utf8
+} catch {}
 
 $ErrorActionPreference = "Stop"
 

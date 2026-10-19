@@ -243,7 +243,9 @@ WEB_TEST_REPORTS_NOTE = (
     'Все артефакты — в `build/reports/web/`: регресс `test ... --format=allure --report-dir=build/reports/web/allure` '
     '(скриншоты и видео попадают туда же), JUnit — `node <1c-test>/scripts/allure-to-junit.mjs '
     'build/reports/web/allure build/reports/web/junit.xml`. Скриншот ошибки `exec`/`run` пишется в '
-    '`$TMPDIR/web-test-error-shot.png` (путь — в поле `screenshot` ответа): скопируй его в `build/reports/web/`.\n\n'
+    '`$TMPDIR/web-test-error-shot.png` (путь — в поле `screenshot` ответа): скопируй его в `build/reports/web/`. '
+    'На одну проверку смотри 1–2 скриншота, не пачку полноразмерных PNG: сначала текст и DOM. Цикл прогона '
+    'в основном агенте не крути — его ведёт субагент `1c-tester`.\n\n'
 )
 WEB_TEST_NOTES = {
     'web-test': '## Execution modes',
@@ -280,6 +282,22 @@ INTERCEPTOR_NOTE = (
 INTERCEPTOR_NOTES = {
     'cfe-patch-method': '## Типы перехвата',
 }
+FORM_EVENT_NOTE = (
+    '> **Неизвестное событие (OpenCode).** Имени нет в списках ниже — `form-compile` пишет `[ERROR]` '
+    'и завершается с кодом 1, Form.xml не создаёт. Платформа иначе сохраняет событие и никогда его не вызывает. '
+    'Расшифровка отчёта — `DetailProcessing` у поля табличного документа, не выдуманное имя. '
+    'Незнакомое событие сначала проверь в `1c-help`. Обход: `FORM_COMPILE_ALLOW_UNKNOWN_EVENTS=1` '
+    '(только предупреждение).\n\n'
+)
+FORM_EVENT_NOTES = {
+    'form-compile': '### События',
+}
+PASSWORD_NOTE = (
+    '> **Пароль (OpenCode).** Не передавай `-Password` (и `/P`, `--password`) в командной строке: '
+    'скрипт берёт пользователя и пароль из записи базы в `.v8-project.json` (совпадение по `path` или '
+    '`server`+`ref`), а если записи нет — из `V8_DB_USER` / `V8_DB_PASSWORD`. Явный `-Password` по-прежнему '
+    'перекрывает файл и переменную.\n\n'
+)
 # Свои навыки порта (их нет в upstream): копируются в skills/ при каждой сборке
 OWN_SKILLS = 'own-skills'
 
@@ -287,7 +305,7 @@ OWN_SKILLS = 'own-skills'
 def add_skill_notes(skills_dir):
     for note, targets in ((SAFE_MODE_NOTE, SKILL_NOTES), (BSL_CHECK_NOTE, BSL_CHECK_NOTES),
                           (WEB_TEST_REPORTS_NOTE, WEB_TEST_NOTES), (PRINT_FORM_NOTE, PRINT_FORM_NOTES),
-                          (INTERCEPTOR_NOTE, INTERCEPTOR_NOTES)):
+                          (INTERCEPTOR_NOTE, INTERCEPTOR_NOTES), (FORM_EVENT_NOTE, FORM_EVENT_NOTES)):
         for name, anchor in targets.items():
             path = os.path.join(skills_dir, name, 'SKILL.md')
             content = read(path)
@@ -297,6 +315,24 @@ def add_skill_notes(skills_dir):
                 print(f'Предупреждение: в {name}/SKILL.md нет «{anchor}», заметка не добавлена', file=sys.stderr)
                 continue
             write(path, content.replace(anchor, note + anchor, 1))
+    add_password_notes(skills_dir)
+
+
+def add_password_notes(skills_dir):
+    marker = '**Пароль (OpenCode).**'
+    anchor = 'с теми же параметрами.\n\n'
+    for name in scan_skills(skills_dir):
+        path = os.path.join(skills_dir, name, 'SKILL.md')
+        if not os.path.isfile(path):
+            continue
+        content = read(path)
+        if '-Password' not in content or marker in content:
+            continue
+        if anchor in content:
+            content = content.replace(anchor, anchor + PASSWORD_NOTE, 1)
+        else:
+            content = PASSWORD_NOTE + content
+        write(path, content)
 
 
 def copy_own_skills(dst):
@@ -406,6 +442,436 @@ def patch_scripts(skills_dir):
 
 
 # ---------------------------------------------------------------------------
+# form-compile: неизвестное событие — ошибка, а не тихий [WARN]
+# (патч поверх upstream, чтобы пережить opencode_port.py build)
+# ---------------------------------------------------------------------------
+_FORM_COMPILE_PY_EVENTS_OLD = '''    # Validate event names
+    if type_key and type_key in KNOWN_EVENTS:
+        allowed = KNOWN_EVENTS[type_key]
+        for ev_name, _, _ in pairs:
+            if allowed and str(ev_name) not in allowed:
+                print(f"[WARN] Unknown event '{ev_name}' for {type_key} '{element_name}'. Known: {', '.join(allowed)}")
+'''
+_FORM_COMPILE_PY_EVENTS_NEW = '''    # Validate event names. Раньше это был [WARN] в stdout, и модель продолжала:
+    # платформа принимает XML и никогда не вызывает обработчик.
+    known_element_events = []
+    for _evs in KNOWN_EVENTS.values():
+        for _n in _evs:
+            if _n not in known_element_events:
+                known_element_events.append(_n)
+    if type_key and type_key in KNOWN_EVENTS:
+        allowed = KNOWN_EVENTS[type_key]
+        for ev_name, _, _ in pairs:
+            if str(ev_name) not in allowed:
+                reject_unknown_event(type_key or 'element', ev_name, element_name, allowed or ['(none)'])
+    else:
+        for ev_name, _, _ in pairs:
+            if str(ev_name) not in known_element_events:
+                reject_unknown_event(type_key or 'element', ev_name, element_name, known_element_events)
+'''
+_FORM_COMPILE_PY_WARN_OLD = '''# Незнакомое событие формы — предупреждение (опечатка в имени события не даёт ошибки платформы).
+def warn_unknown_form_event(name):
+    if name not in KNOWN_FORM_EVENTS:
+        print(f"[WARN] Unknown form event '{name}'. Known: {', '.join(KNOWN_FORM_EVENTS)}")
+'''
+_FORM_COMPILE_PY_WARN_NEW = '''# Незнакомое событие — ошибка. Платформа кладёт имя в XML и молча не вызывает обработчик.
+def reject_unknown_event(kind, name, owner, known):
+    known_s = ', '.join(str(k) for k in known)
+    msg = (f"[ERROR] Unknown {kind} event '{name}' for '{owner}'. "
+           f"form-compile refuses it: the platform keeps the name in XML and never calls the handler. "
+           f"Check 1c-help before inventing an event. Known: {known_s}.")
+    if os.environ.get('FORM_COMPILE_ALLOW_UNKNOWN_EVENTS') == '1':
+        print(f"[WARN] {msg} FORM_COMPILE_ALLOW_UNKNOWN_EVENTS=1 — continuing.", file=sys.stderr)
+        print(f"[WARN] {msg} FORM_COMPILE_ALLOW_UNKNOWN_EVENTS=1 — continuing.")
+        return
+    print(msg, file=sys.stderr)
+    print(msg)
+    sys.exit(1)
+
+
+def warn_unknown_form_event(name):
+    if name not in KNOWN_FORM_EVENTS:
+        reject_unknown_event('form', name, 'Form', KNOWN_FORM_EVENTS)
+'''
+_FORM_COMPILE_PY_FORM_EVENTS_OLD = '''    "OnSaveDataInSettingsAtServer", "ExternalEvent", "OnReopen", "Opening",
+]
+'''
+_FORM_COMPILE_PY_FORM_EVENTS_NEW = '''    "OnSaveDataInSettingsAtServer", "ExternalEvent", "OnReopen", "Opening",
+    "OnComposeResult", "OnSaveVariantAtServer", "BeforeLoadVariantAtServer", "OnLoadVariantAtServer",
+    "OnSaveUserSettingsAtServer", "BeforeLoadUserSettingsAtServer", "OnLoadUserSettingsAtServer",
+]
+'''
+_FORM_COMPILE_PY_SPREAD_OLD = '''    "picture": ["Click"],
+    "cmdBar": [],
+'''
+_FORM_COMPILE_PY_SPREAD_NEW = '''    "picture": ["Click"],
+    "spreadsheet": ["DetailProcessing", "AdditionalDetailProcessing", "OnChangeAreaContent", "OnActivate", "Selection"],
+    "cmdBar": [],
+'''
+_FORM_COMPILE_PS_EVENTS_OLD = (
+    '\t# Validate event names\n'
+    '\tif ($typeKey -and $script:knownEvents.ContainsKey($typeKey)) {\n'
+    '\t\t$allowed = $script:knownEvents[$typeKey]\n'
+    '\t\tforeach ($pr in $pairs) {\n'
+    '\t\t\tif ($allowed.Count -gt 0 -and $allowed -notcontains "$($pr.name)") {\n'
+    '\t\t\t\tWrite-Host "[WARN] Unknown event \'$($pr.name)\' for $typeKey \'$elementName\'. Known: $($allowed -join \', \')"\n'
+    '\t\t\t}\n'
+    '\t\t}\n'
+    '\t}\n'
+)
+_FORM_COMPILE_PS_EVENTS_NEW = (
+    '\t# Validate event names (неизвестное имя → код 1; FORM_COMPILE_ALLOW_UNKNOWN_EVENTS=1 — только предупреждение)\n'
+    '\t$knownAll = New-Object System.Collections.Generic.List[string]\n'
+    '\tforeach ($k in $script:knownEvents.Keys) {\n'
+    '\t\tforeach ($n in @($script:knownEvents[$k])) {\n'
+    '\t\t\tif ($n -and -not $knownAll.Contains([string]$n)) { [void]$knownAll.Add([string]$n) }\n'
+    '\t\t}\n'
+    '\t}\n'
+    '\tif ($typeKey -and $script:knownEvents.ContainsKey($typeKey)) {\n'
+    '\t\t$allowed = @($script:knownEvents[$typeKey])\n'
+    '\t\tforeach ($pr in $pairs) {\n'
+    '\t\t\tif ($allowed -notcontains "$($pr.name)") {\n'
+    '\t\t\t\tFail-UnknownEvent -Kind $typeKey -Name "$($pr.name)" -Owner $elementName -Known $allowed\n'
+    '\t\t\t}\n'
+    '\t\t}\n'
+    '\t} else {\n'
+    '\t\tforeach ($pr in $pairs) {\n'
+    '\t\t\tif ($knownAll -notcontains "$($pr.name)") {\n'
+    '\t\t\t\tFail-UnknownEvent -Kind $(if ($typeKey) { $typeKey } else { \'element\' }) -Name "$($pr.name)" -Owner $elementName -Known $knownAll\n'
+    '\t\t\t}\n'
+    '\t\t}\n'
+    '\t}\n'
+)
+_FORM_COMPILE_PS_WARN_OLD = (
+    '# Незнакомое событие формы — предупреждение (опечатка в имени события не даёт ошибки платформы).\n'
+    'function Warn-UnknownFormEvent([string]$name) {\n'
+    '\tif ($script:knownFormEvents -notcontains $name) {\n'
+    '\t\tWrite-Host "[WARN] Unknown form event \'$name\'. Known: $($script:knownFormEvents -join \', \')"\n'
+    '\t}\n'
+    '}\n'
+)
+_FORM_COMPILE_PS_WARN_NEW = (
+    '# Незнакомое событие — ошибка. Платформа кладёт имя в XML и молча не вызывает обработчик.\n'
+    'function Fail-UnknownEvent {\n'
+    '\tparam([string]$Kind, [string]$Name, [string]$Owner, $Known)\n'
+    '\t$knownS = (@($Known) | Where-Object { $_ }) -join \', \'\n'
+    '\t$msg = "[ERROR] Unknown $Kind event \'$Name\' for \'$Owner\'. form-compile refuses it: the platform keeps the name in XML and never calls the handler. Check 1c-help before inventing an event. Known: $knownS."\n'
+    '\tif ($env:FORM_COMPILE_ALLOW_UNKNOWN_EVENTS -eq \'1\') {\n'
+    '\t\tWrite-Host "[WARN] $msg FORM_COMPILE_ALLOW_UNKNOWN_EVENTS=1 — continuing." -ForegroundColor Yellow\n'
+    '\t\treturn\n'
+    '\t}\n'
+    '\tWrite-Host $msg -ForegroundColor Red\n'
+    '\texit 1\n'
+    '}\n'
+    'function Warn-UnknownFormEvent([string]$name) {\n'
+    '\tif ($script:knownFormEvents -notcontains $name) {\n'
+    '\t\tFail-UnknownEvent -Kind \'form\' -Name $name -Owner \'Form\' -Known $script:knownFormEvents\n'
+    '\t}\n'
+    '}\n'
+)
+_FORM_COMPILE_PS_LIST_OLD = (
+    '"picture"   = @("Click")\n'
+    '\t"cmdBar"    = @()\n'
+)
+_FORM_COMPILE_PS_LIST_NEW = (
+    '"picture"   = @("Click")\n'
+    '\t"spreadsheet" = @("DetailProcessing","AdditionalDetailProcessing","OnChangeAreaContent","OnActivate","Selection")\n'
+    '\t"cmdBar"    = @()\n'
+)
+_FORM_COMPILE_PS_FORM_OLD = (
+    '"ExternalEvent","OnReopen","Opening")'
+)
+_FORM_COMPILE_PS_FORM_NEW = (
+    '"ExternalEvent","OnReopen","Opening",'
+    '"OnComposeResult","OnSaveVariantAtServer","BeforeLoadVariantAtServer","OnLoadVariantAtServer",'
+    '"OnSaveUserSettingsAtServer","BeforeLoadUserSettingsAtServer","OnLoadUserSettingsAtServer")'
+)
+_FORM_COMPILE_SKILL_OLD = (
+    '**pages:** `OnCurrentPageChange`\n'
+)
+_FORM_COMPILE_SKILL_NEW = (
+    '**pages:** `OnCurrentPageChange`\n'
+    '**spreadsheet (поле табличного документа):** `DetailProcessing`, `AdditionalDetailProcessing`, '
+    '`OnChangeAreaContent`, `OnActivate`, `Selection`\n'
+    '**форма отчёта (СКД), дополнительно:** `OnComposeResult`, `OnSaveVariantAtServer`, `BeforeLoadVariantAtServer`, '
+    '`OnLoadVariantAtServer`, `OnSaveUserSettingsAtServer`, `BeforeLoadUserSettingsAtServer`, '
+    '`OnLoadUserSettingsAtServer`, `OnSaveDataInSettingsAtServer`, `OnReopen`\n'
+)
+
+
+def _replace_once(text, old, new, label):
+    if old not in text:
+        print(f'Предупреждение: якорь не найден ({label}) — патч не применён', file=sys.stderr)
+        return text, False
+    if text.count(old) != 1:
+        print(f'Предупреждение: якорь встретился {text.count(old)} раз ({label}) — патч не применён', file=sys.stderr)
+        return text, False
+    return text.replace(old, new, 1), True
+
+
+def patch_form_compile_events(skills_dir):
+    """form-compile: неизвестное событие формы/элемента — код 1, а не тихий [WARN]."""
+    patched = []
+    py = os.path.join(skills_dir, 'form-compile', 'scripts', 'form-compile.py')
+    ps = os.path.join(skills_dir, 'form-compile', 'scripts', 'form-compile.ps1')
+    md = os.path.join(skills_dir, 'form-compile', 'SKILL.md')
+    if os.path.isfile(py):
+        text = read(py)
+        ok = True
+        for label, old, new in (
+            ('py events', _FORM_COMPILE_PY_EVENTS_OLD, _FORM_COMPILE_PY_EVENTS_NEW),
+            ('py warn', _FORM_COMPILE_PY_WARN_OLD, _FORM_COMPILE_PY_WARN_NEW),
+            ('py form list', _FORM_COMPILE_PY_FORM_EVENTS_OLD, _FORM_COMPILE_PY_FORM_EVENTS_NEW),
+            ('py spreadsheet', _FORM_COMPILE_PY_SPREAD_OLD, _FORM_COMPILE_PY_SPREAD_NEW),
+        ):
+            if new in text:
+                continue
+            text, one = _replace_once(text, old, new, label)
+            ok = ok and one
+        if ok and text != read(py):
+            write(py, text)
+            patched.append(os.path.relpath(py, skills_dir))
+        elif 'def reject_unknown_event' not in text:
+            print('Ошибка: form-compile.py не пропатчен (события)', file=sys.stderr)
+    if os.path.isfile(ps):
+        raw = open(ps, 'rb').read()
+        bom = raw.startswith(b'\xef\xbb\xbf')
+        text = raw.decode('utf-8-sig')
+        changed = False
+        for label, old, new in (
+            ('ps events', _FORM_COMPILE_PS_EVENTS_OLD, _FORM_COMPILE_PS_EVENTS_NEW),
+            ('ps warn', _FORM_COMPILE_PS_WARN_OLD, _FORM_COMPILE_PS_WARN_NEW),
+            ('ps spreadsheet', _FORM_COMPILE_PS_LIST_OLD, _FORM_COMPILE_PS_LIST_NEW),
+            ('ps form list', _FORM_COMPILE_PS_FORM_OLD, _FORM_COMPILE_PS_FORM_NEW),
+        ):
+            if new in text:
+                continue
+            text, one = _replace_once(text, old, new, label)
+            changed = changed or one
+        if changed:
+            data = text.encode('utf-8')
+            if bom:
+                data = b'\xef\xbb\xbf' + data
+            with open(ps, 'wb') as f:
+                f.write(data)
+            patched.append(os.path.relpath(ps, skills_dir))
+        elif 'function Fail-UnknownEvent' not in text:
+            print('Ошибка: form-compile.ps1 не пропатчен (события)', file=sys.stderr)
+    if os.path.isfile(md):
+        text = read(md)
+        if _FORM_COMPILE_SKILL_NEW not in text:
+            text, one = _replace_once(text, _FORM_COMPILE_SKILL_OLD, _FORM_COMPILE_SKILL_NEW, 'skill events')
+            if one:
+                write(md, text)
+                patched.append(os.path.relpath(md, skills_dir))
+    return patched
+
+
+# ---------------------------------------------------------------------------
+# Пароль базы: .v8-project.json или V8_DB_USER / V8_DB_PASSWORD, не командная строка
+# ---------------------------------------------------------------------------
+_CRED_PY_FN = '''
+def apply_db_credentials(args):
+    """OpenCode: -UserName/-Password не обязательны. Источник (по убыванию): явный аргумент,
+    запись databases[] в .v8-project.json (path или server+ref), переменные V8_DB_USER / V8_DB_PASSWORD.
+    Значение пароля в вывод не попадает."""
+    if not hasattr(args, 'Password') and not hasattr(args, 'UserName'):
+        return args
+    # Снять окружающие кавычки до сопоставления с .v8-project.json (clean_path ещё впереди).
+    for _attr in ('InfoBasePath', 'InfoBaseServer', 'InfoBaseRef'):
+        _v = getattr(args, _attr, '') or ''
+        if isinstance(_v, str):
+            _v = _v.strip()
+            if len(_v) >= 2 and _v[0] == _v[-1] and _v[0] in (chr(34) + chr(39)):
+                _v = _v[1:-1].strip()
+            setattr(args, _attr, _v)
+    db = None
+    try:
+        db = find_project_database(args)
+    except Exception:
+        db = None
+    filled = []
+    if not getattr(args, 'UserName', None):
+        user, src = '', ''
+        if db and db.get('user'):
+            user, src = str(db.get('user')), '.v8-project.json'
+        elif os.environ.get('V8_DB_USER'):
+            user, src = os.environ.get('V8_DB_USER'), 'V8_DB_USER'
+        if user:
+            args.UserName = user
+            filled.append('user from ' + src)
+    if not getattr(args, 'Password', None):
+        pwd, src = '', ''
+        if db and db.get('password'):
+            pwd, src = str(db.get('password')), '.v8-project.json'
+        elif os.environ.get('V8_DB_PASSWORD'):
+            pwd, src = os.environ.get('V8_DB_PASSWORD'), 'V8_DB_PASSWORD'
+        if pwd:
+            args.Password = pwd
+            filled.append('password from ' + src)
+    if filled:
+        print('Infobase credentials (' + ', '.join(filled) + ') — not passed on the command line.')
+    return args
+
+
+'''
+_CRED_PY_ANCHOR = '''            if (db["server"].lower() == args.InfoBaseServer.lower()
+                    and db["ref"].lower() == args.InfoBaseRef.lower()):
+                return db
+    return None
+'''
+_CRED_PS_ANCHOR = '''            if ($db.server.Equals($InfoBaseServer, [System.StringComparison]::OrdinalIgnoreCase) -and
+                $db.ref.Equals($InfoBaseRef, [System.StringComparison]::OrdinalIgnoreCase)) { return $db }
+        }
+    }
+    return $null
+}
+'''
+_CRED_PS_CALL = r'''
+# OpenCode: пользователь и пароль — из .v8-project.json или V8_DB_USER / V8_DB_PASSWORD,
+# если их не передали в командной строке. Явные -UserName/-Password сильнее. Значение пароля не печатаем.
+if (-not $UserName -or -not $Password) {
+    $dbRecCred = Find-ProjectDatabase
+    $credFrom = @()
+    if (-not $UserName) {
+        if ($dbRecCred -and $dbRecCred.user) { $UserName = [string]$dbRecCred.user; $credFrom += 'user from .v8-project.json' }
+        elseif ($env:V8_DB_USER) { $UserName = $env:V8_DB_USER; $credFrom += 'user from V8_DB_USER' }
+    }
+    if (-not $Password) {
+        if ($dbRecCred -and $dbRecCred.password) { $Password = [string]$dbRecCred.password; $credFrom += 'password from .v8-project.json' }
+        elseif ($env:V8_DB_PASSWORD) { $Password = $env:V8_DB_PASSWORD; $credFrom += 'password from V8_DB_PASSWORD' }
+    }
+    if ($credFrom.Count) { Write-Host ("Infobase credentials (" + ($credFrom -join ', ') + ") — not passed on the command line.") }
+}
+
+'''
+
+
+def patch_db_credentials(skills_dir):
+    """Скрипты с -Password читают учётные данные базы сами. Явный аргумент по-прежнему сильнее."""
+    patched = []
+    py_files = glob.glob(os.path.join(skills_dir, '*', 'scripts', '**', '*.py'), recursive=True)
+    for path in py_files:
+        raw = open(path, 'rb').read()
+        text = raw.decode('utf-8')
+        if not re.search(r'''add_argument\(\s*['"]-Password['"]''', text):
+            # Раньше ловили упоминание -Password в тексте ошибки. Функцию, вставленную так, убираем.
+            if _CRED_PY_FN in text:
+                text = text.replace(_CRED_PY_FN, '\n', 1)
+                open(path, 'wb').write(text.encode('utf-8'))
+                patched.append(os.path.relpath(path, skills_dir))
+            continue
+        if 'def find_project_database' not in text:
+            continue
+        orig = text
+        # Обновить уже вставленную функцию, если в ней ещё нет снятия кавычек.
+        if 'def apply_db_credentials' in text and 'chr(34)' not in text:
+            text2, n = re.subn(
+                r"\ndef apply_db_credentials\(args\):.*?not passed on the command line\.'\)\n    return args\n",
+                _CRED_PY_FN.rstrip('\n') + '\n',
+                text, count=1, flags=re.S)
+            if n == 1:
+                text = text2
+        if 'def apply_db_credentials' not in text:
+            text, one = _replace_once(text, _CRED_PY_ANCHOR, _CRED_PY_ANCHOR + _CRED_PY_FN, os.path.basename(path) + ' cred fn')
+            if not one:
+                continue
+        if not re.search(r'(?m)^\s*apply_db_credentials\(args\)\s*$', text):
+            text2, n = re.subn(
+                r'^(?P<ind>[ \t]*)args = ci_parse_args\(parser(?:, argv)?\)\s*$',
+                lambda m: m.group(0) + '\n' + m.group('ind') + 'apply_db_credentials(args)',
+                text, count=1, flags=re.M)
+            if n != 1:
+                print(f'Предупреждение: нет вызова ci_parse_args для учётных данных в {path}', file=sys.stderr)
+                continue
+            text = text2
+        if text != orig:
+            open(path, 'wb').write(text.encode('utf-8'))
+            patched.append(os.path.relpath(path, skills_dir))
+    ps_files = glob.glob(os.path.join(skills_dir, '*', 'scripts', '**', '*.ps1'), recursive=True)
+    for path in ps_files:
+        raw = open(path, 'rb').read()
+        bom = raw.startswith(b'\xef\xbb\xbf')
+        text = raw.decode('utf-8-sig')
+        if '[string]$Password' not in text or 'function Find-ProjectDatabase' not in text:
+            continue
+        if 'OpenCode: пользователь и пароль' in text:
+            continue
+        text2, one = _replace_once(text, _CRED_PS_ANCHOR, _CRED_PS_ANCHOR + _CRED_PS_CALL, os.path.basename(path) + ' cred ps')
+        if not one:
+            continue
+        data = text2.encode('utf-8')
+        if bom:
+            data = b'\xef\xbb\xbf' + data
+        open(path, 'wb').write(data)
+        patched.append(os.path.relpath(path, skills_dir))
+    return patched
+
+
+# ---------------------------------------------------------------------------
+# PowerShell: stdout UTF-8 (Windows PowerShell по умолчанию пишет в OEM/cp866)
+# ---------------------------------------------------------------------------
+_PS_UTF8 = (
+    '# 1C-Agent: stdout UTF-8 (Windows PowerShell по умолчанию пишет в OEM/cp866)\n'
+    'try {\n'
+    '\t$utf8 = New-Object System.Text.UTF8Encoding $false\n'
+    '\t[Console]::InputEncoding = $utf8\n'
+    '\t[Console]::OutputEncoding = $utf8\n'
+    '\t$OutputEncoding = $utf8\n'
+    '} catch {}\n'
+)
+
+
+def _inject_ps_utf8(text):
+    if '1C-Agent: stdout UTF-8' in text:
+        return text, False
+    m = re.search(r'(?i)\bparam\s*\(', text)
+    if not m:
+        return _PS_UTF8 + '\n' + text, True
+    i = m.end()  # сразу после '('
+    depth = 1
+    while i < len(text) and depth:
+        ch = text[i]
+        if ch == '(':
+            depth += 1
+        elif ch == ')':
+            depth -= 1
+        i += 1
+    if text[i:i + 2] == '\r\n':
+        i += 2
+        nl = '\r\n'
+    elif text[i:i + 1] == '\n':
+        i += 1
+        nl = '\n'
+    else:
+        nl = '\n'
+    snippet = _PS_UTF8.replace('\n', nl)
+    return text[:i] + snippet + text[i:], True
+
+
+def patch_powershell_utf8(skills_dir):
+    patched = []
+    for path in glob.glob(os.path.join(skills_dir, '*', 'scripts', '**', '*.ps1'), recursive=True):
+        if 'node_modules' in path:
+            continue
+        raw = open(path, 'rb').read()
+        bom = raw.startswith(b'\xef\xbb\xbf')
+        text = raw.decode('utf-8-sig')
+        new, changed = _inject_ps_utf8(text)
+        if not changed:
+            continue
+        # сохраняем стиль перевода строк файла
+        if '\r\n' in text and '\r\n' not in new.split('1C-Agent: stdout UTF-8', 1)[-1][:80]:
+            pass
+        data = new.encode('utf-8')
+        if bom:
+            data = b'\xef\xbb\xbf' + data
+        open(path, 'wb').write(data)
+        patched.append(os.path.relpath(path, skills_dir))
+    return patched
+
+
+# ---------------------------------------------------------------------------
 # build
 # ---------------------------------------------------------------------------
 def clone_upstream(ref):
@@ -445,6 +911,9 @@ def cmd_build(args):
             if new != content:
                 write(md, new)
     patched = patch_scripts(dst)
+    patched += patch_form_compile_events(dst)
+    patched += patch_db_credentials(dst)
+    patched += patch_powershell_utf8(dst)
     add_skill_notes(dst)
     apply_runtime(dst, args.runtime, verbose=False)
     own = copy_own_skills(dst)

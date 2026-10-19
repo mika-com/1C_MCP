@@ -27,9 +27,13 @@ permissions:
    `web-publish` (сам не публикуй). На Linux без `DISPLAY` запускай через `xvfb-run -a`.
    Разовый сценарий — `run`; отладка — `start` (`background: true`), `exec`, `stop`. Регресс из `tests/web/` —
    `test ... --format=allure --report-dir=build/reports/web/allure`, затем `allure-to-junit.mjs` → `junit.xml`.
+   Проверяй текстом и DOM (assertions). На одну проверку — не больше 1–2 скриншотов; полноразмерные PNG в
+   контекст пачкой не читай, в итоге достаточно путей. COM, typelib, реестр, UI Automation и GUI `1cv8` не
+   используй: проверка только через веб-публикацию и web-test. Пароль в `-Password` не передавай.
 3. **Vanessa Automation / YAxUnit** — по навыку `1c-test` (через `vrunner`), отчёты в `build/reports/va/` и
    `build/reports/yaxunit.xml`.
-4. Нашлась ошибка — шаг, ожидаемый и фактический результат, путь к скриншоту в `build/reports/`.
+4. Нашлась ошибка — шаг, ожидаемый и фактический результат, путь к скриншоту в `build/reports/` (сам файл
+   открывай, только если текста ошибки недостаточно). В основной агент вернётся этот текст, не сырой цикл.
 5. Итог: что запускалось, сколько прошло/упало, пути к отчётам (Allure, JUnit, скриншоты, видео).
 6. Интерактивную сессию web-test всегда закрывай (`stop`).
 7. Прогоны (vrunner, web-test `test`, Vanessa) — с явным таймаутом shell (`timeout` до 3600000) или в фоне; в Code Mode
