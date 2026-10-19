@@ -270,13 +270,24 @@ PRINT_FORM_NOTES = {
     'epf-bsp-init': '## Инструкции',
     'epf-bsp-add-command': '## Инструкции',
 }
+INTERCEPTOR_NOTE = (
+    '> **Выбор перехватчика (OpenCode).** Логика меняется внутри типового метода — `ModificationAndControl` '
+    '(`&ИзменениеИКонтроль`) с минимальными правками `#Вставка`/`#Удаление`; копировать тело оригинала в `&Вместо` '
+    'запрещено. Код только до/после — `Before`/`After`. `Instead` — только условная замена с `ПродолжитьВызов`. После '
+    'обновления типовой — `-Check`, при дрейфе `-Actualize`, конфликты — пользователю. Подробно — раздел «Перехват '
+    'методов типовой конфигурации» агента `1c` и `docs/cfe-guide.md`.\n\n'
+)
+INTERCEPTOR_NOTES = {
+    'cfe-patch-method': '## Типы перехвата',
+}
 # Свои навыки порта (их нет в upstream): копируются в skills/ при каждой сборке
 OWN_SKILLS = 'own-skills'
 
 
 def add_skill_notes(skills_dir):
     for note, targets in ((SAFE_MODE_NOTE, SKILL_NOTES), (BSL_CHECK_NOTE, BSL_CHECK_NOTES),
-                          (WEB_TEST_REPORTS_NOTE, WEB_TEST_NOTES), (PRINT_FORM_NOTE, PRINT_FORM_NOTES)):
+                          (WEB_TEST_REPORTS_NOTE, WEB_TEST_NOTES), (PRINT_FORM_NOTE, PRINT_FORM_NOTES),
+                          (INTERCEPTOR_NOTE, INTERCEPTOR_NOTES)):
         for name, anchor in targets.items():
             path = os.path.join(skills_dir, name, 'SKILL.md')
             content = read(path)
