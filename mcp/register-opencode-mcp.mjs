@@ -5,6 +5,7 @@
 //   node register-opencode-mcp.mjs --vrunner        — то же, но vrunner-mcp включён (нужен vanessa-runner 3.x)
 //   node register-opencode-mcp.mjs --remove         — удалить серверы 1С из конфига
 //   node register-opencode-mcp.mjs --config <путь>  — другой конфиг (по умолчанию ~/.config/opencode/opencode.json)
+//   node register-opencode-mcp.mjs --no-default-agent — не прописывать default_agent
 //
 // Формат OpenCode v2: серверы лежат в mcp.servers, отключение — "disabled": true (не "enabled"),
 // таймауты — объект в миллисекундах { startup, catalog, execution }.
@@ -13,6 +14,10 @@
 //
 // Миграция: секция lsp.bsl, которую писали ранние версии (lsp/bsl-lsp.mjs), удаляется — OpenCode v2 LSP не
 // запускает, проверку после правок делает плагин plugins/bsl-autocheck.mjs. Чужие LSP-серверы не трогаем.
+//
+// default_agent: "1c" — агент по умолчанию в новых сессиях. Пишется, только если default_agent ещё не задан
+// (значение пользователя не перезаписываем); --remove удаляет его, только если он равен "1c". Если агента 1c
+// в каком-то проекте нет, OpenCode v2 сам откатывается на build.
 
 import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -35,6 +40,7 @@ export const VRUNNER = { key: 'vrunner', command: ['vrunner-mcp'], timeout: { st
 export const V1_KEYS = ['1c-ask', '1c-search', '1c-bsl'];
 export const STALE_SERVERS = ['1c-ask'];
 export const LSP_KEY = 'bsl';
+export const DEFAULT_AGENT = '1c';
 
 // Наша ли запись lsp.bsl (ранние версии писали node …/lsp/bsl-lsp.mjs)
 export function isOwnLsp(entry) {
@@ -67,7 +73,19 @@ export function parseConfig(text) {
   return parsed;
 }
 
-export function updateConfig(config, mcpDir, { remove = false, vrunner = false } = {}) {
+// default_agent: добавить, если не задан (сразу после $schema), убрать при удалении, только если он наш.
+export function applyDefaultAgent(config, { remove = false } = {}) {
+  if (remove) {
+    if (config.default_agent === DEFAULT_AGENT) delete config.default_agent;
+    return config;
+  }
+  if (config.default_agent !== undefined && config.default_agent !== null && config.default_agent !== '') return config;
+  const { $schema, default_agent: _drop, ...rest } = config;
+  for (const k of Object.keys(config)) delete config[k];
+  return Object.assign(config, $schema === undefined ? {} : { $schema }, { default_agent: DEFAULT_AGENT }, rest);
+}
+
+export function updateConfig(config, mcpDir, { remove = false, vrunner = false, defaultAgent = true } = {}) {
   const next = structuredClone(config);
   if (!next.mcp || typeof next.mcp !== 'object' || Array.isArray(next.mcp)) next.mcp = {};
   // миграция v1: серверы 1С прямо под mcp
@@ -85,6 +103,7 @@ export function updateConfig(config, mcpDir, { remove = false, vrunner = false }
     if (!vrunner) servers[VRUNNER.key].disabled = true;
   }
   removeOwnLsp(next);
+  if (defaultAgent || remove) applyDefaultAgent(next, { remove });
   return next;
 }
 
@@ -92,10 +111,11 @@ function main() {
   const argv = process.argv.slice(2);
   const remove = argv.includes('--remove');
   const vrunner = argv.includes('--vrunner');
+  const defaultAgent = !argv.includes('--no-default-agent');
   const ci = argv.indexOf('--config');
   const cfg = ci >= 0 ? resolve(argv[ci + 1]) : opencodeConfigPath();
   const beforeText = existsSync(cfg) ? readFileSync(cfg, 'utf8') : '';
-  const after = updateConfig(parseConfig(beforeText), HERE, { remove, vrunner });
+  const after = updateConfig(parseConfig(beforeText), HERE, { remove, vrunner, defaultAgent });
   const afterText = JSON.stringify(after, null, 2) + '\n';
   if (beforeText.replace(/^\uFEFF/, '') === afterText) {
     console.log(`Без изменений: ${cfg}`);
@@ -106,7 +126,8 @@ function main() {
   writeFileSync(cfg, afterText, 'utf8');
   console.log(remove
     ? `MCP-серверы 1С удалены из ${cfg}`
-    : `MCP-серверы 1С (1c-search, 1c-bsl, 1c-help, vrunner${vrunner ? '' : ' — выключен'}) записаны в ${cfg}`);
+    : `MCP-серверы 1С (1c-search, 1c-bsl, 1c-help, vrunner${vrunner ? '' : ' — выключен'}) записаны в ${cfg}`
+      + (after.default_agent === DEFAULT_AGENT ? '; агент по умолчанию — 1c' : `; агент по умолчанию оставлен: ${after.default_agent ?? 'build'}`));
   return 0;
 }
 

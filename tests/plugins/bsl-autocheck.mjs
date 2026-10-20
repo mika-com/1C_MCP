@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // Тесты плагина bsl-autocheck (plugins/bsl-autocheck.mjs) на поддельном BSL LS и миграции lsp.bsl.
 //   node tests/plugins/bsl-autocheck.mjs
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -141,6 +141,31 @@ console.log('миграция LSP:');
   ok(removeOwnLsp({ lsp: {} }).lsp === undefined, 'removeOwnLsp: пустой объект');
   const oc = JSON.parse(readFileSync(join(repo, 'opencode.json'), 'utf8'));
   ok(!('lsp' in oc) && !existsSync(join(repo, 'lsp')), 'в репозитории нет lsp/ и секции lsp');
+}
+
+console.log('default_agent:');
+{
+  const c1 = updateConfig({ $schema: 'x', mcp: { servers: {} } }, '/r/mcp');
+  ok(c1.default_agent === '1c' && Object.keys(c1)[1] === 'default_agent', 'не задан — пишется "1c" (сразу после $schema)');
+  ok(updateConfig({ default_agent: 'build' }, '/r/mcp').default_agent === 'build', 'значение пользователя не перезаписывается');
+  ok(!('default_agent' in updateConfig({}, '/r/mcp', { defaultAgent: false })), 'defaultAgent: false — не пишется');
+  ok(!('default_agent' in updateConfig({ default_agent: '1c' }, '/r/mcp', { remove: true })), '--remove убирает "1c"');
+  ok(updateConfig({ default_agent: 'plan' }, '/r/mcp', { remove: true }).default_agent === 'plan', '--remove не трогает чужое значение');
+  const dir = mkdtempSync(join(tmpdir(), 'oc-cfg-'));
+  const cfgPath = join(dir, 'opencode.json');
+  const reg = join(repo, 'mcp', 'register-opencode-mcp.mjs');
+  const run = (...a) => spawnSync(process.execPath, [reg, '--config', cfgPath, ...a], { encoding: 'utf8' });
+  run();
+  const first = readFileSync(cfgPath, 'utf8');
+  ok(JSON.parse(first).default_agent === '1c', 'CLI: новый конфиг получает default_agent "1c"');
+  ok(/Без изменений/.test(run().stdout) && readFileSync(cfgPath, 'utf8') === first, 'CLI: повторный запуск ничего не меняет');
+  run('--remove');
+  const removed = JSON.parse(readFileSync(cfgPath, 'utf8'));
+  ok(!('default_agent' in removed) && !removed.mcp.servers['1c-search'], 'CLI: --remove убирает серверы и default_agent');
+  writeFileSync(cfgPath, JSON.stringify({ default_agent: 'build' }));
+  run();
+  ok(JSON.parse(readFileSync(cfgPath, 'utf8')).default_agent === 'build', 'CLI: свой default_agent пользователя сохранён');
+  rmSync(dir, { recursive: true, force: true });
 }
 
 console.log('установка плагина:');

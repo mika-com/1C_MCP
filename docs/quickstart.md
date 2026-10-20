@@ -54,6 +54,9 @@ python scripts/opencode_port.py install --global
 - создаёт шаблон `AGENTS.md` в проекте, если его ещё нет;
 - регистрирует MCP-серверы в `~/.config/opencode/opencode.json` (формат v2, `mcp.servers`); запись `lsp.bsl`
   прежних версий удаляет (OpenCode v2 LSP не запускает);
+- там же делает агента `1c` агентом по умолчанию (`"default_agent": "1c"`), только если `default_agent` ещё
+  не задан — ваше значение не перезаписывается; удаление (`uninstall`) убирает его, только если он равен `"1c"`.
+  Действует на новые сессии; в проекте без агента `1c` OpenCode откатывается на `build`;
 - ставит плагин `bsl-autocheck` (`<opencode>/plugins/bsl-autocheck.js`): после каждой правки `.bsl`/`.os` агент
   получает ошибки и предупреждения BSL LS прямо в результате правки (`--no-autocheck` — не ставить,
   `BSL_AUTOCHECK=0` — выключить; настройки — в [README](../README.md#mcp-серверы)). Перед загрузкой в базу
@@ -85,7 +88,8 @@ node mcp/register-opencode-mcp.mjs --vrunner  # включить vrunner-mcp (н
 
 ## Шаг 4. Запустите OpenCode
 
-Откройте каталог проекта в OpenCode Desktop (или `opencode` в терминале), выберите агента **1c**.
+Откройте каталог проекта в OpenCode Desktop (или `opencode` в терминале) — агент **1c** выбран по умолчанию
+(если в конфиге уже был свой `default_agent`, выберите **1c** вручную или поменяйте `default_agent`).
 Проверьте MCP: `/mcps` или `opencode mcp list`.
 
 ## Шаг 5. Откройте проект 1С

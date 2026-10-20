@@ -149,7 +149,8 @@ def cmd_install(args):
     print(f'Установлено: {len(skills)} навыков в {dst}, агентов и команд: {len(files)} в {oc}')
     if not args.is_global:
         core.print_gitignore_recommendations(base)
-    print('\nЗапустите OpenCode (Desktop или CLI) из каталога проекта и выберите агента «1c».')
+    print('\nЗапустите OpenCode (Desktop или CLI) из каталога проекта: агент «1c» выбран по умолчанию '
+          '(если в конфиге задан свой default_agent — выберите «1c» вручную).')
     return 0
 
 

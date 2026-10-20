@@ -10,6 +10,8 @@
     3. Ставит навыки, агентов и команды: глобально в %USERPROFILE%\.config\opencode или в проект (-Project),
        регистрирует MCP-серверы в %USERPROFILE%\.config\opencode\opencode.json (запись lsp.bsl прежних версий
        удаляется) и плагин bsl-autocheck — проверку BSL после каждой правки (plugins\bsl-autocheck.js).
+       Там же default_agent = "1c" (агент по умолчанию), только если default_agent ещё не задан;
+       -Uninstall убирает его, только если он равен "1c".
     4. Скачивает BSL Language Server в %USERPROFILE%\.config\opencode\tools\bsl-language-server.
     5. Ставит Playwright и Chromium для навыка web-test.
     6. Находит установленную платформу 1С для синтакс-помощника 1c-help (справка читается локально,
@@ -437,6 +439,7 @@ if ($WithVrunner) { $installArgs += '--vrunner' }
 if ($NoBslLs) { $installArgs += '--no-autocheck' }
 Invoke-Python $installArgs
 Write-Ok "MCP записаны в $OpenCodeHome\opencode.json (старая запись lsp.bsl удалена, если была)"
+Write-Ok 'Агент по умолчанию — 1c (default_agent), если вы не задали свой.'
 if (-not $NoBslLs) { Write-Ok 'Плагин bsl-autocheck: после каждой правки .bsl/.os агент получает ошибки BSL LS (отключить: BSL_AUTOCHECK=0)' }
 
 # ---------- 5. BSL Language Server ----------
@@ -533,8 +536,8 @@ else {
 # ---------- Итог ----------
 Write-Host ''
 Write-Host '=== Готово ===' -ForegroundColor Green
-if ($Project) { Write-Info "Откройте в OpenCode каталог $script:ProjectPath и выберите агента «1c»." }
-else { Write-Info 'Откройте в OpenCode каталог 1С-проекта (XML-выгрузка) и выберите агента «1c».' }
+if ($Project) { Write-Info "Откройте в OpenCode каталог $script:ProjectPath — агент «1c» выбран по умолчанию (если был задан свой default_agent, выберите «1c» вручную)." }
+else { Write-Info 'Откройте в OpenCode каталог 1С-проекта (XML-выгрузка) — агент «1c» выбран по умолчанию (если был задан свой default_agent, выберите «1c» вручную).' }
 Write-Info 'Параметры баз — в .v8-project.json проекта (навык db-list). Обновление — git pull (или новый ZIP в ту же папку) и повторный запуск.'
 if ($script:Warnings.Count -gt 0) {
     Write-Host ''

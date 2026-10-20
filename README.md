@@ -55,7 +55,8 @@ cd 1C-Agent
 python scripts/opencode_port.py install --project-dir /путь/к/1С-проекту
 ```
 
-Откройте проект в OpenCode Desktop и выберите агента **1c**. Подробно — [docs/quickstart.md](docs/quickstart.md).
+Откройте проект в OpenCode Desktop: агент **1c** будет выбран по умолчанию (установщик прописывает
+`"default_agent": "1c"` в `~/.config/opencode/opencode.json`, только если там ещё не задан свой агент по умолчанию). Подробно — [docs/quickstart.md](docs/quickstart.md).
 
 | Требование | Зачем |
 |------------|-------|

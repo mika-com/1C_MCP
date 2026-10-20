@@ -5,6 +5,9 @@
 ## [Unreleased]
 
 ### Добавлено
+- Установщик (`register-opencode-mcp.mjs`, его вызывают `opencode_port.py install` и `install.ps1`) прописывает
+  `"default_agent": "1c"` в `~/.config/opencode/opencode.json`, только если `default_agent` ещё не задан;
+  удаление убирает его, только если он равен `"1c"`. Отключить при ручной регистрации — `--no-default-agent`.
 - Семантический поиск в MCP `1c-search` (`mcp/lib/semantic.mjs`): инструменты `semantic_search` (режимы `hybrid`,
   `semantic`, `keyword`; фильтр `object`, `with_code`) и `semantic_index` (`status`, `build`, `rebuild`).
   Фрагменты — процедуры/функции BSL с комментарием и директивами и объекты метаданных; эмбеддинги через
