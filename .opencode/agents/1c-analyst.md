@@ -21,7 +21,7 @@ permissions:
 файлы, не загружай в базу, не запускай навыки `*-edit`, `*-compile`, `db-*`.
 
 1. Найди нужные объекты и код через MCP `1c-search`: «где реализовано X» — сначала `semantic_search`, затем
-   `find_object`, `module_methods`, `find_method`, `find_usages`.
+   `find_object` (`query`), `module_methods` (`module`), `find_method` (`name`, `object`), `find_usages` (`name`).
    Структуру объектов и форм смотри навыками `meta-info`, `form-info`, `cf-info`. Не используй grep/cat по XML.
 2. Реши, где делать доработку: объекты на поддержке — только в расширении (`cfe-init`, `cfe-borrow`,
    `cfe-patch-method`). Определи, что заимствовать, какие методы перехватить, какие реквизиты, формы, команды,

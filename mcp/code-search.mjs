@@ -773,6 +773,50 @@ export async function semanticIndex(idx, a = {}, { env = process.env } = {}) {
 // ---------------------------------------------------------------------------
 // MCP
 // ---------------------------------------------------------------------------
+// Модели нередко путают имя главного аргумента (find_object вызывают с {"name": …}, как find_method).
+// Поэтому основной аргумент не помечен required в схеме (иначе OpenCode отклоняет вызов до сервера),
+// синонимы объявлены в схеме (чтобы клиент их не отбросил), а сервер сам приводит их к каноническому имени
+// и с понятной ошибкой отказывает, если нет ни того, ни другого.
+export const ARG_ALIASES = {
+  semantic_search: { query: ['text', 'q', 'question'] },
+  find_object: { query: ['name', 'object', 'text', 'q'] },
+  find_method: { name: ['method', 'method_name', 'query'] },
+  module_methods: { module: ['object', 'name', 'query'] },
+  find_usages: { name: ['method', 'method_name', 'query'] },
+  search_code: { pattern: ['query', 'text', 'string'] },
+};
+const ARG_EXAMPLES = {
+  semantic_search: '{"query": "где проверяется кредитный лимит"}', find_object: '{"query": "ЗадачиМне"}',
+  find_method: '{"name": "ПриЗаписи", "object": "Документ.Задача"}', module_methods: '{"module": "Документ.Задача"}',
+  find_usages: '{"name": "ПриЗаписи"}', search_code: '{"pattern": "ЗаписатьИзменения("}',
+};
+
+function aliasProps(canonical, names) {
+  return Object.fromEntries(names.map((n) => [n, { type: 'string', description: `Устаревший синоним ${canonical} — передавайте ${canonical}` }]));
+}
+
+const present = (v) => (typeof v === 'string' ? v.trim() !== '' : typeof v === 'number' && Number.isFinite(v));
+
+// Приводит синонимы к каноническим именам. Синоним, совпадающий с собственным аргументом инструмента
+// (object у find_method/find_usages/semantic_search), здесь не участвует — он есть только там, где его нет в схеме.
+export function normalizeArgs(tool, a = {}) {
+  const spec = ARG_ALIASES[tool];
+  if (!spec) return a;
+  const out = { ...a };
+  for (const [canonical, aliases] of Object.entries(spec)) {
+    if (!present(out[canonical])) {
+      const from = aliases.find((k) => present(out[k]));
+      if (from) { out[canonical] = out[from]; delete out[from]; }
+    }
+    if (!present(out[canonical])) {
+      throw new Error(`${tool}: не передан обязательный аргумент «${canonical}» (строка). Пример: ${ARG_EXAMPLES[tool]}` +
+        (aliases.length ? `. Также принимается: ${aliases.join(', ')}.` : '.'));
+    }
+    out[canonical] = String(out[canonical]).trim();
+  }
+  return out;
+}
+
 const ROOT_ARG = { type: 'string', description: 'Корень проекта (по умолчанию — рабочая папка OpenCode)' };
 const TOOLS = [
   { name: 'semantic_search', description: 'Поиск кода и объектов 1С ПО СМЫСЛУ: «где реализовано/проверяется/рассчитывается X», ' +
@@ -791,25 +835,43 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { action: { type: 'string', enum: ['status', 'build', 'rebuild'] },
       wait_seconds: { type: 'number', description: 'Подождать завершения до N секунд (не больше 50)' }, root: ROOT_ARG } } },
   { name: 'find_object', description: 'Найти объект метаданных 1С по смыслу: по имени, синониму, реквизиту или табличной части. ' +
-      'Пример: «история задач», «Документ.Задача», «номенклатура вес». Используй вместо grep по XML.',
-    inputSchema: { type: 'object', properties: { query: { type: 'string' }, type: { type: 'string', description: 'Вид объекта: Справочник, Документ, РегистрСведений…' }, limit: { type: 'number' }, root: ROOT_ARG }, required: ['query'] } },
+      'Аргумент — query (строка): {"query": "ЗадачиМне"}. Пример query: «история задач», «Документ.Задача», «номенклатура вес». ' +
+      'Используй вместо grep по XML.',
+    inputSchema: { type: 'object', properties: {
+      query: { type: 'string', description: 'Обязательно. Имя, синоним, реквизит или «Вид.Имя», например «ЗадачиМне» или «Документ.Задача»' },
+      type: { type: 'string', description: 'Вид объекта: Справочник, Документ, РегистрСведений…' }, limit: { type: 'number' }, root: ROOT_ARG,
+      ...aliasProps('query', ['name', 'object']) } } },
   { name: 'find_method', description: 'Найти процедуру/функцию по имени и сразу получить её код (если совпадений до 3). ' +
-      'object сужает поиск: «ОбщийМодуль.Имя», «Документ.Задача», «Документ.Задача.Форма.ФормаДокумента».',
-    inputSchema: { type: 'object', properties: { name: { type: 'string' }, object: { type: 'string' }, with_code: { type: 'boolean' }, max_lines: { type: 'number' }, root: ROOT_ARG }, required: ['name'] } },
-  { name: 'module_methods', description: 'Список процедур и функций модулей объекта или общего модуля со строками, экспортом и директивами.',
-    inputSchema: { type: 'object', properties: { module: { type: 'string', description: '«Документ.Задача», «ОбщийМодуль.ОбщегоНазначения» или часть пути' }, exported_only: { type: 'boolean' }, root: ROOT_ARG }, required: ['module'] } },
-  { name: 'find_usages', description: 'Где вызывается метод: файлы и строки вызовов с именем вызывающего метода, сводка по модулям.',
-    inputSchema: { type: 'object', properties: { name: { type: 'string' }, object: { type: 'string' }, limit: { type: 'number' }, root: ROOT_ARG }, required: ['name'] } },
-  { name: 'search_code', description: 'Поиск строки (или регулярного выражения) по BSL-модулям выгрузки с ограниченным выводом.',
-    inputSchema: { type: 'object', properties: { pattern: { type: 'string' }, regex: { type: 'boolean' }, path_filter: { type: 'string' }, include_xml: { type: 'boolean' }, limit: { type: 'number' }, root: ROOT_ARG }, required: ['pattern'] } },
+      'Аргументы: name — имя метода (обязательно); object сужает поиск: «ОбщийМодуль.Имя», «Документ.Задача», «Документ.Задача.Форма.ФормаДокумента».',
+    inputSchema: { type: 'object', properties: {
+      name: { type: 'string', description: 'Обязательно. Имя процедуры/функции или его часть' },
+      object: { type: 'string', description: 'Сузить поиск: «ОбщийМодуль.Имя», «Документ.Задача»' },
+      with_code: { type: 'boolean' }, max_lines: { type: 'number' }, root: ROOT_ARG, ...aliasProps('name', ['method']) } } },
+  { name: 'module_methods', description: 'Список процедур и функций модулей объекта или общего модуля со строками, экспортом и директивами. ' +
+      'Аргумент — module: {"module": "Документ.Задача"}.',
+    inputSchema: { type: 'object', properties: {
+      module: { type: 'string', description: 'Обязательно. «Документ.Задача», «ОбщийМодуль.ОбщегоНазначения» или часть пути' },
+      exported_only: { type: 'boolean' }, root: ROOT_ARG, ...aliasProps('module', ['object', 'name']) } } },
+  { name: 'find_usages', description: 'Где вызывается метод: файлы и строки вызовов с именем вызывающего метода, сводка по модулям. ' +
+      'Аргументы: name — имя метода (обязательно), object — сузить по модулю.',
+    inputSchema: { type: 'object', properties: {
+      name: { type: 'string', description: 'Обязательно. Точное имя вызываемой процедуры/функции' },
+      object: { type: 'string', description: 'Искать вызовы только в модулях этого объекта' },
+      limit: { type: 'number' }, root: ROOT_ARG, ...aliasProps('name', ['method']) } } },
+  { name: 'search_code', description: 'Поиск строки (или регулярного выражения) по BSL-модулям выгрузки с ограниченным выводом. ' +
+      'Аргумент — pattern: {"pattern": "ЗаписатьИзменения("}.',
+    inputSchema: { type: 'object', properties: {
+      pattern: { type: 'string', description: 'Обязательно. Подстрока (или регулярное выражение при regex=true)' },
+      regex: { type: 'boolean' }, path_filter: { type: 'string' }, include_xml: { type: 'boolean' }, limit: { type: 'number' }, root: ROOT_ARG,
+      ...aliasProps('pattern', ['query', 'text']) } } },
   { name: 'index_status', description: 'Какие выгрузки найдены в проекте и сколько объектов/методов в индексе. refresh=true — пересобрать.',
     inputSchema: { type: 'object', properties: { refresh: { type: 'boolean' }, root: ROOT_ARG } } },
 ];
 
 const INSTRUCTIONS = 'Поиск по XML-выгрузке 1С. Для поиска объектов, методов и вызовов используй эти инструменты, а не grep/sed/cat ' +
-  'по файлам выгрузки: ответы короткие. semantic_search — где реализовано X (по смыслу, когда имя неизвестно); ' +
-  'find_object — объект по имени/синониму; find_method — метод с кодом; module_methods — состав модуля; ' +
-  'find_usages — кто вызывает; search_code — строка в коде.';
+  'по файлам выгрузки: ответы короткие. semantic_search(query) — где реализовано X (по смыслу, когда имя неизвестно); ' +
+  'find_object(query) — объект по имени/синониму; find_method(name, object?) — метод с кодом; ' +
+  'module_methods(module) — состав модуля; find_usages(name, object?) — кто вызывает; search_code(pattern) — строка в коде.';
 
 function semanticStatusLine(idx) {
   try {
@@ -823,6 +885,7 @@ function semanticStatusLine(idx) {
 }
 
 async function handleCall(name, a, root) {
+  a = normalizeArgs(name, a || {});
   if (!existsSync(root)) throw new Error(`каталог не найден: ${root}`);
   const idx = buildIndex(root, { force: name === 'index_status' && a.refresh });
   if (!idx.configs.length) {

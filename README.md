@@ -121,7 +121,7 @@ python3 skills/print-form/scripts/mxl-render.py <...>/Templates/<Макет>/Ext
 
 | Сервер | Что даёт | По умолчанию |
 |--------|----------|--------------|
-| `1c-search` | `semantic_search` (по смыслу, гибрид с ключевыми словами и реранкером; без LM Studio — ключевые слова), `semantic_index`, `find_object`, `find_method`, `module_methods`, `find_usages`, `search_code`, `index_status` | включён |
+| `1c-search` | `semantic_search` (по смыслу, гибрид с ключевыми словами и реранкером; без LM Studio — ключевые слова), `semantic_index`, `find_object(query)`, `find_method(name, object)`, `module_methods(module)`, `find_usages(name, object)`, `search_code(pattern)`, `index_status` | включён |
 | `1c-bsl` | BSL LS в режиме MCP (`analyze_file`, `document_symbols`, …); без BSL LS — заглушка с подсказкой | включён |
 | `1c-help` | синтакс-помощник: `help_search`, `help_get` (синтаксис, параметры, возврат, доступность, версия, примеры), `help_members`, `help_status` — по справке **установленной** платформы | включён |
 | `vrunner` | команды vanessa-runner 3.x (`vrunner-mcp`) | `disabled: true`, включить: `node mcp/register-opencode-mcp.mjs --vrunner` |

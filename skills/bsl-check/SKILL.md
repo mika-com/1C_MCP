@@ -61,4 +61,4 @@ node "{SKILL_DIR}/scripts/bsl-check.mjs" -Path "<каталог или файл>
 изменённых объектов).
 
 Для поиска объектов и методов по имени во всей выгрузке удобнее инструменты сервера `1c-search`
-(`find_object`, `find_method`, `find_usages`).
+(`find_object` с аргументом `query`, `find_method` и `find_usages` с аргументом `name`).

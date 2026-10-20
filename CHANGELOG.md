@@ -31,6 +31,12 @@
   семантического индекса. Без LM Studio поведение прежнее, `semantic_search` отвечает по ключевым словам с `[!]`.
 
 ### Исправлено
+- `1c-search`: вызов `find_object` с `{"name": …}` вместо `{"query": …}` OpenCode отклонял ещё до сервера
+  («query: Missing key»). Главный аргумент `find_object`, `find_method`, `module_methods`, `find_usages`,
+  `search_code` больше не помечен `required`; синонимы (`name`/`object` → `query` у `find_object`, `method` → `name`,
+  `object`/`name` → `module`, `query`/`text` → `pattern`) объявлены в схеме и приводятся сервером к каноническому
+  имени; без аргумента — понятная ошибка с примером. Имена аргументов указаны в описаниях инструментов, в
+  инструкциях сервера и в правилах агентов `1c`, `1c-analyst`.
 - Эмбеддинги: `<|endoftext|>` по умолчанию **не** дописывается (`appendEos: false`). LM Studio добавляет EOS сам по
   метаданным GGUF; дописывание со стороны клиента (33d1bd2, `auto` по умолчанию) давало в логе llama.cpp «final
   prompt ends with 2 EOS tokens». Предупреждение «At least one last token in strings embedded is not SEP» безвредно —
