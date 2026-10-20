@@ -7,6 +7,7 @@
 import { spawn } from 'node:child_process';
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, utimesSync, existsSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
+import { createHash } from 'node:crypto';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { createInterface } from 'node:readline';
@@ -346,64 +347,69 @@ console.log('semantic: ключевые слова');
   ok(sem.moduleChunks('Процедура А()\n' + 'Х = 1;\n'.repeat(1000) + 'КонецПроцедуры', { moduleId: 'М', methods: [{ name: 'А', kind: 'Процедура', line: 1, end: 1002 }] }, 500)[0].text.length < 560, 'длинный метод усекается до maxChunkChars');
 }
 
-console.log('semantic: EOS для Qwen3-Embedding (пулинг по последнему токену)');
+console.log('semantic: EOS (appendEos) — по умолчанию выключено, LM Studio добавляет сам');
 {
   const EOS = '<|endoftext|>';
   const root = makeProject();
   const cfgOf = (env) => sem.loadConfig(root, env);
-  ok(sem.embedEos(cfgOf({})) === EOS && cfgOf({}).appendEos === 'auto', 'по умолчанию auto: qwen3-embedding-4b → <|endoftext|>');
-  ok(sem.embedEos(cfgOf({ SEMANTIC_EMBED_MODEL: 'majentik/Text-Embedding-Qwen3-Embedding-4B' })) === EOS, 'auto распознаёт имя модели без учёта регистра');
-  ok(sem.embedEos(cfgOf({ SEMANTIC_EMBED_MODEL: 'nomic-embed-text-v1.5' })) === '', 'auto: другие модели — без EOS');
-  ok(sem.embedEos(cfgOf({ SEMANTIC_EMBED_APPEND_EOS: '0' })) === '', 'SEMANTIC_EMBED_APPEND_EOS=0 выключает');
-  ok(sem.embedEos(cfgOf({ SEMANTIC_EMBED_MODEL: 'bge-m3', SEMANTIC_EMBED_APPEND_EOS: 'true', SEMANTIC_EMBED_EOS_TOKEN: '</s>' })) === '</s>', 'явное true и свой eosToken');
+  ok(cfgOf({}).appendEos === false && sem.embedEos(cfgOf({})) === '', 'по умолчанию EOS не дописывается (qwen3-embedding-4b)');
+  ok(sem.embedEos(cfgOf({ SEMANTIC_EMBED_MODEL: 'majentik/text-embedding-qwen3-embedding-4b' })) === '', 'по умолчанию и для majentik/… — без EOS');
+  ok(sem.embedEos(cfgOf({ SEMANTIC_EMBED_APPEND_EOS: '1' })) === EOS && sem.embedEos(cfgOf({ SEMANTIC_EMBED_APPEND_EOS: 'true' })) === EOS, 'явное true включает');
+  ok(sem.embedEos(cfgOf({ SEMANTIC_EMBED_APPEND_EOS: 'auto', SEMANTIC_EMBED_MODEL: 'Text-Embedding-QWEN3-Embedding-4B' })) === EOS &&
+    sem.embedEos(cfgOf({ SEMANTIC_EMBED_APPEND_EOS: 'auto', SEMANTIC_EMBED_MODEL: 'nomic-embed-text' })) === '', 'auto — только явно и только для qwen3-embedding');
+  ok(sem.embedEos(cfgOf({ SEMANTIC_EMBED_APPEND_EOS: '0' })) === '', 'SEMANTIC_EMBED_APPEND_EOS=0 — без EOS (как по умолчанию)');
+  ok(sem.embedEos(cfgOf({ SEMANTIC_EMBED_MODEL: 'bge-m3', SEMANTIC_EMBED_APPEND_EOS: 'true', SEMANTIC_EMBED_EOS_TOKEN: '</s>' })) === '</s>', 'свой eosToken');
   const r2 = makeProject();
-  writeFileSync(join(r2, '.v8-project.json'), JSON.stringify({ semanticSearch: { appendEos: false } }));
-  ok(sem.embedEos(sem.loadConfig(r2, {})) === '' && sem.embedEos(sem.loadConfig(r2, { SEMANTIC_EMBED_APPEND_EOS: 'auto' })) === EOS, '.v8-project.json appendEos=false; переменная среды важнее');
+  writeFileSync(join(r2, '.v8-project.json'), JSON.stringify({ semanticSearch: { appendEos: true } }));
+  ok(sem.embedEos(sem.loadConfig(r2, {})) === EOS && sem.embedEos(sem.loadConfig(r2, { SEMANTIC_EMBED_APPEND_EOS: '0' })) === '', '.v8-project.json appendEos=true; переменная среды важнее');
   ok(sem.withEos('a', EOS) === `a${EOS}` && sem.withEos(`a${EOS}`, EOS) === `a${EOS}` && sem.withEos(`a${EOS}\n`, EOS) === `a${EOS}` && sem.withEos('a', '') === 'a', 'EOS не дублируется');
-  ok(sem.hashText('x') === sem.hashText('x', '') && sem.hashText('x', EOS) !== sem.hashText('x'), 'хэш фрагмента учитывает EOS (без EOS — прежний)');
-  ok(sem.vectorDir(cfgOf({})) !== sem.vectorDir(cfgOf({ SEMANTIC_EMBED_APPEND_EOS: '0' })), 'с EOS и без — разные наборы векторов');
+
+  // совместимость: без EOS — формат до 33d1bd2 (хэш sha1("1\n"+текст), каталог <модель>-d<размерность>)
+  const legacyHash = (t) => createHash('sha1').update(`1\n${t}`).digest('hex');
+  ok(sem.hashText('Процедура А()') === legacyHash('Процедура А()') && sem.hashText('x', EOS) !== legacyHash('x'), 'хэш без EOS — прежний, с EOS — другой');
+  const storeL = mkdtempSync(join(tmpdir(), 'sem-legacy-'));
+  ok(sem.vectorDir(cfgOf({ SEMANTIC_STORE_DIR: storeL, SEMANTIC_EMBED_DIM: '64' })) === join(storeL, 'vectors', 'qwen3-embedding-4b-d64'), 'каталог векторов без EOS — прежний');
+  ok(sem.vectorDir(cfgOf({ SEMANTIC_STORE_DIR: storeL, SEMANTIC_EMBED_APPEND_EOS: '1' })) !== sem.vectorDir(cfgOf({ SEMANTIC_STORE_DIR: storeL })), 'с EOS — отдельный набор векторов');
 
   const fake = await startFake({ models: ['qwen3-embedding-4b', 'qwen3-reranker-4b', 'nomic-embed-text'] });
-  const store = mkdtempSync(join(tmpdir(), 'sem-eos-'));
-  // 1) старое поведение (как до исправления): без EOS
-  const envOld = envFor(fake, store, { SEMANTIC_EMBED_APPEND_EOS: '0' });
-  reset();
-  await build(root, envOld);
-  ok(fake.stats.inputs.length === 5 && fake.stats.inputs.every((i) => !i.text.includes(EOS)), 'appendEos=0: входы без EOS');
-  // 2) обновление: auto → индекс устарел, всё пересчитывается с EOS
-  const envNew = envFor(fake, store);
-  reset();
-  const stOld = await withEnv(envNew, () => semanticIndex(buildIndex(root, { force: true }), { action: 'status' }, { env: envNew }));
-  ok(/построен без EOS/.test(stOld) && /EOS <\|endoftext\|> \(авто\)/.test(stOld), 'статус: индекс построен без EOS — устарел', stOld);
-  fake.stats.inputs.length = 0;
-  const stNew = await build(root, envNew);
-  ok(/5 из 5 фрагментов с векторами/.test(stNew) && fake.stats.inputs.length === 5, `после смены EOS все фрагменты пересчитаны (${fake.stats.inputs.length})`, stNew);
   const once = (t) => t.endsWith(EOS) && t.indexOf(EOS) === t.length - EOS.length;
-  ok(fake.stats.inputs.every((i) => once(i.text)), 'документы: EOS ровно один раз и в конце');
+  // 1) по умолчанию: без EOS; манифест старого формата (без поля eos) переиспользуется
+  const envDef = envFor(fake, storeL);
+  reset();
+  await build(root, envDef);
+  ok(fake.stats.inputs.length === 5 && fake.stats.inputs.every((i) => !i.text.includes(EOS)), 'по умолчанию: входы без EOS');
+  for (const f of readdirSync(join(storeL, 'projects'))) {
+    const j = JSON.parse(readFileSync(join(storeL, 'projects', f), 'utf8')); delete j.eos;
+    writeFileSync(join(storeL, 'projects', f), JSON.stringify(j));
+  }
+  reset(); fake.stats.inputs.length = 0;
+  const stL = await build(root, envDef);
+  ok(fake.stats.inputs.length === 0 && /5 из 5/.test(stL), 'индекс до 33d1bd2 (без поля eos) переиспользуется — ничего не пересчитано', stL);
+  const rq = await search(root, envDef, { query: 'кредитный лимит', rerank: false });
+  ok(/ПроверитьКредитныйЛимит/.test(rq) && fake.stats.inputs.length === 1 && !fake.stats.inputs[0].text.includes(EOS), 'запрос по умолчанию без EOS');
+  // 2) явно включено: индекс устарел, пересчёт с EOS ровно один раз в конце
+  const envOn = envFor(fake, storeL, { SEMANTIC_EMBED_APPEND_EOS: 'true' });
+  reset(); fake.stats.inputs.length = 0;
+  const stOld = await withEnv(envOn, () => semanticIndex(buildIndex(root, { force: true }), { action: 'status' }, { env: envOn }));
+  ok(/построен без дописывания EOS/.test(stOld) && /дописывается EOS <\|endoftext\|>/.test(stOld), 'статус: индекс без EOS при appendEos=true — устарел', stOld);
+  const stNew = await build(root, envOn);
+  ok(/5 из 5/.test(stNew) && fake.stats.inputs.length === 5 && fake.stats.inputs.every((i) => once(i.text)), 'appendEos=true: всё пересчитано, EOS один раз в конце', stNew);
   fake.stats.inputs.length = 0;
-  await build(root, envNew);
-  ok(fake.stats.inputs.length === 0, 'повторное построение с EOS — ничего не пересчитывается');
-  const r = await search(root, envNew, { query: 'где проверяется кредитный лимит контрагента', rerank: false });
-  ok(/ПроверитьКредитныйЛимит/.test(r.split('\n').find((l) => /^1\. /.test(l)) || ''), 'поиск по индексу с EOS', r);
-  const q = fake.stats.inputs.find((i) => i.text.startsWith('Instruct: '));
-  ok(!!q && once(q.text), 'запрос: Instruct … Query … + EOS', q?.text);
-  // 3) усечение при 4xx (длинный вход): половина текста + EOS в конце
+  await search(root, envOn, { query: 'кредитный лимит', rerank: false });
+  ok(fake.stats.inputs.length === 1 && fake.stats.inputs[0].text.startsWith('Instruct: ') && once(fake.stats.inputs[0].text), 'запрос с EOS при appendEos=true');
+  // 3) обратно выключено: прежние векторы без EOS на месте — снова ничего не пересчитывается
+  reset(); fake.stats.inputs.length = 0;
+  await build(root, envDef);
+  ok(fake.stats.inputs.length === 0, 'возврат к умолчанию: векторы без EOS переиспользуются');
+  // 4) усечение при 4xx: половина текста + EOS в конце
   fake.opts.maxInputChars = 140;
   const store2 = mkdtempSync(join(tmpdir(), 'sem-eos2-'));
-  const envTr = envFor(fake, store2);
   reset(); fake.stats.inputs.length = 0;
-  await build(root, envTr);
-  const singles = fake.stats.inputs.filter((i) => i.text.length <= 140);
-  ok(fake.stats.inputs.some((i) => i.text.length > 140) && singles.length > 0 && fake.stats.inputs.every((i) => once(i.text)), 'усечение сохраняет EOS в конце');
+  await build(root, envFor(fake, store2, { SEMANTIC_EMBED_APPEND_EOS: 'true' }));
+  ok(fake.stats.inputs.some((i) => i.text.length > 140) && fake.stats.inputs.some((i) => i.text.length <= 140) && fake.stats.inputs.every((i) => once(i.text)), 'усечение сохраняет EOS в конце');
   fake.opts.maxInputChars = undefined;
-  // 4) не-Qwen модель — без EOS
-  const envOther = envFor(fake, mkdtempSync(join(tmpdir(), 'sem-eos3-')), { SEMANTIC_EMBED_MODEL: 'nomic-embed-text' });
-  reset(); fake.stats.inputs.length = 0;
-  await build(root, envOther);
-  await search(root, envOther, { query: 'кредитный лимит', rerank: false });
-  ok(fake.stats.inputs.length >= 6 && fake.stats.inputs.every((i) => i.model === 'nomic-embed-text' && !i.text.includes(EOS)), 'другая модель: ни документы, ни запрос без EOS');
   await fake.close();
-  for (const d of [store, store2]) rmSync(d, { recursive: true, force: true });
+  for (const d of [storeL, store2]) rmSync(d, { recursive: true, force: true });
 }
 
 console.log(`\nsemantic: ${passed} ok, ${failed} fail`);

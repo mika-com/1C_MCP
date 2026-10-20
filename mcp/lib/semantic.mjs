@@ -30,10 +30,11 @@ export const DEFAULTS = {
   apiKeyEnv: 'LMSTUDIO_API_KEY',
   embedModel: 'qwen3-embedding-4b',
   dimensions: 1024,
-  // Qwen3-Embedding: пулинг по последнему токену, который должен быть <|endoftext|>; многие GGUF не ставят
-  // tokenizer.ggml.add_eos_token, и llama.cpp/LM Studio его не добавляют (предупреждение «last token … is not SEP»).
-  // auto — дописывать для моделей qwen3-embedding; true/false — всегда/никогда.
-  appendEos: 'auto',
+  // Qwen3-Embedding берёт вектор последнего токена <|endoftext|>. LM Studio (llama.cpp) добавляет его сам по
+  // метаданным GGUF — поэтому по умолчанию НЕ дописываем (иначе «final prompt ends with 2 EOS tokens»).
+  // Предупреждение llama.cpp «last token in strings embedded is not SEP» при этом безвредно.
+  // true — дописывать всегда, auto — только для моделей qwen3-embedding (для серверов, которые EOS не добавляют).
+  appendEos: false,
   eosToken: '<|endoftext|>',
   rerankBackend: 'lmstudio-logprobs',
   rerankModel: 'qwen3-reranker-4b',
@@ -214,15 +215,15 @@ export function normalize(v, dim) {
 // Qwen3-Embedding: инструкция только у запроса; документы — как есть (карточка модели)
 export function queryText(cfg, q) { return `Instruct: ${cfg.queryInstruction}\nQuery: ${q}`; }
 
-// Токен конца, который дописывается к каждому входу эмбеддингов ('' — не дописывать).
-// Qwen3-Embedding-GGUF: «Qwen3 Embedding models default to using the last token as <|endoftext|>, so you need to
-// manually append this token to the end of your own input context» (карточка Qwen/Qwen3-Embedding-4B-GGUF);
-// llama.cpp: https://github.com/ggml-org/llama.cpp/issues/14252
+// Токен конца, который дописывается к каждому входу эмбеддингов ('' — не дописывать; по умолчанию).
+// Нужен только серверам, которые сами EOS не добавляют (GGUF без tokenizer.ggml.add_eos_token в старом llama.cpp):
+// карточка Qwen/Qwen3-Embedding-4B-GGUF, https://github.com/ggml-org/llama.cpp/issues/14252.
+// Без EOS хэши и каталог векторов — прежнего формата (до 33d1bd2), уже посчитанные векторы годны.
 export const QWEN3_EMBED_RE = /qwen3[-_. ]?embedding/i;
 export function embedEos(cfg) {
   const tok = cfg.eosToken || DEFAULTS.eosToken;
-  if (cfg.appendEos === 'auto' || cfg.appendEos === undefined) return QWEN3_EMBED_RE.test(cfg.embedModel || '') ? tok : '';
-  return cfg.appendEos ? tok : '';
+  if (cfg.appendEos === 'auto') return QWEN3_EMBED_RE.test(cfg.embedModel || '') ? tok : '';
+  return cfg.appendEos === true ? tok : '';
 }
 // Усечение делается раньше (фрагменты, повтор с половиной текста), EOS дописывается последним — всегда в конце
 export function withEos(text, eos) {
@@ -232,7 +233,7 @@ export function withEos(text, eos) {
 }
 export function eosLabel(cfg) {
   const e = embedEos(cfg);
-  return e ? `EOS ${e} (${cfg.appendEos === true ? 'включено явно' : 'авто'})` : `без EOS${cfg.appendEos === false ? ' (выключено явно)' : ''}`;
+  return e ? `дописывается EOS ${e} (appendEos=${cfg.appendEos})` : 'без дописывания EOS';
 }
 
 export async function embed(cfg, texts, { timeoutMs, signal } = {}) {
@@ -447,7 +448,7 @@ export function manifestMismatch(cfg, root) {
   let data;
   try { data = JSON.parse(readFileSync(manifestFile(cfg, root), 'utf8')); } catch { return ''; }
   if (data.model !== cfg.embedModel || data.dim !== cfg.dimensions) return `построен для ${data.model} d=${data.dim}`;
-  if ((data.eos || '') !== embedEos(cfg)) return data.eos ? `построен с EOS ${data.eos}` : 'построен без EOS (до исправления пулинга Qwen3-Embedding)';
+  if ((data.eos || '') !== embedEos(cfg)) return data.eos ? `построен с дописыванием EOS ${data.eos}` : 'построен без дописывания EOS';
   if (data.version !== MANIFEST_VERSION || data.format !== CHUNK_FORMAT) return 'старый формат';
   return '';
 }

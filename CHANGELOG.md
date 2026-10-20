@@ -31,14 +31,14 @@
   семантического индекса. Без LM Studio поведение прежнее, `semantic_search` отвечает по ключевым словам с `[!]`.
 
 ### Исправлено
-- Qwen3-Embedding в LM Studio: к каждому входу эмбеддингов (фрагменты и запросы) дописывается `<|endoftext|>` —
-  модель берёт вектор последнего токена, а GGUF без `tokenizer.ggml.add_eos_token` (например,
-  `majentik/text-embedding-qwen3-embedding-4b`) его не добавляют; в логе LM Studio было
-  «At least one last token in strings embedded is not SEP». Настройка `appendEos` (`SEMANTIC_EMBED_APPEND_EOS`,
-  `auto` — для моделей `qwen3-embedding`, `true`/`false`) и `eosToken` (`SEMANTIC_EMBED_EOS_TOKEN`); без повторного
-  добавления, усечение — до токена. Учтено в наборе векторов и хэше фрагментов: **после обновления индекс
-  перестраивается автоматически** (или `node mcp/code-search.mjs --semantic-build --root <проект>`), старые векторы
-  не используются. `semantic_index` и `check-lmstudio.ps1` (`-AppendEos`) показывают настройку.
+- Эмбеддинги: `<|endoftext|>` по умолчанию **не** дописывается (`appendEos: false`). LM Studio добавляет EOS сам по
+  метаданным GGUF; дописывание со стороны клиента (33d1bd2, `auto` по умолчанию) давало в логе llama.cpp «final
+  prompt ends with 2 EOS tokens». Предупреждение «At least one last token in strings embedded is not SEP» безвредно —
+  его можно не замечать. Настройка `appendEos` (`SEMANTIC_EMBED_APPEND_EOS`: `true`, `auto` — только для
+  `qwen3-embedding`, `false`) и `eosToken` остаются для серверов, которые EOS не добавляют; токен не дублируется и
+  остаётся последним при усечении. Без EOS каталог векторов и хэши фрагментов — прежнего формата: индекс, посчитанный
+  до 33d1bd2 (или с `SEMANTIC_EMBED_APPEND_EOS=0`), используется без пересчёта; набор `…-eos…` можно удалить.
+  `check-lmstudio.ps1` по умолчанию без EOS, `-AppendEos true|auto` — по желанию.
 
 ## [1.0.0] — 2026-10-19
 
