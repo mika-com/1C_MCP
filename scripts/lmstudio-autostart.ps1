@@ -6,7 +6,9 @@
     -Register   (окно «от имени администратора», под пользователем-владельцем LM Studio) — создаёт задачу планировщика
                 «1c-agent LM Studio» с триггером «при запуске системы» от имени этого пользователя (Windows спросит его
                 пароль: задача работает и без входа пользователя). Задача выполняет этот же скрипт с -Run.
-    -Run        lms daemon up → lms server start --bind 127.0.0.1 --port <Port> → scripts\lmstudio-load.ps1.
+    -Run        lms daemon up → lms server start --bind 127.0.0.1 --port <Port> → scripts\lmstudio-load.ps1 -Gpu <Gpu> -Reload
+                (-Reload: если модель успели загрузить на процессор JIT-запросом до старта задачи, она перезагружается на GPU).
+    -Gpu        max (по умолчанию) | off | доля 0..1 — передаётся в lmstudio-load.ps1 и дальше в lms load --gpu.
     -Unregister удаляет задачу.
     Сервер слушает только 127.0.0.1: он доступен всем сеансам RDP этой машины и не виден из сети.
     Официальная документация LM Studio описывает автозапуск llmster только для Linux (systemd); на Windows это
@@ -25,7 +27,8 @@ param(
     [Parameter(ParameterSetName = 'Unregister')][switch]$Unregister,
     [Parameter(ParameterSetName = 'Run')][switch]$Run,
     [ValidateRange(1, 65535)][int]$Port = 1234,
-    [string]$TaskName = '1c-agent LM Studio'
+    [string]$TaskName = '1c-agent LM Studio',
+    [ValidatePattern('^(?i:max|off|0(\.\d+)?|1(\.0+)?)$')][string]$Gpu = 'max'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -44,7 +47,7 @@ if ($Register) {
         Write-Host 'Нужно окно PowerShell «от имени администратора» (задача с триггером при запуске системы).' -ForegroundColor Red; exit 2
     }
     $self = $PSCommandPath
-    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$self`" -Run -Port $Port" -WorkingDirectory (Split-Path $self)
+    $action = New-ScheduledTaskAction -Execute 'powershell.exe' -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$self`" -Run -Port $Port -Gpu $Gpu" -WorkingDirectory (Split-Path $self)
     $trigger = New-ScheduledTaskTrigger -AtStartup
     $trigger.Delay = 'PT1M'
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::Zero) -StartWhenAvailable
@@ -66,6 +69,6 @@ if (-not (Test-Path -LiteralPath $lms)) { Write-Host "lms не найден ($lm
 if ($PSCmdlet.ShouldProcess('llmster', 'lms daemon up; lms server start')) {
     & $lms daemon up | Out-Host
     & $lms server start --bind 127.0.0.1 --port $Port | Out-Host
-    & (Join-Path $PSScriptRoot 'lmstudio-load.ps1')
+    & (Join-Path $PSScriptRoot 'lmstudio-load.ps1') -Gpu $Gpu -Reload
     exit $LASTEXITCODE
 }

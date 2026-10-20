@@ -7,14 +7,23 @@
     пользователи RDP ходят к нему по http://127.0.0.1:1234 и LM Studio себе не ставят).
     1. Находит lms (PATH или %USERPROFILE%\.lmstudio\bin\lms.exe).
     2. Ищет скачанные модели по ключу (-EmbedKey / -RerankKey) или по образцу имени (qwen3-embedding-4b, qwen3-reranker-4b).
-    3. Если модель с нужным идентификатором ещё не загружена — lms load <ключ> --identifier <id> --context-length N --gpu max
+    3. Если модель с нужным идентификатором ещё не загружена — lms load <ключ> --identifier <id> --context-length N --gpu <Gpu>
        без --ttl: загруженные так модели не выгружаются по таймеру и не вытесняются JIT-загрузкой других моделей.
+       --gpu передаётся всегда (по умолчанию max — все слои на видеокарту): без него lms берёт настройки загрузки
+       модели из LM Studio, и при GPU Offload = 0 модель молча садится на процессор (ОЗУ занята, VRAM пустая).
+    -Gpu max | off | доля 0..1 — сколько слоёв выгружать на GPU (off — только процессор).
+    -Reload выгружает уже загруженные модели и загружает заново с -Gpu: нужно, если модель уже была загружена
+       на процессор (JIT по первому запросу, из интерфейса LM Studio или старой версией скрипта) — без -Reload
+       уже загруженная модель пропускается как есть.
     -Unload выгружает обе модели. -EstimateOnly печатает оценку памяти и ничего не загружает.
 
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File scripts\lmstudio-load.ps1
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File scripts\lmstudio-load.ps1 -EstimateOnly
+.EXAMPLE
+    powershell -ExecutionPolicy Bypass -File scripts\lmstudio-load.ps1 -Reload
+    Перезагрузить модели на видеокарту, если они уже загружены на процессор (nvidia-smi показывает пустую VRAM).
 .EXAMPLE
     powershell -ExecutionPolicy Bypass -File scripts\lmstudio-load.ps1 -RerankKey devquasar/qwen.qwen3-reranker-4b-gguf
 #>
@@ -29,7 +38,8 @@ param(
     [string]$RerankPattern = 'qwen3[-_.]?reranker[-_.]?4b',
     [ValidateRange(512, 131072)][int]$EmbedContext = 8192,
     [ValidateRange(512, 131072)][int]$RerankContext = 8192,
-    [string]$Gpu = 'max',
+    [ValidatePattern('^(?i:max|off|0(\.\d+)?|1(\.0+)?)$')][string]$Gpu = 'max',
+    [switch]$Reload,
     [switch]$NoRerank,
     [switch]$Unload,
     [switch]$EstimateOnly
@@ -101,20 +111,31 @@ function Resolve-Model([string]$Key, [string]$Pattern, [string]$Title) {
 $plan = @(@{ Title = 'Модель эмбеддингов'; Key = (Resolve-Model -Key $EmbedKey -Pattern $EmbedPattern -Title 'Модель эмбеддингов'); Id = $EmbedId; Ctx = $EmbedContext })
 if (-not $NoRerank) { $plan += @{ Title = 'Реранкер'; Key = (Resolve-Model -Key $RerankKey -Pattern $RerankPattern -Title 'Реранкер'); Id = $RerankId; Ctx = $RerankContext } }
 
+$Gpu = $Gpu.ToLowerInvariant()
 $failed = $false
 foreach ($m in $plan) {
     if (-not $m.Key) { $failed = $true; continue }
-    if ($loaded -contains $m.Id -and -not $EstimateOnly) { Write-Ok "$($m.Title): уже загружена как $($m.Id)"; continue }
+    if ($loaded -contains $m.Id -and -not $EstimateOnly) {
+        if (-not $Reload) {
+            Write-Ok "$($m.Title): уже загружена как $($m.Id) — оставлена как есть"
+            Write-Note 'Если VRAM пустая, а ОЗУ занята (модель на процессоре) — запустите с -Reload, чтобы загрузить заново с --gpu.'
+            continue
+        }
+        if (-not $PSCmdlet.ShouldProcess($m.Id, 'lms unload (перезагрузка с --gpu)')) { continue }
+        & $lms unload $m.Id | Out-Host
+        if ($LASTEXITCODE -ne 0) { Write-Bad "$($m.Title): lms unload $($m.Id) завершился с кодом $LASTEXITCODE"; $failed = $true; continue }
+    }
     $loadArgs = @('load', $m.Key, '--identifier', $m.Id, '--context-length', [string]$m.Ctx, '--gpu', $Gpu)
     if ($EstimateOnly) { $loadArgs = @('load', '--estimate-only', $m.Key, '--context-length', [string]$m.Ctx, '--gpu', $Gpu) }
     if (-not $PSCmdlet.ShouldProcess($m.Key, "lms $($loadArgs -join ' ')")) { continue }
     Write-Note "lms $($loadArgs -join ' ')"
     & $lms @loadArgs | Out-Host
     if ($LASTEXITCODE -ne 0) { Write-Bad "$($m.Title): lms load завершился с кодом $LASTEXITCODE"; $failed = $true }
-    elseif (-not $EstimateOnly) { Write-Ok "$($m.Title): $($m.Key) → идентификатор $($m.Id), без TTL" }
+    elseif (-not $EstimateOnly) { Write-Ok "$($m.Title): $($m.Key) → идентификатор $($m.Id), --gpu $Gpu, без TTL" }
 }
 if (-not $EstimateOnly) {
     Write-Host ''
+    if ($Gpu -ne 'off') { Write-Note 'Модели должны быть в видеопамяти: nvidia-smi (занято несколько ГБ, процесс llama-server); если VRAM пустая — -Reload.' }
     Write-Note 'Проверка: powershell -ExecutionPolicy Bypass -File scripts\check-lmstudio.ps1'
     Write-Note 'Реранкер должен быть загружен как LLM (Domain Type: LLM) и со своим шаблоном — docs\semantic-search.md, шаги 3–4.'
 }
