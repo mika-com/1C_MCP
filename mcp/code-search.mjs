@@ -636,7 +636,8 @@ export async function semanticSearch(idx, a, { env = process.env } = {}) {
         vec = null; mode = 'keyword';
       }
       if (vec?.noIndex) {
-        notes.push(`семантический индекс ещё не построен${buildingNote(sem.buildState(idx.root) || st) || ' — запустите semantic_index action=build'}; пока только ключевые слова`);
+        const why = sem.manifestMismatch(cfg, idx.root);
+        notes.push(`семантический индекс ${why ? `устарел (${why})` : 'ещё не построен'}${buildingNote(sem.buildState(idx.root) || st) || ' — запустите semantic_index action=build'}; пока только ключевые слова`);
         vec = null; mode = 'keyword';
       } else if (vec && vec.coverage.embedded < vec.coverage.total) {
         notes.push(`семантический индекс неполный: ${vec.coverage.embedded} из ${vec.coverage.total} фрагментов${buildingNote(sem.buildState(idx.root))}`);
@@ -721,7 +722,7 @@ export async function semanticIndex(idx, a = {}, { env = process.env } = {}) {
   const cfg = sem.loadConfig(idx.root, env);
   const action = ['status', 'build', 'rebuild'].includes(a.action) ? a.action : 'status';
   const lines = [];
-  lines.push(`Сервер: ${cfg.baseUrl} · эмбеддинги: ${cfg.embedModel} (d=${cfg.dimensions}) · переранжирование: ${cfg.rerankBackend}` +
+  lines.push(`Сервер: ${cfg.baseUrl} · эмбеддинги: ${cfg.embedModel} (d=${cfg.dimensions}, ${sem.eosLabel(cfg)}) · переранжирование: ${cfg.rerankBackend}` +
     `${cfg.rerankBackend !== 'none' ? ` (${cfg.rerankModel}${cfg.rerankBaseUrl !== cfg.baseUrl ? `, ${cfg.rerankBaseUrl}` : ''})` : ''}`);
   lines.push(`Включено: ${cfg.enabled === 'auto' ? 'авто (если сервер отвечает)' : cfg.enabled ? 'да' : 'нет'} · токен API: ${cfg.apiKey ? `задан (${cfg.apiKeyEnv})` : 'не задан'}`);
   lines.push(`Хранилище: ${cfg.storeDir}`);
@@ -752,7 +753,10 @@ export async function semanticIndex(idx, a = {}, { env = process.env } = {}) {
     const seen = new Set();
     for (const f of Object.values(man.files)) for (const c of f.c) { if (seen.has(c[0])) continue; seen.add(c[0]); total++; if (store.has(c[0])) have++; }
     lines.push(`Индекс проекта: ${have} из ${total} фрагментов с векторами (${total ? Math.round((have / total) * 100) : 0}%), файлов ${Object.keys(man.files).length}, обновлён ${man.updated}`);
-  } else lines.push('Индекс проекта: ещё не построен.');
+  } else {
+    const why = sem.manifestMismatch(cfg, idx.root);
+    lines.push(why ? `Индекс проекта: [!] ${why} — устарел, строится заново (semantic_index build или автоматически при поиске).` : 'Индекс проекта: ещё не построен.');
+  }
   lines.push(`Векторов в хранилище: ${store.size}`);
   const st = sem.buildState(idx.root);
   if (st) {
@@ -848,7 +852,7 @@ async function cli(argv) {
   if (cfg.enabled === false) { console.error('Семантический поиск выключен (SEMANTIC_SEARCH=0 / semanticSearch.enabled=false).'); return 3; }
   const p = await sem.probe(cfg, { fresh: true });
   if (!p.ok) { console.error(`Сервер эмбеддингов недоступен: ${cfg.baseUrl} — ${p.error}`); return 3; }
-  console.log(`Построение индекса ${root} → ${cfg.storeDir} (${cfg.embedModel}, d=${cfg.dimensions})`);
+  console.log(`Построение индекса ${root} → ${cfg.storeDir} (${cfg.embedModel}, d=${cfg.dimensions}, ${sem.eosLabel(cfg)})`);
   let lastLog = 0;
   const st = sem.startBuild(root, () => semanticSources(idx, cfg), cfg, { force: argv.includes('--force'), readText,
     log: (m) => { if (Date.now() - lastLog > 5000 || !/^\d+\/\d+$/.test(m)) { lastLog = Date.now(); console.log(`  ${m}`); } } });

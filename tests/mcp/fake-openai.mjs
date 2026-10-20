@@ -27,7 +27,7 @@ function overlap(q, d) {
 }
 
 export function startFake(opts = {}) {
-  const stats = { embedInputs: 0, embedCalls: 0, responses: 0, rerank: 0, maxOut: [], auth: [] };
+  const stats = { embedInputs: 0, embedCalls: 0, responses: 0, rerank: 0, maxOut: [], auth: [], inputs: [] };
   const server = createServer((req, res) => {
     let body = '';
     req.on('data', (c) => { body += c; });
@@ -48,6 +48,7 @@ export function startFake(opts = {}) {
           if (opts.failEmbed) return send(500, { error: { message: 'boom' } });
           if (opts.embedModelMissing && j.model !== opts.embedModelMissing) return send(404, { error: { message: `model ${j.model} not found` } });
           stats.embedCalls++; stats.embedInputs += input.length;
+          for (const t of input) stats.inputs.push({ model: j.model, text: t });
           if (input.some((t) => t.length > (opts.maxInputChars || 1e9))) return send(400, { error: { message: 'input too long for context' } });
           return send(200, { object: 'list', data: input.map((t, index) => ({ object: 'embedding', index, embedding: bagVector(t, opts.embedDim || 128) })) });
         }

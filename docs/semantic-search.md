@@ -155,6 +155,8 @@ install.cmd -Project D:\1c\my-config -WithSemantic
 | — | `LMSTUDIO_API_KEY` | — | токен (только переменная среды; имя меняет `apiKeyEnv`) |
 | `embedModel` | `SEMANTIC_EMBED_MODEL` | `qwen3-embedding-4b` | идентификатор модели эмбеддингов |
 | `dimensions` | `SEMANTIC_EMBED_DIM` | 1024 | размерность (MRL: вектор обрезается и нормируется) |
+| `appendEos` | `SEMANTIC_EMBED_APPEND_EOS` | `auto` | дописывать токен конца к каждому входу эмбеддингов: `auto` — для моделей `qwen3-embedding` (по имени, без учёта регистра), `true`/`false` — всегда/никогда (см. «Предупреждение … is not SEP») |
+| `eosToken` | `SEMANTIC_EMBED_EOS_TOKEN` | `<\|endoftext\|>` | какой токен дописывать |
 | `rerankBackend` | `SEMANTIC_RERANK_BACKEND` | `lmstudio-logprobs` | `lmstudio-logprobs`, `rerank-api`, `none` |
 | `rerankModel` | `SEMANTIC_RERANK_MODEL` | `qwen3-reranker-4b` | идентификатор реранкера |
 | `rerankBaseUrl` | `SEMANTIC_RERANK_URL` | = `baseUrl` | отдельный сервер реранкера |
@@ -199,6 +201,46 @@ node mcp\code-search.mjs --semantic-status --root D:\1c\my-config
 клоны одной конфигурации (и разные пользователи с общим хранилищем) один и тот же код второй раз не считают.
 Ориентир: ~150 тыс. фрагментов — ~150 МБ векторов (int8), поиск ~1 с.
 
+## Предупреждение «last token … is not SEP»
+
+При построении индекса в логе LM Studio (llama.cpp) могло повторяться:
+
+```text
+[WARNING] At least one last token in strings embedded is not SEP. 'tokenizer.ggml.add_eos_token' should be set to 'true' in the GGUF header
+```
+
+Причина: Qwen3-Embedding берёт вектор **последнего токена** (last-token pooling), и этим токеном должен быть
+`<|endoftext|>`. В исходной модели его добавляет токенизатор, а во многих GGUF (судя по этому предупреждению — в том числе
+`majentik/text-embedding-qwen3-embedding-4b` и ранние официальные `Qwen/Qwen3-Embedding-4B-GGUF`) флаг
+`tokenizer.ggml.add_eos_token` не выставлен, и llama.cpp токен не дописывает — векторы получаются хуже.
+Источники: карточка [Qwen/Qwen3-Embedding-4B-GGUF](https://huggingface.co/Qwen/Qwen3-Embedding-4B-GGUF/commit/e9f76f6a3091c96c04e53d106b5040890f484644)
+(«Qwen3 Embedding models default to using the last token as `<|endoftext|>`, so you need to manually append this
+token to the end of your own input context»), обсуждение в llama.cpp
+[ggml-org/llama.cpp#14252](https://github.com/ggml-org/llama.cpp/issues/14252), исправление токенизатора исходной
+модели — [Qwen3-Embedding-0.6B, PR #2](https://huggingface.co/Qwen/Qwen3-Embedding-0.6B/discussions/2).
+
+Что сделано: `1c-search` (и `check-lmstudio.ps1`) сами дописывают `<|endoftext|>` в конец **каждого** входа —
+и фрагментов кода, и запросов — если имя модели содержит `qwen3-embedding` (`appendEos: auto`). Если текст уже
+кончается этим токеном, второй раз он не добавляется; усечение длинных фрагментов делается до добавления, так что
+токен всегда последний. Перекачивать или править GGUF не нужно.
+
+**После `git pull` индекс перестраивается автоматически.** Настройка EOS входит в идентичность набора векторов
+(каталог `vectors\<модель>-d<размерность>-eos…`) и в хэш фрагментов, поэтому старые векторы (без EOS) не
+используются: `semantic_index` покажет «построен без EOS … устарел», а первый `semantic_search` запустит
+построение в фоне (пока оно идёт — поиск по ключевым словам и готовой части). Быстрее — сразу из консоли:
+
+```powershell
+node mcp\code-search.mjs --semantic-build --root D:\1c\my-config
+```
+
+Старые векторы остаются на диске, но не читаются; освободить место — удалить каталог без `-eos` в имени:
+`%LOCALAPPDATA%\1c-opencode\semantic\vectors\qwen3-embedding-4b-d1024` (или в `SEMANTIC_STORE_DIR`), когда
+никто не строит индекс.
+
+Если GGUF уже с `add_eos_token = true` (предупреждения нет и без исправления) — поставьте `appendEos: false`, иначе
+токен окажется в конце дважды. Если предупреждение не пропало, значит сервер не распознаёт `<|endoftext|>` в тексте
+как спецтокен: проверьте версию движка (`lms runtime update llama.cpp`).
+
 ## Несколько пользователей (RDP)
 
 - LM Studio — один на сервер, установлен у одного пользователя, слушает 127.0.0.1:1234. Модели загружены один раз,
@@ -236,8 +278,8 @@ $env:SEMANTIC_RERANK_BACKEND = 'rerank-api'; $env:SEMANTIC_RERANK_URL = 'http://
   запросов и макеты не индексируются.
 - Первое построение на большой конфигурации занимает от десятков минут до нескольких часов (скорость GPU);
   поиском можно пользоваться сразу — по готовой части.
-- Смена модели или `dimensions` — новый набор векторов (старые остаются на диске; удалить можно каталог
-  `vectors\<модель>-d<размерность>`).
+- Смена модели, `dimensions` или `appendEos`/`eosToken` — новый набор векторов (старые остаются на диске;
+  удалить можно каталог `vectors\<модель>-d<размерность>[-eos…]`).
 - Переранжирование 30 кандидатов — 1–5 с на запрос; `rerank: false` в вызове или `rerankBackend: none` — без него.
 - Если реранкер выдаёт ошибку конфигурации (`<think>`, нет logprobs, нет модели, нет токена), переранжирование
   отключается на 60 с, поиск продолжается без него с пометкой `[!]`.

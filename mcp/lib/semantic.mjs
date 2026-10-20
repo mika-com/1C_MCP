@@ -30,6 +30,11 @@ export const DEFAULTS = {
   apiKeyEnv: 'LMSTUDIO_API_KEY',
   embedModel: 'qwen3-embedding-4b',
   dimensions: 1024,
+  // Qwen3-Embedding: пулинг по последнему токену, который должен быть <|endoftext|>; многие GGUF не ставят
+  // tokenizer.ggml.add_eos_token, и llama.cpp/LM Studio его не добавляют (предупреждение «last token … is not SEP»).
+  // auto — дописывать для моделей qwen3-embedding; true/false — всегда/никогда.
+  appendEos: 'auto',
+  eosToken: '<|endoftext|>',
   rerankBackend: 'lmstudio-logprobs',
   rerankModel: 'qwen3-reranker-4b',
   rerankBaseUrl: '',
@@ -101,6 +106,8 @@ export function loadConfig(root, env = process.env) {
     apiKeyEnv: str(p.apiKeyEnv) || DEFAULTS.apiKeyEnv,
     embedModel: pick(['SEMANTIC_EMBED_MODEL'], 'embedModel', str),
     dimensions: Math.max(32, Math.round(pick(['SEMANTIC_EMBED_DIM'], 'dimensions', num))),
+    appendEos: pick(['SEMANTIC_EMBED_APPEND_EOS'], 'appendEos', enabledVal),
+    eosToken: pick(['SEMANTIC_EMBED_EOS_TOKEN'], 'eosToken', str),
     rerankBackend: pick(['SEMANTIC_RERANK_BACKEND'], 'rerankBackend', str),
     rerankModel: pick(['SEMANTIC_RERANK_MODEL'], 'rerankModel', str),
     rerankBaseUrl: pick(['SEMANTIC_RERANK_URL'], 'rerankBaseUrl', str),
@@ -207,10 +214,32 @@ export function normalize(v, dim) {
 // Qwen3-Embedding: инструкция только у запроса; документы — как есть (карточка модели)
 export function queryText(cfg, q) { return `Instruct: ${cfg.queryInstruction}\nQuery: ${q}`; }
 
+// Токен конца, который дописывается к каждому входу эмбеддингов ('' — не дописывать).
+// Qwen3-Embedding-GGUF: «Qwen3 Embedding models default to using the last token as <|endoftext|>, so you need to
+// manually append this token to the end of your own input context» (карточка Qwen/Qwen3-Embedding-4B-GGUF);
+// llama.cpp: https://github.com/ggml-org/llama.cpp/issues/14252
+export const QWEN3_EMBED_RE = /qwen3[-_. ]?embedding/i;
+export function embedEos(cfg) {
+  const tok = cfg.eosToken || DEFAULTS.eosToken;
+  if (cfg.appendEos === 'auto' || cfg.appendEos === undefined) return QWEN3_EMBED_RE.test(cfg.embedModel || '') ? tok : '';
+  return cfg.appendEos ? tok : '';
+}
+// Усечение делается раньше (фрагменты, повтор с половиной текста), EOS дописывается последним — всегда в конце
+export function withEos(text, eos) {
+  if (!eos) return text;
+  const t = String(text).replace(/\s+$/, '');
+  return t.endsWith(eos) ? t : t + eos;
+}
+export function eosLabel(cfg) {
+  const e = embedEos(cfg);
+  return e ? `EOS ${e} (${cfg.appendEos === true ? 'включено явно' : 'авто'})` : `без EOS${cfg.appendEos === false ? ' (выключено явно)' : ''}`;
+}
+
 export async function embed(cfg, texts, { timeoutMs, signal } = {}) {
+  const eos = embedEos(cfg);
   const j = await httpJson(`${cfg.baseUrl}/embeddings`, {
     method: 'POST', apiKey: cfg.apiKey, timeoutMs: timeoutMs || cfg.timeoutMs, signal,
-    body: { model: cfg.embedModel, input: texts, encoding_format: 'float' },
+    body: { model: cfg.embedModel, input: texts.map((t) => withEos(t, eos)), encoding_format: 'float' },
   });
   const data = Array.isArray(j.data) ? [...j.data] : [];
   if (data.length !== texts.length) throw new Error(`сервер вернул ${data.length} векторов вместо ${texts.length}`);
@@ -228,10 +257,13 @@ export async function embed(cfg, texts, { timeoutMs, signal } = {}) {
 // Векторное хранилище
 // ---------------------------------------------------------------------------
 const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9._-]+/g, '_').slice(0, 80);
-export const vectorDir = (cfg) => join(cfg.storeDir, 'vectors', `${slug(cfg.embedModel)}-d${cfg.dimensions}`);
+// Набор векторов = модель + размерность + EOS: векторы без EOS и с EOS разные и не смешиваются
+const eosTag = (eos) => (eos ? `-eos${createHash('sha1').update(eos).digest('hex').slice(0, 6)}` : '');
+export const vectorDir = (cfg) => join(cfg.storeDir, 'vectors', `${slug(cfg.embedModel)}-d${cfg.dimensions}${eosTag(embedEos(cfg))}`);
 export const manifestFile = (cfg, root) =>
   join(cfg.storeDir, 'projects', `${createHash('sha1').update(resolve(root).toLowerCase()).digest('hex').slice(0, 16)}.json`);
-export const hashText = (text) => createHash('sha1').update(`${CHUNK_FORMAT}\n${text}`).digest('hex');
+// Хэш фрагмента учитывает EOS: без EOS — прежний формат (старые векторы других моделей остаются годными)
+export const hashText = (text, eos = '') => createHash('sha1').update(`${CHUNK_FORMAT}\n${eos ? `eos:${eos}\n` : ''}${text}`).digest('hex');
 
 function quantize(v) {
   let max = 0;
@@ -404,15 +436,25 @@ export function loadManifest(cfg, root) {
   if (c && c.mtimeMs === st.mtimeMs && c.size === st.size) return c.data;
   try {
     const data = JSON.parse(readFileSync(f, 'utf8'));
-    if (data.version !== MANIFEST_VERSION || data.format !== CHUNK_FORMAT || data.model !== cfg.embedModel || data.dim !== cfg.dimensions) return null;
+    if (data.version !== MANIFEST_VERSION || data.format !== CHUNK_FORMAT || data.model !== cfg.embedModel || data.dim !== cfg.dimensions ||
+      (data.eos || '') !== embedEos(cfg)) return null;   // сменилась модель/размерность/EOS — индекс строится заново
     manifests.set(f, { mtimeMs: st.mtimeMs, size: st.size, data });
     return data;
   } catch { return null; }
 }
+// Почему манифест не подходит (для статуса): '' — подходит или его нет
+export function manifestMismatch(cfg, root) {
+  let data;
+  try { data = JSON.parse(readFileSync(manifestFile(cfg, root), 'utf8')); } catch { return ''; }
+  if (data.model !== cfg.embedModel || data.dim !== cfg.dimensions) return `построен для ${data.model} d=${data.dim}`;
+  if ((data.eos || '') !== embedEos(cfg)) return data.eos ? `построен с EOS ${data.eos}` : 'построен без EOS (до исправления пулинга Qwen3-Embedding)';
+  if (data.version !== MANIFEST_VERSION || data.format !== CHUNK_FORMAT) return 'старый формат';
+  return '';
+}
 function saveManifest(cfg, root, files, extra = {}) {
   const f = manifestFile(cfg, root);
   mkdirSync(join(f, '..'), { recursive: true });
-  const data = { version: MANIFEST_VERSION, format: CHUNK_FORMAT, model: cfg.embedModel, dim: cfg.dimensions,
+  const data = { version: MANIFEST_VERSION, format: CHUNK_FORMAT, model: cfg.embedModel, dim: cfg.dimensions, eos: embedEos(cfg),
     root: resolve(root), updated: new Date().toISOString(), ...extra, files };
   atomicWrite(f, JSON.stringify(data));
   manifests.delete(f);
@@ -424,7 +466,7 @@ function saveManifest(cfg, root, files, extra = {}) {
 // source: { kind:'module', file, rel, moduleId, objTitle?, objSyn?, methods } | { kind:'object', file, rel, title, syn, attrs, ts }
 function clip(s, n) { return s.length > n ? `${s.slice(0, n)}\n// … (обрезано)` : s; }
 
-export function moduleChunks(text, src, maxChars) {
+export function moduleChunks(text, src, maxChars, eos = '') {
   const lines = text.split(/\r?\n/);
   const out = [];
   const head = `Модуль: ${src.moduleId}` + (src.objSyn ? `\nОбъект: ${src.objTitle} «${src.objSyn}»` : '');
@@ -438,24 +480,24 @@ export function moduleChunks(text, src, maxChars) {
     }
     const body = lines.slice(from, Math.min(lines.length, m.end)).join('\n');
     const textOut = clip(`${head}\n${comments.length ? comments.join('\n') + '\n' : ''}${body}`, maxChars);
-    out.push({ h: hashText(textOut), text: textOut, k: m.kind === 'Функция' ? 'f' : 'p', n: m.name, l: m.line, e: m.end,
+    out.push({ h: hashText(textOut, eos), text: textOut, k: m.kind === 'Функция' ? 'f' : 'p', n: m.name, l: m.line, e: m.end,
       x: m.export ? 1 : 0 });
   }
   return out;
 }
 
-export function objectChunk(src, maxChars) {
+export function objectChunk(src, maxChars, eos = '') {
   const parts = [`${src.title}${src.syn && src.syn !== src.name ? ` «${src.syn}»` : ''}`];
   const fmt = ([n, s]) => (s && s !== n ? `${n} «${s}»` : n);
   if (src.attrs?.length) parts.push(`Реквизиты: ${src.attrs.map(fmt).join(', ')}`);
   for (const t of src.ts || []) parts.push(`Табличная часть ${fmt([t.name, t.syn])}: ${t.attrs.map(fmt).join(', ')}`);
   const text = clip(parts.join('\n'), maxChars);
-  return { h: hashText(text), text, k: 'o', n: src.title, l: 1, e: 1, x: 0 };
+  return { h: hashText(text, eos), text, k: 'o', n: src.title, l: 1, e: 1, x: 0 };
 }
 
-export function chunkSource(src, maxChars, readText) {
-  if (src.kind === 'object') return [objectChunk(src, maxChars)];
-  return moduleChunks(readText(src.file), src, maxChars);
+export function chunkSource(src, maxChars, readText, eos = '') {
+  if (src.kind === 'object') return [objectChunk(src, maxChars, eos)];
+  return moduleChunks(readText(src.file), src, maxChars, eos);
 }
 
 // ---------------------------------------------------------------------------
@@ -519,7 +561,7 @@ async function runBuild(root, sourcesFn, cfg, state, { force = false, readText, 
       const same = prev && prev.m === st.mtimeMs && prev.s === st.size && prev.id === (src.moduleId || src.title);
       if (same && prev.c.every((c) => store.has(c[0]))) { files[src.rel] = prev; continue; }
       let chunks;
-      try { chunks = chunkSource(src, cfg.maxChunkChars, readText); } catch { continue; }
+      try { chunks = chunkSource(src, cfg.maxChunkChars, readText, embedEos(cfg)); } catch { continue; }
       if (!same) state.changed++;
       files[src.rel] = { m: st.mtimeMs, s: st.size, id: src.moduleId || src.title, c: chunks.map((c) => [c.h, c.k, c.n, c.l, c.e, c.x]) };
       for (const c of chunks) if (!store.has(c.h)) pending.set(c.h, c.text);

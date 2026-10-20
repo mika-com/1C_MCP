@@ -5,7 +5,8 @@
 .DESCRIPTION
     1. GET /v1/models — сервер отвечает, загружены ли модели с нужными идентификаторами.
     2. POST /v1/embeddings — эмбеддинги: размерность, запрос (с инструкцией Qwen3-Embedding) ближе к подходящему
-       фрагменту кода, чем к неподходящему.
+       фрагменту кода, чем к неподходящему. Для Qwen3-Embedding к каждому входу дописывается <|endoftext|>, как
+       это делает 1c-search (пулинг по последнему токену; -AppendEos / SEMANTIC_EMBED_APPEND_EOS).
     3. Реранкер:
        lmstudio-logprobs — POST /v1/responses с промптом Qwen3-Reranker на подходящей и неподходящей паре,
          P(yes) из logprobs первого токена (ждём > 0.5 и < 0.5; хорошо — > 0.8 и < 0.2);
@@ -28,6 +29,8 @@ param(
     [string]$RerankModel,
     [ValidateSet('lmstudio-logprobs', 'rerank-api', 'none', '')][string]$RerankBackend = '',
     [string]$RerankUrl,
+    # auto — дописывать <|endoftext|> для моделей qwen3-embedding (как 1c-search); true/false — всегда/никогда
+    [ValidateSet('auto', 'true', 'false', '')][string]$AppendEos = '',
     [ValidateRange(5, 600)][int]$TimeoutSec = 120
 )
 
@@ -41,6 +44,14 @@ $EmbedModel = Get-FirstValue @($EmbedModel, $env:SEMANTIC_EMBED_MODEL, 'qwen3-em
 $RerankModel = Get-FirstValue @($RerankModel, $env:SEMANTIC_RERANK_MODEL, 'qwen3-reranker-4b')
 $RerankBackend = Get-FirstValue @($RerankBackend, $env:SEMANTIC_RERANK_BACKEND, 'lmstudio-logprobs')
 $RerankUrl = (Get-FirstValue @($RerankUrl, $env:SEMANTIC_RERANK_URL, $BaseUrl)).TrimEnd('/')
+$eosMode = (Get-FirstValue @($AppendEos, $env:SEMANTIC_EMBED_APPEND_EOS, 'auto')).ToLowerInvariant()
+$eosToken = Get-FirstValue @($env:SEMANTIC_EMBED_EOS_TOKEN, '<|endoftext|>')
+$eos = switch -Regex ($eosMode) {
+    '^auto$' { if ($EmbedModel -match '(?i)qwen3[-_. ]?embedding') { $eosToken } else { '' } }
+    '^(0|false|no|off)$' { '' }
+    default { $eosToken }
+}
+function Add-EosToken([string]$Text) { if (-not $eos -or $Text.TrimEnd().EndsWith($eos)) { return $Text } return $Text.TrimEnd() + $eos }
 
 function Write-Ok([string]$Text) { Write-Host "  [OK] $Text" -ForegroundColor Green }
 function Write-Bad([string]$Text) { Write-Host "  [!!] $Text" -ForegroundColor Red }
@@ -91,7 +102,7 @@ $rerankSystem = 'Judge whether the Document meets the requirements based on the 
 
 Write-Host ''
 Write-Host "=== Проверка сервера моделей для 1c-search: $BaseUrl ===" -ForegroundColor Cyan
-Write-Host "    эмбеддинги: $EmbedModel; реранкер: $RerankBackend$(if ($RerankBackend -ne 'none') { " ($RerankModel, $RerankUrl)" })"
+Write-Host "    эмбеддинги: $EmbedModel ($(if ($eos) { "с EOS $eos" } else { 'без EOS' })); реранкер: $RerankBackend$(if ($RerankBackend -ne 'none') { " ($RerankModel, $RerankUrl)" })"
 if ($env:LMSTUDIO_API_KEY) { Write-Note 'Токен API: задан (LMSTUDIO_API_KEY)' } else { Write-Note 'Токен API: не задан (нужен, только если в LM Studio включено Require Authentication)' }
 
 # ---------- 1. /models ----------
@@ -119,7 +130,9 @@ Write-Host ''
 Write-Host '2. Эмбеддинги (/v1/embeddings)' -ForegroundColor Cyan
 $embOk = $false
 $sw = [Diagnostics.Stopwatch]::StartNew()
-$e = Invoke-Api -Method POST -Url "$BaseUrl/embeddings" -Body @{ model = $EmbedModel; input = @("Instruct: $queryInstruction`nQuery: $query", $docPos, $docNeg) }
+if ($eos) { Write-Note "EOS: к каждому входу дописывается $eos (appendEos=$eosMode) — как в 1c-search (против предупреждения LM Studio «last token … is not SEP»)" }
+else { Write-Note "EOS: не дописывается (appendEos=$eosMode, модель $EmbedModel)" }
+$e = Invoke-Api -Method POST -Url "$BaseUrl/embeddings" -Body @{ model = $EmbedModel; input = @((Add-EosToken "Instruct: $queryInstruction`nQuery: $query"), (Add-EosToken $docPos), (Add-EosToken $docNeg)) }
 $sw.Stop()
 if (-not $e.Ok) {
     Write-Bad "Ошибка: $($e.Error) $($e.Body)"

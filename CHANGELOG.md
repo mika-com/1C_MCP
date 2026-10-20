@@ -30,6 +30,16 @@
 - `1c-search`: таймаут вызова в конфиге OpenCode — `execution: 120000`; `index_status` показывает состояние
   семантического индекса. Без LM Studio поведение прежнее, `semantic_search` отвечает по ключевым словам с `[!]`.
 
+### Исправлено
+- Qwen3-Embedding в LM Studio: к каждому входу эмбеддингов (фрагменты и запросы) дописывается `<|endoftext|>` —
+  модель берёт вектор последнего токена, а GGUF без `tokenizer.ggml.add_eos_token` (например,
+  `majentik/text-embedding-qwen3-embedding-4b`) его не добавляют; в логе LM Studio было
+  «At least one last token in strings embedded is not SEP». Настройка `appendEos` (`SEMANTIC_EMBED_APPEND_EOS`,
+  `auto` — для моделей `qwen3-embedding`, `true`/`false`) и `eosToken` (`SEMANTIC_EMBED_EOS_TOKEN`); без повторного
+  добавления, усечение — до токена. Учтено в наборе векторов и хэше фрагментов: **после обновления индекс
+  перестраивается автоматически** (или `node mcp/code-search.mjs --semantic-build --root <проект>`), старые векторы
+  не используются. `semantic_index` и `check-lmstudio.ps1` (`-AppendEos`) показывают настройку.
+
 ## [1.0.0] — 2026-10-19
 
 Первый публичный выпуск 1C-Agent — агента 1С:Предприятие 8.3 для OpenCode v2 (Desktop и CLI).
