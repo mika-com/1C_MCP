@@ -6,6 +6,7 @@ import * as browser from '../../browser.mjs';
 import { out, die } from '../util.mjs';
 import { SESSION_FILE, cleanup } from '../session.mjs';
 import { handleRequest } from '../server.mjs';
+import { SESSION_TOKEN, writeSessionFile, armIdleStop, idleMinutes } from '../keepalive.mjs';  // OpenCode
 
 export async function cmdStart(url) {
   if (!url) die('Usage: node src/run.mjs start <url>');
@@ -27,9 +28,12 @@ export async function cmdStart(url) {
       port,
       url,
       pid: process.pid,
-      startedAt: new Date().toISOString()
+      startedAt: new Date().toISOString(),
+      token: SESSION_TOKEN,          // OpenCode: без токена сервер отвечает 403
+      idleMin: idleMinutes(),
     };
-    writeFileSync(SESSION_FILE, JSON.stringify(session, null, 2));
+    writeSessionFile(SESSION_FILE, session);
+    armIdleStop(async () => { await browser.disconnect(); cleanup(); });
     out({ ok: true, message: 'Browser ready', port, ...state });
   });
 

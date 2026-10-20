@@ -10,11 +10,12 @@ export async function cmdStatus() {
     process.exit(1);
   }
   const sess = JSON.parse(readFileSync(SESSION_FILE, 'utf-8'));
+  Object.defineProperty(sess, 'token', { enumerable: false });  // OpenCode: токен не печатаем
   // The session file is written only after connect() finished, but the server process may have
   // died since (crash/reboot) and left the file behind. Don't trust the file — probe the
   // in-process /status endpoint for real liveness.
   try {
-    const resp = await fetch(`http://127.0.0.1:${sess.port}/status`, { signal: AbortSignal.timeout(2000) });
+    const resp = await fetch(`http://127.0.0.1:${sess.port}${sess.token ? `/${sess.token}` : ''}/status`, { signal: AbortSignal.timeout(2000) });
     const body = await resp.json();
     if (body.connected) {
       out({ ok: true, ready: true, ...sess });

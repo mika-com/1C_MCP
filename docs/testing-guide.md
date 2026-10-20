@@ -7,7 +7,7 @@
 
 | Задача | Инструмент | Команда / агент | Тесты | Отчёты |
 |--------|-----------|-----------------|-------|--------|
-| Быстрая проверка в браузере, воспроизведение ошибки | `web-test` (`run`/`exec`) | `/1c-webtest`, `1c-tester` | разовый скрипт | `build/reports/web/` |
+| Быстрая проверка в браузере, воспроизведение ошибки | `web-test` (`open` + `exec` по шагам, `run` — сценарий целиком) | `/1c-webtest`, `1c-tester` | разовый скрипт | `build/reports/web/` |
 | Регресс по веб-клиенту | `web-test` (`test`) | `1c-test-author` пишет, `1c-tester` прогоняет | `tests/web/` | `build/reports/web/allure`, `junit.xml` |
 | Приёмочные BDD-сценарии, тонкий клиент | Vanessa Automation через `vrunner run enterprise` | `/1c-bdd`, `1c-test-author` | `features/**/*.feature` | `build/reports/va/` |
 | Проект уже на Vanessa-ADD | `vrunner test vanessa` | навык `vrunner` | `features/` | `build/reports/` |

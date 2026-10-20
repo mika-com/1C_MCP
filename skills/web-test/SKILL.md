@@ -15,6 +15,12 @@ Automates user interactions with 1C:Enterprise web client via Playwright — nav
 ```bash
 RUN="{SKILL_DIR}/scripts/run.mjs"
 
+# Step by step (OpenCode): open once, then one exec per action — the browser stays open
+node $RUN open http://localhost:8081/bpdemo
+node $RUN exec step1.js
+node $RUN exec step2.js
+node $RUN stop                  # only when the whole task is done
+
 # One-shot: opens browser → runs script → closes browser → exits
 node $RUN run http://localhost:8081/bpdemo test-scenario.js
 
@@ -46,7 +52,9 @@ Use `/web-publish` first if the database is not published.
 
 ## Execution modes
 
-### Autonomous mode (preferred for complete scenarios)
+### Autonomous mode (a complete scenario in ONE script)
+
+`run` launches a new browser, logs in to 1C (30-60 s), runs the script and closes the browser. **Never call `run` once per step** — every call opens and closes 1C again. For anything step by step (look at the form, then decide the next action) use the interactive mode below.
 
 ```bash
 node $RUN run <url> script.js   # exits when done, no session
@@ -55,10 +63,10 @@ node $RUN run <url> script.js   # exits when done, no session
 ### Interactive mode (step-by-step development)
 
 ```bash
-# 1. Start session in the background — `start` stays running as the server, so don't wait on
-#    its stdout. Poll `status` instead: it exits 0 only once the session is loaded and live.
-node $RUN start <url>            # shell с background: true
-until node $RUN status >/dev/null 2>&1; do sleep 2; done   # exit 0 = ready
+# 1. Open the session once. `open` starts the browser server as a separate background process,
+#    waits until 1C is loaded and returns JSON — run it as an ordinary shell call (no background
+#    flag, no polling). Calling `open` again with the same URL returns the live session.
+node $RUN open <url>
 
 # 2. Execute scripts against running session
 cat <<'SCRIPT' | node $RUN exec -
@@ -78,11 +86,11 @@ WEB_TEST_EXEC_TIMEOUT_MS=7200000 node $RUN exec script.js
 # 3. Screenshot
 node $RUN shot result.png
 
-# 4. Stop (logout + close)
+# 4. Stop (logout + close) — only when the whole task is done, not after each step
 node $RUN stop
 ```
 
-`start` runs an HTTP server in background. Use `exec`/`shot`/`stop` from other shells.
+**Session lifetime (OpenCode).** The OpenCode shell can end the processes of a call when the call returns (and does at its 2-minute timeout), so `start` run as an ordinary call dies together with the browser. `open` detaches the server, so the same browser and the same 1C seance serve every following `exec`/`shot` — across shell calls, without `background: true`. Do not close the session between steps and do not run `stop` + `open` to "refresh" it; if something looks stuck, use `closeForm()` or `getFormState()`. `exec` without a session fails with "No active session" — then call `open` again. The session closes itself after `WEB_TEST_IDLE_MIN` minutes without requests (default 30; `--idle-min=N` for `open`, 0 — never); a running `exec` is never cut. A different URL in `open` closes the old session and opens the new one. The session is per OS user: its file (port and token) is in the user's temp directory, and the server answers only requests with that token, so other users of an RDP server cannot reach your browser. On Windows PowerShell there is no `<<` heredoc: write the script to a file and run `node $RUN exec step.js`. `start` (foreground server) still works for a shell with `background: true`.
 
 ### Writing exec scripts
 

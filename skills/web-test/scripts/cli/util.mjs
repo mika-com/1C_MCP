@@ -100,7 +100,9 @@ export function usage() {
   die(`Usage: node run.mjs <command> [args]
 
 Commands:
-  start <url>              Launch browser and connect to 1C web client
+  open <url>               Open a browser session in the background or reuse the open one;
+                           it stays between exec calls (stop, or idle WEB_TEST_IDLE_MIN=30 min)
+  start <url>              Launch browser and connect to 1C web client (foreground server)
   run <url> <file|->       Autonomous: connect, execute script, disconnect
   exec <file|-> [options]  Execute script (file path or - for stdin)
   shot [file]              Take screenshot (default: shot.png)

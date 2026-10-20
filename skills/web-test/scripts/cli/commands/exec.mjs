@@ -19,7 +19,7 @@ export async function cmdExec(fileOrDash, flags = {}) {
   const timeoutMs = flags.execTimeoutMs ?? 30 * 60 * 1000;
   const result = await new Promise((resolveP, reject) => {
     const req = http.request({
-      hostname: '127.0.0.1', port: sess.port, path: '/exec',
+      hostname: '127.0.0.1', port: sess.port, path: (sess.token ? `/${sess.token}` : '') + '/exec',
       method: 'POST', timeout: timeoutMs, headers,
     }, res => {
       let data = '';

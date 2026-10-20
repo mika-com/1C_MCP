@@ -149,9 +149,46 @@ TEXT_REPLACEMENTS = [
      '| `-Port <порт>` | нет | Порт (по умолчанию — первый свободный, начиная с `8081`; итоговый URL печатается) |'),
     ('читай результат через Read tool', 'читай результат инструментом чтения файлов'),
     ('Read tool', 'инструмент чтения файлов'),
-    # web-test: run_in_background (Claude Code) -> shell OpenCode с background: true
-    ('node $RUN start <url>            # run_in_background=true',
-     'node $RUN start <url>            # shell с background: true'),
+    # web-test: в OpenCode интерактивный сеанс открывает `open` (отдельный процесс, переживает конец вызова
+    # shell); `run` — только для целого сценария одним скриптом: он сам закрывает браузер.
+    ('# One-shot: opens browser → runs script → closes browser → exits\n'
+     'node $RUN run http://localhost:8081/bpdemo test-scenario.js\n',
+     '# Step by step (OpenCode): open once, then one exec per action — the browser stays open\n'
+     'node $RUN open http://localhost:8081/bpdemo\n'
+     'node $RUN exec step1.js\n'
+     'node $RUN exec step2.js\n'
+     'node $RUN stop                  # only when the whole task is done\n\n'
+     '# One-shot: opens browser → runs script → closes browser → exits\n'
+     'node $RUN run http://localhost:8081/bpdemo test-scenario.js\n'),
+    ('### Autonomous mode (preferred for complete scenarios)\n',
+     '### Autonomous mode (a complete scenario in ONE script)\n\n'
+     '`run` launches a new browser, logs in to 1C (30-60 s), runs the script and closes the browser. '
+     '**Never call `run` once per step** — every call opens and closes 1C again. For anything step by step '
+     '(look at the form, then decide the next action) use the interactive mode below.\n'),
+    ("# 1. Start session in the background — `start` stays running as the server, so don't wait on\n"
+     "#    its stdout. Poll `status` instead: it exits 0 only once the session is loaded and live.\n"
+     "node $RUN start <url>            # run_in_background=true\n"
+     "until node $RUN status >/dev/null 2>&1; do sleep 2; done   # exit 0 = ready\n",
+     "# 1. Open the session once. `open` starts the browser server as a separate background process,\n"
+     "#    waits until 1C is loaded and returns JSON — run it as an ordinary shell call (no background\n"
+     "#    flag, no polling). Calling `open` again with the same URL returns the live session.\n"
+     "node $RUN open <url>\n"),
+    ('# 4. Stop (logout + close)\nnode $RUN stop\n',
+     '# 4. Stop (logout + close) — only when the whole task is done, not after each step\nnode $RUN stop\n'),
+    ('`start` runs an HTTP server in background. Use `exec`/`shot`/`stop` from other shells.',
+     '**Session lifetime (OpenCode).** The OpenCode shell can end the processes of a call when the call returns '
+     '(and does at its 2-minute timeout), so `start` run as an ordinary call dies together with the browser. '
+     '`open` detaches the server, so the same browser and the same 1C seance serve every following '
+     '`exec`/`shot` — across shell calls, without `background: true`. Do not close the session between '
+     'steps and do not run `stop` + `open` to "refresh" it; if something looks stuck, use '
+     '`closeForm()` or `getFormState()`. `exec` without a session fails with "No active session" — then '
+     'call `open` again. The session closes itself after `WEB_TEST_IDLE_MIN` minutes without requests '
+     '(default 30; `--idle-min=N` for `open`, 0 — never); a running `exec` is never cut. A different URL in '
+     '`open` closes the old session and opens the new one. The session is per OS user: its file (port and '
+     'token) is in the user\'s temp directory, and the server answers only requests with that token, so '
+     'other users of an RDP server cannot reach your browser. On Windows PowerShell there is no `<<` '
+     'heredoc: write the script to a file and run `node $RUN exec step.js`. `start` (foreground server) '
+     'still works for a shell with `background: true`.'),
     (f'cd "{SKILL_DIR}/scripts" && npm install && npx playwright install chromium', WEB_TEST_SETUP),
     ("Requires Node.js 18+. `npm install` fetches Playwright; `npx playwright install chromium` downloads the browser.",
      "Requires Node.js 18+. `npm install` puts Playwright into `node_modules` of a parent directory of the "
@@ -345,6 +382,81 @@ SCRIPT_PATCHES = {
     ],
 }
 
+# web-test: долгоживущий сеанс браузера (OpenCode). Shell OpenCode завершает процессы обычного вызова, когда
+# вызов закончился, а `run` сам закрывает браузер — при работе по шагам 1С открывалась заново на каждом шаге.
+# Команда `open` (skill-overlays/web-test/.../commands/open.mjs) запускает `start` отдельным процессом и
+# возвращается, когда 1С готова; сервер `start` закрывается по `stop` или после простоя (cli/keepalive.mjs).
+# Запросы к серверу — только с токеном из файла сеанса пользователя (127.0.0.1 общий для всех на RDP-сервере).
+SCRIPT_PATCHES['.mjs'] += [
+    # run.mjs: команда open
+    ("import { cmdTest } from './cli/commands/test.mjs';",
+     "import { cmdTest } from './cli/commands/test.mjs';\n"
+     "import { cmdOpen } from './cli/commands/open.mjs';  // OpenCode: долгоживущий сеанс"),
+    ("  case 'test':   await cmdTest(rawArgs); break;",
+     "  case 'test':   await cmdTest(rawArgs); break;\n"
+     "  case 'open':   await cmdOpen(args[0], rawArgs); break;  // OpenCode: открыть или взять открытый сеанс"),
+    # util.mjs: справка
+    ("  start <url>              Launch browser and connect to 1C web client\n",
+     "  open <url>               Open a browser session in the background or reuse the open one;\n"
+     "                           it stays between exec calls (stop, or idle WEB_TEST_IDLE_MIN=30 min)\n"
+     "  start <url>              Launch browser and connect to 1C web client (foreground server)\n"),
+    # session.mjs: подсказка без сеанса
+    ("die('No active session. Run: node src/run.mjs start <url>');",
+     "die('No active session. Run: node run.mjs open <url> — the browser then stays open between exec calls');"),
+    # start.mjs: токен, файл сеанса 0600, остановка по простою и сигналам
+    ("import { handleRequest } from '../server.mjs';",
+     "import { handleRequest } from '../server.mjs';\n"
+     "import { SESSION_TOKEN, writeSessionFile, armIdleStop, idleMinutes } from '../keepalive.mjs';  // OpenCode"),
+    ("      startedAt: new Date().toISOString()\n    };\n"
+     "    writeFileSync(SESSION_FILE, JSON.stringify(session, null, 2));",
+     "      startedAt: new Date().toISOString(),\n"
+     "      token: SESSION_TOKEN,          // OpenCode: без токена сервер отвечает 403\n"
+     "      idleMin: idleMinutes(),\n"
+     "    };\n"
+     "    writeSessionFile(SESSION_FILE, session);\n"
+     "    armIdleStop(async () => { await browser.disconnect(); cleanup(); });"),
+    # server.mjs: только запросы с токеном; учёт активности для остановки по простою
+    ("import { executeScript } from './exec-context.mjs';\n\nexport async function handleRequest(req, res) {\n  try {",
+     "import { executeScript } from './exec-context.mjs';\n"
+     "import { authorize, trackRequest } from './keepalive.mjs';  // OpenCode\n\n"
+     "export async function handleRequest(req, res) {\n"
+     "  if (!authorize(req)) { res.writeHead(403); res.end('Forbidden'); return; }\n"
+     "  res.on('close', trackRequest());\n"
+     "  try {"),
+    # status.mjs печатает содержимое файла сеанса — без токена
+    ("  const sess = JSON.parse(readFileSync(SESSION_FILE, 'utf-8'));\n",
+     "  const sess = JSON.parse(readFileSync(SESSION_FILE, 'utf-8'));\n"
+     "  Object.defineProperty(sess, 'token', { enumerable: false });  // OpenCode: токен не печатаем\n"),
+    # клиенты: токен первым сегментом пути
+    ("hostname: '127.0.0.1', port: sess.port, path: '/exec',",
+     "hostname: '127.0.0.1', port: sess.port, path: (sess.token ? `/${sess.token}` : '') + '/exec',"),
+    ("`http://127.0.0.1:${sess.port}/",
+     "`http://127.0.0.1:${sess.port}${sess.token ? `/${sess.token}` : ''}/"),
+]
+
+# Файлы порта, которых нет в upstream: копируются поверх собранных навыков (skill-overlays/<навык>/...)
+OVERLAYS = 'skill-overlays'
+
+
+def copy_overlays(dst):
+    src = os.path.join(repo_root(), native(OVERLAYS))
+    copied = []
+    if not os.path.isdir(src):
+        return copied
+    for base, _dirs, files in os.walk(src):
+        for name in files:
+            if name.endswith('.pyc'):
+                continue
+            rel = os.path.relpath(os.path.join(base, name), src)
+            if not os.path.isdir(os.path.join(dst, rel.split(os.sep)[0])):
+                continue   # навыка нет в сборке — не создаём
+            target = os.path.join(dst, rel)
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            shutil.copy2(os.path.join(base, name), target)
+            copied.append(rel)
+    return copied
+
+
 # web-publish: порт по умолчанию 8081 занят другим пользователем/сеансом (RDP) → берём следующий свободный
 # (порт нашего же Apache считается свободным — он будет перезапущен). Явный -Port работает как раньше.
 WEB_PUBLISH_PORT_PY = """    port = args.Port
@@ -445,6 +557,7 @@ def cmd_build(args):
             if new != content:
                 write(md, new)
     patched = patch_scripts(dst)
+    overlays = copy_overlays(dst)
     add_skill_notes(dst)
     apply_runtime(dst, args.runtime, verbose=False)
     own = copy_own_skills(dst)
@@ -462,7 +575,8 @@ def cmd_build(args):
         pass
     write(os.path.join(repo_root(), 'UPSTREAM'), f'{UPSTREAM_URL}\n{sha}\n')
     print(f'Собрано {len(skills)} навыков upstream + {len(own)} своих ({", ".join(own)}) в {REPO_SKILLS}/ '
-          f'(рантайм: {args.runtime}, upstream {sha[:12]}, пропатчено скриптов: {len(patched)})')
+          f'(рантайм: {args.runtime}, upstream {sha[:12]}, пропатчено скриптов: {len(patched)}, '
+          f'файлов порта: {len(overlays)})')
     if not args.upstream:
         shutil.rmtree(upstream, ignore_errors=True)
     return 0

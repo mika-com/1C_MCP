@@ -42,7 +42,10 @@ argument-hint: "[web|bdd|unit] [база]"
    Проверяет `.v8-project.json` → URL, Playwright и Chromium, дисплей (Linux: без `DISPLAY` — `xvfb-run -a`),
    ответ веб-клиента, создаёт `build/reports/web`. Если не хватает Playwright — выполни показанную команду
    установки. Если веб-клиент не отвечает — предложи пользователю навык `web-publish` и не продолжай без ответа.
-2. Разовый сценарий: `node <web-test>/scripts/run.mjs run <url> script.js`. При ошибке `exec`/`run` кладут
+2. Целый сценарий одним скриптом: `node <web-test>/scripts/run.mjs run <url> script.js` — браузер открывается и
+   закрывается в этом же вызове. По шагам — `open <url>` один раз (обычный вызов shell, возвращается, когда 1С
+   готова), затем `exec step.js` на каждое действие: браузер и сеанс 1С сохраняются между вызовами; `stop` — в
+   конце. `run` на каждый шаг не вызывай: 1С будет открываться заново. При ошибке `exec`/`run` кладут
    скриншот в `$TMPDIR/web-test-error-shot.png` (путь в поле `screenshot` ответа) — скопируй его в
    `build/reports/web/`.
 3. Регресс (один прогон → Allure + JUnit):

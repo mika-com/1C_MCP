@@ -6,7 +6,7 @@ import { loadSession } from '../session.mjs';
 
 export async function cmdShot(file) {
   const sess = loadSession();
-  const resp = await fetch(`http://127.0.0.1:${sess.port}/shot`);
+  const resp = await fetch(`http://127.0.0.1:${sess.port}${sess.token ? `/${sess.token}` : ''}/shot`);
   if (!resp.ok) {
     const err = await resp.text();
     die(`Screenshot failed: ${err}`);

@@ -28,6 +28,7 @@ import { cmdShot } from './cli/commands/shot.mjs';
 import { cmdStop } from './cli/commands/stop.mjs';
 import { cmdStatus } from './cli/commands/status.mjs';
 import { cmdTest } from './cli/commands/test.mjs';
+import { cmdOpen } from './cli/commands/open.mjs';  // OpenCode: долгоживущий сеанс
 
 const [,, cmd, ...rawArgs] = process.argv;
 const flags = {
@@ -61,5 +62,6 @@ switch (cmd) {
   case 'stop':   await cmdStop(); break;
   case 'status': await cmdStatus(); break;
   case 'test':   await cmdTest(rawArgs); break;
+  case 'open':   await cmdOpen(args[0], rawArgs); break;  // OpenCode: открыть или взять открытый сеанс
   default:       usage();
 }

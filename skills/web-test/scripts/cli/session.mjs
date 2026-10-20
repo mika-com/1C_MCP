@@ -14,7 +14,7 @@ export const SESSION_FILE = resolve(process.env.WEB_TEST_SESSION_DIR || __wtTmp(
 
 export function loadSession() {
   if (!existsSync(SESSION_FILE)) {
-    die('No active session. Run: node src/run.mjs start <url>');
+    die('No active session. Run: node run.mjs open <url> — the browser then stays open between exec calls');
   }
   return JSON.parse(readFileSync(SESSION_FILE, 'utf-8'));
 }

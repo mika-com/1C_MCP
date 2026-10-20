@@ -186,7 +186,9 @@ python3 skills/print-form/scripts/mxl-render.py <...>/Templates/<Макет>/Ext
 | `tests/mcp/run.mjs`, `tests/mcp/multiuser.mjs` | тесты прокси `1c-bsl` (дерево процессов, таймаут, область индексации) и многопользовательской безопасности |
 | `tests/plugins/bsl-autocheck.mjs` | тесты плагина на поддельном BSL LS (пачки, таймаут, вывод, нет BSL LS) и миграции `lsp.bsl` |
 | `tests/mcp/help.mjs` | тесты `1c-help` на синтетических `.hbk` (`tests/mcp/lib/make-hbk.mjs`, без содержимого справки 1С) |
+| `tests/web-test/session.mjs` | тесты сеанса `web-test` на поддельном браузере: `open` → много `exec` в одном браузере, сеанс переживает конец вызова shell, токен, простой, смена адреса |
 | `scripts/opencode_port.py` | сборка из upstream и установка; ядро — `scripts/port_core.py` |
+| `skill-overlays/` | файлы порта, которых нет в upstream; `build` копирует их в `skills/` (сейчас `web-test`: `open`, `keepalive`) |
 | `docs/` | гайды и спецификации форматов 1С: [quickstart](docs/quickstart.md), [тестирование](docs/testing-guide.md), [индекс спецификаций](docs/1c-specs-index.md); гайды [cf](docs/cf-guide.md), [cfe](docs/cfe-guide.md), [epf](docs/epf-guide.md), [db](docs/db-guide.md), [meta](docs/meta-guide.md), [form](docs/form-guide.md), [skd](docs/skd-guide.md), [mxl](docs/mxl-guide.md), [role](docs/role-guide.md), [subsystem](docs/subsystem-guide.md), [xdto](docs/xdto-guide.md), [web](docs/web-guide.md), [web-test](docs/web-test-guide.md), [.v8-project.json](docs/v8-project-guide.md) |
 
 ## Обновление из upstream

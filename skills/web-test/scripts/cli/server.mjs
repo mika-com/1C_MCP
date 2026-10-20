@@ -4,8 +4,11 @@ import * as browser from '../browser.mjs';
 import { json, readBody } from './util.mjs';
 import { cleanup } from './session.mjs';
 import { executeScript } from './exec-context.mjs';
+import { authorize, trackRequest } from './keepalive.mjs';  // OpenCode
 
 export async function handleRequest(req, res) {
+  if (!authorize(req)) { res.writeHead(403); res.end('Forbidden'); return; }
+  res.on('close', trackRequest());
   try {
     if (req.method === 'POST' && req.url === '/exec') {
       const code = await readBody(req);

@@ -6,7 +6,7 @@ import { loadSession, cleanup } from '../session.mjs';
 export async function cmdStop() {
   const sess = loadSession();
   try {
-    const resp = await fetch(`http://127.0.0.1:${sess.port}/stop`, { method: 'POST' });
+    const resp = await fetch(`http://127.0.0.1:${sess.port}${sess.token ? `/${sess.token}` : ''}/stop`, { method: 'POST' });
     const result = await resp.json();
     out(result);
   } catch {
