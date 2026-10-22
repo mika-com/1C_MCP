@@ -95,7 +95,10 @@ export function updateConfig(config, mcpDir, { remove = false, vrunner = false, 
   for (const k of STALE_SERVERS) delete servers[k];
   for (const s of SERVERS) {
     if (remove) delete servers[s.key];
-    else servers[s.key] = { type: 'local', command: ['node', join(mcpDir, s.file)], timeout: s.timeout };
+    else if (s.key === '1c-search') {
+      // Обёртка переживает падение процесса (код 134, нехватка памяти) и поднимает сервер снова.
+      servers[s.key] = { type: 'local', command: ['node', join(mcpDir, 'restart-stdio.mjs'), join(mcpDir, s.file)], timeout: s.timeout };
+    } else servers[s.key] = { type: 'local', command: ['node', join(mcpDir, s.file)], timeout: s.timeout };
   }
   if (remove) delete servers[VRUNNER.key];
   else {

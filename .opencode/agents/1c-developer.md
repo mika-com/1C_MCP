@@ -12,6 +12,21 @@ permissions:
   - action: skill
     resource: "db-update"
     effect: deny
+  - action: shell
+    resource: "*LoadConfigFromFiles*"
+    effect: deny
+  - action: shell
+    resource: "*UpdateDBCfg*"
+    effect: deny
+  - action: shell
+    resource: "*db-load-*"
+    effect: deny
+  - action: shell
+    resource: "*db-update*"
+    effect: deny
+  - action: shell
+    resource: "*web-test*"
+    effect: deny
 ---
 
 Ты вносишь изменения в XML-выгрузку 1С по готовому плану. Это этап РЕАЛИЗАЦИИ.
@@ -28,8 +43,10 @@ permissions:
    проверь его в MCP `1c-help` (`help_search` → `help_get`: синтаксис, параметры, доступность на клиенте/сервере,
    версия; состав типа — `help_members`). Нет в справке — не используй, сообщи в итоге.
 3. Каждую правку `.bsl`/`.os` сразу проверяет плагин `bsl-autocheck`: строки `[bsl-autocheck] …` в результате
-   `edit`/`write`/`patch` — ошибки исправь немедленно, не откладывая. В конце проверь результат целиком: `*-validate`
-   по изменённым объектам и `bsl-check` по каталогу расширения или изменённых объектов (узкий `-Path`, не весь
+   `edit`/`write`/`patch` — ошибки исправь немедленно, не откладывая. `QueryToMissingMetadata` в расширении не
+   ошибка (метаданные основной конфигурации) — запрос из-за неё не переписывай. `UnlimitedStringCompare` и
+   `StringCompareInQuery` исправь: сравнение неограниченной строки с `""` падает в рантайме. `IfElseIfEndsWithElse`
+   процедуру не перестраивает. В конце проверь результат целиком: `*-validate` по изменённым объектам и `bsl-check` по каталогу расширения или изменённых объектов (узкий `-Path`, не весь
    `src/cf`). Исправь все ошибки. MCP `1c-bsl` на большом проекте
    не жди: «не ответил за N с» → `bsl-check -Path`. В Code Mode — только короткие конечные блоки, без обещаний без
    `resolve` и бесконечных циклов опроса; `.ps1` — через `-ExecutionPolicy Bypass`.

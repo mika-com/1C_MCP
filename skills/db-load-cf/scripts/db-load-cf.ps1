@@ -575,7 +575,7 @@ try {
         $output = $__ib.Output
         $exitCode = $__ib.ExitCode
         if ($exitCode -eq 0) {
-            Write-Host "Configuration loaded successfully from: $InputFile" -ForegroundColor Green
+            Write-Host "Configuration loaded successfully from: $InputFile" -ForegroundColor Green; if ($Extension -or $AllExtensions) { Write-Host "[безопасный режим] Расширение после загрузки включено в безопасном режиме: перехватчики не выполняются. До браузера сними его — db-cfe-admin set-properties <база> -Name <Имя> -SafeMode off (только ibcmd и файловая база). Нет ibcmd или база серверная — остановись и спроси пользователя, веб-клиент не открывай." -ForegroundColor Yellow }
         } else {
             Write-Host "Error loading configuration (code: $exitCode)$(Get-ExitAnnotation $exitCode)" -ForegroundColor Red
         }
@@ -628,7 +628,7 @@ try {
 
     # --- Result ---
     if ($exitCode -eq 0) {
-        Write-Host "Configuration loaded successfully from: $InputFile" -ForegroundColor Green
+        Write-Host "Configuration loaded successfully from: $InputFile" -ForegroundColor Green; if ($Extension -or $AllExtensions) { Write-Host "[безопасный режим] Расширение после загрузки включено в безопасном режиме: перехватчики не выполняются. До браузера сними его — db-cfe-admin set-properties <база> -Name <Имя> -SafeMode off (только ibcmd и файловая база). Нет ibcmd или база серверная — остановись и спроси пользователя, веб-клиент не открывай." -ForegroundColor Yellow }
     } else {
         Write-Host "Error loading configuration (code: $exitCode)$(Get-ExitAnnotation $exitCode)" -ForegroundColor Red
     }

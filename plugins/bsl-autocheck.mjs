@@ -28,6 +28,7 @@ import { tmpdir } from 'node:os';
 import { join, resolve, relative, dirname, isAbsolute, basename, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { findBslLs, bslEnv } from '../own-skills/bsl-check/scripts/bsl-ls.mjs';
+import { adjustForExtension } from '../own-skills/bsl-check/scripts/bsl-diag.mjs';
 import { killTree } from '../mcp/lib/proc-tree.mjs';
 
 const IS_WIN = process.platform === 'win32';
@@ -241,6 +242,9 @@ export function formatResults(results, { root, severity = 'Warning', limit = 20,
     if (r.status === 'failed') { lines.push(`${TAG} ${rel(r.file)}: проверка не выполнена — ${r.message || 'ошибка BSL LS'}.`); continue; }
     if (r.status === 'skipped') { lines.push(`${TAG} ${rel(r.file)}: не проверен — ${r.message}.`); continue; }
     if (r.status !== 'ok') continue;
+    if (r.hiddenMissing) {
+      lines.push(`${TAG} ${rel(r.file)}: QueryToMissingMetadata не показаны (${r.hiddenMissing}) — в расширении это метаданные основной конфигурации, запрос из-за этого кода не переписывай.`);
+    }
     const rows = (r.diags || []).filter((d) => LEVELS.indexOf(d.lvl) <= max)
       .sort((a, b) => LEVELS.indexOf(a.lvl) - LEVELS.indexOf(b.lvl) || a.line - b.line || a.col - b.col);
     const seen = new Set();
@@ -306,6 +310,14 @@ export function createPlugin({ analyze = bslAnalyze, env = process.env } = {}) {
           if (state.missingHinted) return { file, status: 'missing', diags: [] };
           return { file, ...(await checker.check(file)) };
         }));
+        for (const r of results) {
+          if (r.status !== 'ok') continue;
+          let source = '';
+          try { source = readFileSync(r.file, 'utf8'); } catch { source = ''; }
+          const adjusted = adjustForExtension(r.file, r.diags, { source });
+          r.diags = adjusted.rows;
+          r.hiddenMissing = adjusted.hiddenMissing;
+        }
         const text = formatResults(results, { root, severity: settings.severity, limit: settings.limit, timeoutMs: settings.timeoutMs, state });
         if (text) event.result = appendToResult(event.result, text);
       });

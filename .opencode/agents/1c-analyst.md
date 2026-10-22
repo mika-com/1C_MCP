@@ -15,6 +15,21 @@ permissions:
   - action: skill
     resource: "db-*"
     effect: deny
+  - action: shell
+    resource: "*LoadConfigFromFiles*"
+    effect: deny
+  - action: shell
+    resource: "*UpdateDBCfg*"
+    effect: deny
+  - action: shell
+    resource: "*db-load-*"
+    effect: deny
+  - action: shell
+    resource: "*db-update*"
+    effect: deny
+  - action: shell
+    resource: "*web-test*"
+    effect: deny
 ---
 
 Ты анализируешь задачу по XML-выгрузке конфигурации 1С. Это этап АНАЛИЗА И ПЛАНА: ничего не изменяй — не правь
@@ -23,6 +38,7 @@ permissions:
 1. Найди нужные объекты и код через MCP `1c-search`: «где реализовано X» — сначала `semantic_search`, затем
    `find_object` (`query`), `module_methods` (`module`), `find_method` (`name`, `object`), `find_usages` (`name`).
    Структуру объектов и форм смотри навыками `meta-info`, `form-info`, `cf-info`. Не используй grep/cat по XML.
+   Если `search_code` ответил «поиск остановлен» или «сервер поиска перезапущен» — один повтор с `path_filter`, не обход по файлам.
 2. Реши, где делать доработку: объекты на поддержке — только в расширении (`cfe-init`, `cfe-borrow`,
    `cfe-patch-method`). Определи, что заимствовать, какие методы перехватить, какие реквизиты, формы, команды,
    макеты добавить.

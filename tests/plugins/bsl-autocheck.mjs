@@ -158,6 +158,7 @@ console.log('default_agent:');
   run();
   const first = readFileSync(cfgPath, 'utf8');
   ok(JSON.parse(first).default_agent === '1c', 'CLI: новый конфиг получает default_agent "1c"');
+  ok(JSON.parse(first).mcp.servers['1c-search'].command.some((p) => String(p).endsWith('restart-stdio.mjs')), 'CLI: 1c-search запускается через restart-stdio');
   ok(/Без изменений/.test(run().stdout) && readFileSync(cfgPath, 'utf8') === first, 'CLI: повторный запуск ничего не меняет');
   run('--remove');
   const removed = JSON.parse(readFileSync(cfgPath, 'utf8'));

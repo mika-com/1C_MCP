@@ -8,10 +8,11 @@
 // переранжирование Qwen3-Reranker; без сервера — поиск по ключевым словам (mcp/lib/semantic.mjs, docs/semantic-search.md).
 // CLI: node code-search.mjs --semantic-build [--root DIR] [--force] | --semantic-status [--root DIR]
 
-import { readdirSync, readFileSync, statSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
+import { readdirSync, readFileSync, statSync, writeFileSync, mkdirSync, existsSync, openSync, readSync, closeSync } from 'node:fs';
 import { join, relative, sep, resolve, basename } from 'node:path';
 import { tmpdir, userInfo } from 'node:os';
 import { createHash } from 'node:crypto';
+import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
 import { startServer } from './lib/stdio-server.mjs';
 import * as sem from './lib/semantic.mjs';
@@ -418,61 +419,121 @@ export function moduleMethods(idx, { module, exported_only = false }) {
 
 function escapeRx(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
-export function findUsages(idx, { name, object, limit = 40 }) {
+export function findUsages(idx, { name, object, limit = 40, budgetBytes } = {}) {
   const rx = new RegExp(`(^|[^\\wА-Яа-яЁё])${escapeRx(name)}\\s*\\(`, 'i');
   const defRx = new RegExp(`^\\s*(Процедура|Функция|Procedure|Function)\\s+${escapeRx(name)}\\s*\\(`, 'i');
   const hits = [];
   const perModule = new Map();
   let total = 0;
-  for (const mod of selectModules(idx, object)) {
-    let text;
-    try { text = readText(mod.file); } catch { continue; }
-    if (!norm(text).includes(norm(name))) continue;
-    const lines = text.split(/\r?\n/);
-    for (let i = 0; i < lines.length; i++) {
-      const l = lines[i];
-      if (!rx.test(l) || defRx.test(l) || /^\s*\/\//.test(l)) continue;
+  const scan = scanFiles(selectModules(idx, object).map((mod) => ({ file: mod.file, mod })), { budgetBytes });
+  for (const { file, mod } of scan.files) {
+    forEachLine(file, (line, lineNo) => {
+      const l = line.length > 500 ? line.slice(0, 500) : line;
+      if (!norm(l).includes(norm(name)) || !rx.test(l) || defRx.test(l) || /^\s*\/\//.test(l)) return;
       total++;
       perModule.set(mod.id, (perModule.get(mod.id) || 0) + 1);
       if (hits.length < limit) {
-        const owner = mod.methods.find((m) => m.line <= i + 1 && i + 1 <= m.end);
-        hits.push(`- ${rel(idx, mod.file)}:${i + 1}${owner ? ` (${owner.name})` : ''}: ${short(l.trim(), 160)}`);
+        const owner = mod.methods.find((m) => m.line <= lineNo && lineNo <= m.end);
+        hits.push(`- ${rel(idx, file)}:${lineNo}${owner ? ` (${owner.name})` : ''}: ${short(l.trim(), 160)}`);
       }
-    }
+    });
   }
-  if (!total) return `Вызовы «${name}» не найдены.`;
+  if (!total && !scan.stopped) return `Вызовы «${name}» не найдены.`;
   const summary = [...perModule.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15).map(([m, n]) => `${m} ×${n}`).join(', ');
-  return `Вызовов: ${total} в ${perModule.size} модулях. По модулям: ${summary}\n${hits.join('\n')}` +
-    (total > hits.length ? `\n… показаны первые ${hits.length}` : '');
+  const head = total ? `Вызовов: ${total} в ${perModule.size} модулях. По модулям: ${summary}` : `Вызовы «${name}» в просмотренной части не найдены.`;
+  return head + (hits.length ? `\n${hits.join('\n')}` : '') +
+    (total > hits.length ? `\n… показаны первые ${hits.length}` : '') + scan.note;
 }
 
 function short(s, n) { return s.length > n ? s.slice(0, n - 1) + '…' : s; }
 
-export function searchCode(idx, { pattern, regex = false, path_filter, include_xml = false, limit = 40 }) {
+// Сколько байт search_code/find_usages читают за один вызов. Дальше — ответ с просьбой сузить
+// path_filter, а не падение процесса (на Документообороте чтение всех модулей целиком роняло
+// Node с кодом 134, и OpenCode вычёркивал сервер до конца сеанса).
+export const SEARCH_BUDGET_BYTES = 128 * 1024 * 1024;
+
+// Первый файл читаем всегда. Следующий — только если он помещается в остаток бюджета.
+export function withinBudget(read, size, budget) {
+  if (budget == null) return true;
+  if (read === 0) return true;
+  return read + size <= budget;
+}
+
+// Построчно, без readFileSync всего модуля: пик памяти — буфер, а не размер файла.
+export function forEachLine(file, fn) {
+  let fd;
+  try { fd = openSync(file, 'r'); } catch { return; }
+  const buf = Buffer.alloc(64 * 1024);
+  const dec = new StringDecoder('utf8');
+  let carry = '';
+  let lineNo = 1;
+  try {
+    while (true) {
+      const n = readSync(fd, buf, 0, buf.length, null);
+      if (!n) break;
+      carry += dec.write(buf.subarray(0, n));
+      let nl;
+      while ((nl = carry.indexOf('\n')) >= 0) {
+        const line = carry.slice(0, nl).replace(/\r$/, '');
+        carry = carry.slice(nl + 1);
+        fn(line, lineNo++);
+      }
+      if (carry.length > 8192) {
+        fn(carry.slice(0, 8192), lineNo++);
+        carry = '';
+      }
+    }
+    carry += dec.end();
+    if (carry) fn(carry.replace(/\r$/, ''), lineNo);
+  } finally { closeSync(fd); }
+}
+
+function scanFiles(items, { budgetBytes = SEARCH_BUDGET_BYTES } = {}) {
+  const files = [];
+  let read = 0;
+  let stopped = false;
+  for (const item of items) {
+    let size = 0;
+    try { size = statSync(item.file).size; } catch { continue; }
+    if (!withinBudget(read, size, budgetBytes)) { stopped = true; break; }
+    read += size;
+    files.push(item);
+  }
+  const note = stopped
+    ? `\n[!] поиск остановлен, чтобы не уронить сервер: просмотрено ${files.length} из ${items.length} файлов. Повтори вызов с path_filter (каталог объекта или расширения), а не поиском по всей выгрузке.`
+    : '';
+  return { files, stopped, note };
+}
+
+export function searchCode(idx, { pattern, regex = false, path_filter, include_xml = false, limit = 40, budgetBytes } = {}) {
+  if (regex && String(pattern).length > 180) return 'Регулярное выражение длиннее 180 символов — сузь pattern, иначе поиск может зависнуть.';
   let rx;
   try { rx = new RegExp(regex ? pattern : escapeRx(pattern), 'i'); } catch (e) { return `Неверное регулярное выражение: ${e.message}`; }
   const filter = path_filter ? norm(path_filter) : null;
-  const files = idx.modules.map((m) => m.file);
-  if (include_xml) for (const o of idx.objects) files.push(o.file);
+  const items = [];
+  for (const m of idx.modules) items.push({ file: m.file });
+  if (include_xml) for (const o of idx.objects) items.push({ file: o.file });
+  const selected = items.filter((it) => !filter || norm(rel(idx, it.file)).includes(filter));
+  const scan = scanFiles(selected, { budgetBytes });
   const hits = [];
   let total = 0;
   const perFile = new Map();
-  for (const f of files) {
-    const r = rel(idx, f);
-    if (filter && !norm(r).includes(filter)) continue;
-    let text;
-    try { text = readText(f); } catch { continue; }
-    if (!regex && !norm(text).includes(norm(pattern))) continue;
-    const lines = text.split(/\r?\n/);
-    for (let i = 0; i < lines.length; i++) {
-      if (!rx.test(lines[i])) continue;
+  const needle = regex ? null : norm(pattern);
+  for (const { file } of scan.files) {
+    const r = rel(idx, file);
+    forEachLine(file, (line, lineNo) => {
+      const sample = line.length > 500 ? line.slice(0, 500) : line;
+      if (needle && !norm(sample).includes(needle)) return;
+      if (!rx.test(sample)) return;
       total++;
       perFile.set(r, (perFile.get(r) || 0) + 1);
-      if (hits.length < limit) hits.push(`- ${r}:${i + 1}: ${short(lines[i].trim(), 160)}`);
-    }
+      if (hits.length < limit) hits.push(`- ${r}:${lineNo}: ${short(sample.trim(), 160)}`);
+    });
   }
-  if (!total) return `Совпадений нет.`;
-  return `Совпадений: ${total} в ${perFile.size} файлах.\n${hits.join('\n')}` + (total > hits.length ? `\n… показаны первые ${hits.length}; сузьте path_filter` : '');
+  if (!total && !scan.stopped) return 'Совпадений нет.';
+  const head = total ? `Совпадений: ${total} в ${perFile.size} файлах.` : 'В просмотренной части совпадений нет.';
+  return head + (hits.length ? `\n${hits.join('\n')}` : '') +
+    (total > hits.length ? `\n… показаны первые ${hits.length}; сузьте path_filter` : '') + scan.note;
 }
 
 export function indexStatus(idx) {
@@ -859,7 +920,8 @@ const TOOLS = [
       object: { type: 'string', description: 'Искать вызовы только в модулях этого объекта' },
       limit: { type: 'number' }, root: ROOT_ARG, ...aliasProps('name', ['method']) } } },
   { name: 'search_code', description: 'Поиск строки (или регулярного выражения) по BSL-модулям выгрузки с ограниченным выводом. ' +
-      'Аргумент — pattern: {"pattern": "ЗаписатьИзменения("}.',
+      'Аргумент — pattern: {"pattern": "ЗаписатьИзменения("}. На большой выгрузке без path_filter чтение обрывается ' +
+      '(ответ начинается с «[!] поиск остановлен») — повтори один раз с path_filter, не сканируй файлы через shell.',
     inputSchema: { type: 'object', properties: {
       pattern: { type: 'string', description: 'Обязательно. Подстрока (или регулярное выражение при regex=true)' },
       regex: { type: 'boolean' }, path_filter: { type: 'string' }, include_xml: { type: 'boolean' }, limit: { type: 'number' }, root: ROOT_ARG,

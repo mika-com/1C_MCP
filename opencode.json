@@ -10,6 +10,7 @@
         "type": "local",
         "command": [
           "node",
+          "./mcp/restart-stdio.mjs",
           "./mcp/code-search.mjs"
         ],
         "timeout": {

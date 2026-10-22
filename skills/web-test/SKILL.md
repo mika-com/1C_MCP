@@ -49,6 +49,7 @@ Construct URL as `http://localhost:8081/<id>` or use `webUrl` if set.
 Use `/web-publish` first if the database is not published.
 
 > **Отчёты и окружение (OpenCode).** Перед запуском выполни preflight навыка `1c-test` (`node <1c-test>/scripts/preflight.mjs [база]`): Playwright, Chromium, дисплей, доступность веб-клиента. Все артефакты — в `build/reports/web/`: регресс `test ... --format=allure --report-dir=build/reports/web/allure` (скриншоты и видео попадают туда же), JUnit — `node <1c-test>/scripts/allure-to-junit.mjs build/reports/web/allure build/reports/web/junit.xml`. Скриншот ошибки `exec`/`run` пишется в `$TMPDIR/web-test-error-shot.png` (путь — в поле `screenshot` ответа): скопируй его в `build/reports/web/`.
+> Текст ленты, HTML-поля и табличного документа лежит во фрейме: `getFormState().frameTexts` (или `readFrameText()`). Скриншот этого текста не заменяет. `"ok": true` на клике не проверяет надписи. В итог цитируй прочитанные строки. Не встраивай диагностический вывод в модуль конфигурации, чтобы прочитать форму.
 
 ## Execution modes
 
