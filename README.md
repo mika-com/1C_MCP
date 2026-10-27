@@ -121,7 +121,7 @@ python3 skills/print-form/scripts/mxl-render.py <...>/Templates/<Макет>/Ext
 
 | Сервер | Что даёт | По умолчанию |
 |--------|----------|--------------|
-| `1c-search` | `semantic_search` (по смыслу, гибрид с ключевыми словами и реранкером; без LM Studio — ключевые слова), `semantic_index`, `find_object(query)`, `find_method(name, object)`, `module_methods(module)`, `find_usages(name, object)`, `search_code(pattern)`, `index_status` | включён |
+| `1c-search` | `semantic_search` (по смыслу, гибрид с ключевыми словами и реранкером; без LM Studio — ключевые слова), `semantic_index`, `find_object(query)`, `object_refs(object)` (граф связей объекта: типы, движения по регистрам, ввод на основании, подписки, ФО, расширения CFE, where-used), `find_method(name, object)` (с перехватчиками CFE), `module_methods(module)`, `find_usages(name, object)` (вызовы + подписки, регл. задания, сервисы, `Form.xml`, CFE), `search_code(pattern)`, `validate_query(query)` (статический валидатор запросов 1С по метаданным), `event_log(database)` (чтение ЖР `.lgd`/`.lgp` с маппингом стека на `.bsl`), `index_status` | включён |
 | `1c-bsl` | BSL LS в режиме MCP (`analyze_file`, `document_symbols`, …); без BSL LS — заглушка с подсказкой | включён |
 | `1c-help` | синтакс-помощник: `help_search`, `help_get` (синтаксис, параметры, возврат, доступность, версия, примеры), `help_members`, `help_status` — по справке **установленной** платформы | включён |
 | `vrunner` | команды vanessa-runner 3.x (`vrunner-mcp`) | `disabled: true`, включить: `node mcp/register-opencode-mcp.mjs --vrunner` |
@@ -186,6 +186,7 @@ python3 skills/print-form/scripts/mxl-render.py <...>/Templates/<Макет>/Ext
 | `tests/mcp/run.mjs`, `tests/mcp/multiuser.mjs` | тесты прокси `1c-bsl` (дерево процессов, таймаут, область индексации) и многопользовательской безопасности |
 | `tests/plugins/bsl-autocheck.mjs` | тесты плагина на поддельном BSL LS (пачки, таймаут, вывод, нет BSL LS) и миграции `lsp.bsl` |
 | `tests/mcp/help.mjs` | тесты `1c-help` на синтетических `.hbk` (`tests/mcp/lib/make-hbk.mjs`, без содержимого справки 1С) |
+| `tests/mcp/power1c.mjs` | тесты графа метаданных (`object_refs`, `find_method`, `find_usages`), статического валидатора запросов (`validate_query`) и чтения ЖР (`event_log`) |
 | `tests/web-test/session.mjs` | тесты сеанса `web-test` на поддельном браузере: `open` → много `exec` в одном браузере, сеанс переживает конец вызова shell, токен, простой, смена адреса |
 | `scripts/opencode_port.py` | сборка из upstream и установка; ядро — `scripts/port_core.py` |
 | `skill-overlays/` | файлы порта, которых нет в upstream; `build` копирует их в `skills/` (сейчас `web-test`: `open`, `keepalive`) |

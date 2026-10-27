@@ -1,11 +1,9 @@
 #!/usr/bin/env node
-// code-search.mjs v1.0 — MCP-сервер поиска по XML-выгрузке 1С для OpenCode: объекты метаданных по смыслу
-// (имя, синоним, реквизиты), методы с кодом, список методов модуля, места вызова, поиск по коду.
-// Заменяет grep/sed по выгрузке: ответы короткие и не забивают контекст модели.
-// Без зависимостей. Индекс строится при первом вызове и кэшируется во временном каталоге
-// (обновляются только изменённые файлы). Папку проекта берёт из MCP roots (рабочая папка сеанса), иначе — рабочий каталог процесса.
-// Семантический поиск (semantic_search, semantic_index) — эмбеддинги через OpenAI-совместимый сервер (LM Studio),
-// переранжирование Qwen3-Reranker; без сервера — поиск по ключевым словам (mcp/lib/semantic.mjs, docs/semantic-search.md).
+// code-search.mjs v1.1 — MCP-сервер поиска и статического анализа по XML-выгрузке 1С для OpenCode:
+// объекты метаданных по смыслу (имя, синоним, реквизиты, типы), граф связей объекта (object_refs: подписки,
+// движения регистров, перехваты CFE, где используется как тип), методы с кодом и перехватами, список методов модуля,
+// места вызова (включая Form.xml, подписки, регламентные задания, HTTP/Web-сервисы), статическая валидация запросов
+// по схеме метаданных (validate_query) и чтение Журнала регистрации 1Cv8.lgd / *.lgp со стек-трейсами (event_log).
 // CLI: node code-search.mjs --semantic-build [--root DIR] [--force] | --semantic-status [--root DIR]
 
 import { readdirSync, readFileSync, statSync, writeFileSync, mkdirSync, existsSync } from 'node:fs';
@@ -15,8 +13,10 @@ import { createHash } from 'node:crypto';
 import { fileURLToPath } from 'node:url';
 import { startServer } from './lib/stdio-server.mjs';
 import * as sem from './lib/semantic.mjs';
+import { validateQuery } from './lib/query-validator.mjs';
+import { readEventLog } from './lib/event-log.mjs';
 
-const INDEX_VERSION = 3;
+const INDEX_VERSION = 4;
 const SKIP_DIRS = new Set(['.git', 'node_modules', '.agents', '.opencode', 'build', 'base', 'tools', 'test-tmp', '.v8-xsd']);
 
 // Каталог выгрузки → вид объекта (рус.) и англ. синоним вида для поиска
@@ -44,12 +44,67 @@ TYPE_ALIASES.set('справочники', 'Catalogs'); TYPE_ALIASES.set('док
 TYPE_ALIASES.set('общиемодули', 'CommonModules'); TYPE_ALIASES.set('обработки', 'DataProcessors');
 TYPE_ALIASES.set('отчеты', 'Reports'); TYPE_ALIASES.set('регистрысведений', 'InformationRegisters');
 TYPE_ALIASES.set('регистрынакопления', 'AccumulationRegisters'); TYPE_ALIASES.set('перечисления', 'Enums');
+TYPE_ALIASES.set('регистрыбухгалтерии', 'AccountingRegisters'); TYPE_ALIASES.set('регистрырасчета', 'CalculationRegisters');
+TYPE_ALIASES.set('определяемыетипы', 'DefinedTypes'); TYPE_ALIASES.set('подпискинасобытия', 'EventSubscriptions');
+TYPE_ALIASES.set('регламентныезадания', 'ScheduledJobs'); TYPE_ALIASES.set('пвх', 'ChartsOfCharacteristicTypes');
+TYPE_ALIASES.set('плансчетов', 'ChartsOfAccounts'); TYPE_ALIASES.set('пвр', 'ChartsOfCalculationTypes');
 
 const MODULE_KINDS = {
   ObjectModule: 'МодульОбъекта', ManagerModule: 'МодульМенеджера', RecordSetModule: 'МодульНабораЗаписей',
   ValueManagerModule: 'МодульМенеджераЗначения', CommandModule: 'МодульКоманды', Module: 'Модуль',
   ManagedApplicationModule: 'МодульУправляемогоПриложения', SessionModule: 'МодульСеанса',
   ExternalConnectionModule: 'МодульВнешнегоСоединения', OrdinaryApplicationModule: 'МодульОбычногоПриложения',
+};
+
+const REF_TYPE_MAP = {
+  CatalogRef: 'СправочникСсылка', DocumentRef: 'ДокументСсылка', EnumRef: 'ПеречислениеСсылка',
+  ChartOfAccountsRef: 'ПланСчетовСсылка', ChartOfCharacteristicTypesRef: 'ПланВидовХарактеристикСсылка',
+  ChartOfCalculationTypesRef: 'ПланВидовРасчетаСсылка', ExchangePlanRef: 'ПланОбменаСсылка',
+  BusinessProcessRef: 'БизнесПроцессСсылка', TaskRef: 'ЗадачаСсылка',
+};
+
+const OBJECT_TYPE_MAP = {
+  CatalogObject: 'СправочникОбъект', DocumentObject: 'ДокументОбъект',
+  ChartOfAccountsObject: 'ПланСчетовОбъект', ChartOfCharacteristicTypesObject: 'ПланВидовХарактеристикОбъект',
+  ChartOfCalculationTypesObject: 'ПланВидовРасчетаОбъект', BusinessProcessObject: 'БизнесПроцессОбъект',
+  TaskObject: 'ЗадачаОбъект', ExchangePlanObject: 'ПланОбменаОбъект',
+  InformationRegisterRecordSet: 'НаборЗаписейРегистраСведений', AccumulationRegisterRecordSet: 'НаборЗаписейРегистраНакопления',
+  AccountingRegisterRecordSet: 'НаборЗаписейРегистраБухгалтерии', CalculationRegisterRecordSet: 'НаборЗаписейРегистраРасчета',
+  SequenceRecordSet: 'НаборЗаписейПоследовательности',
+  CatalogManager: 'СправочникМенеджер', DocumentManager: 'ДокументМенеджер',
+  DocumentJournalManager: 'ЖурналДокументовМенеджер', EnumManager: 'ПеречислениеМенеджер',
+  ConstantValueManager: 'КонстантаМенеджерЗначения', InformationRegisterManager: 'РегистрСведенийМенеджер',
+  AccumulationRegisterManager: 'РегистрНакопленияМенеджер', AccountingRegisterManager: 'РегистрБухгалтерииМенеджер',
+  CalculationRegisterManager: 'РегистрРасчетаМенеджер', ChartOfAccountsManager: 'ПланСчетовМенеджер',
+  ChartOfCharacteristicTypesManager: 'ПланВидовХарактеристикМенеджер', ChartOfCalculationTypesManager: 'ПланВидовРасчетаМенеджер',
+  ExchangePlanManager: 'ПланОбменаМенеджер', BusinessProcessManager: 'БизнесПроцессМенеджер',
+  TaskManager: 'ЗадачаМенеджер', DataProcessorManager: 'ОбработкаМенеджер', ReportManager: 'ОтчетМенеджер',
+};
+
+const SOURCE_PREFIX_TO_DIR = {
+  СправочникОбъект: 'Catalogs', СправочникМенеджер: 'Catalogs', СправочникСсылка: 'Catalogs',
+  ДокументОбъект: 'Documents', ДокументМенеджер: 'Documents', ДокументСсылка: 'Documents',
+  ПланСчетовОбъект: 'ChartsOfAccounts', ПланСчетовМенеджер: 'ChartsOfAccounts', ПланСчетовСсылка: 'ChartsOfAccounts',
+  ПланВидовХарактеристикОбъект: 'ChartsOfCharacteristicTypes', ПланВидовХарактеристикМенеджер: 'ChartsOfCharacteristicTypes', ПланВидовХарактеристикСсылка: 'ChartsOfCharacteristicTypes',
+  ПланВидовРасчетаОбъект: 'ChartsOfCalculationTypes', ПланВидовРасчетаМенеджер: 'ChartsOfCalculationTypes', ПланВидовРасчетаСсылка: 'ChartsOfCalculationTypes',
+  БизнесПроцессОбъект: 'BusinessProcesses', БизнесПроцессМенеджер: 'BusinessProcesses', БизнесПроцессСсылка: 'BusinessProcesses',
+  ЗадачаОбъект: 'Tasks', ЗадачаМенеджер: 'Tasks', ЗадачаСсылка: 'Tasks',
+  ПланОбменаОбъект: 'ExchangePlans', ПланОбменаМенеджер: 'ExchangePlans', ПланОбменаСсылка: 'ExchangePlans',
+  НаборЗаписейРегистраСведений: 'InformationRegisters', РегистрСведенийМенеджер: 'InformationRegisters',
+  НаборЗаписейРегистраНакопления: 'AccumulationRegisters', РегистрНакопленияМенеджер: 'AccumulationRegisters',
+  НаборЗаписейРегистраБухгалтерии: 'AccountingRegisters', РегистрБухгалтерииМенеджер: 'AccountingRegisters',
+  НаборЗаписейРегистраРасчета: 'CalculationRegisters', РегистрРасчетаМенеджер: 'CalculationRegisters',
+  НаборЗаписейПоследовательности: 'Sequences', КонстантаМенеджерЗначения: 'Constants',
+  ПеречислениеСсылка: 'Enums', ПеречислениеМенеджер: 'Enums',
+  ОпределяемыйТип: 'DefinedTypes', Характеристика: 'ChartsOfCharacteristicTypes',
+};
+
+const EVENT_MAP_RU = {
+  BeforeWrite: 'ПередЗаписью', OnWrite: 'ПриЗаписи', AfterWrite: 'ПослеЗаписи',
+  BeforeDelete: 'ПередУдалением', Posting: 'ОбработкаПроведения', UndoPosting: 'ОбработкаУдаленияПроведения',
+  OnReadAtServer: 'ПриЧтенииНаСервере', FillCheckProcessing: 'ОбработкаПроверкиЗаполнения',
+  Filling: 'ОбработкаЗаполнения', OnCopy: 'ПриКопировании', OnSetNewCode: 'ПриУстановкеНовогоКода',
+  OnSetNewNumber: 'ПриУстановкеНовогоНомера',
 };
 
 // ---------------------------------------------------------------------------
@@ -91,13 +146,204 @@ function unescapeXml(s) {
   return String(s).replace(/&quot;/g, '"').replace(/&apos;/g, "'").replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&');
 }
 
-// Объект метаданных: имя, синоним, реквизиты, табличные части и их реквизиты, признак заимствования
+function formatSingleXmlType(raw, typeBlock, isTypeSet = false) {
+  raw = String(raw || '').trim().replace(/^d\d+p\d+:/, 'cfg:');
+  if (!raw) return '';
+  if (isTypeSet) {
+    let m = raw.match(/^cfg:DefinedType\.(.+)$/);
+    if (m) return `ОпределяемыйТип.${m[1]}`;
+    m = raw.match(/^cfg:Characteristic\.(.+)$/);
+    if (m) return `Характеристика.${m[1]}`;
+    if (raw === 'cfg:AnyRef') return 'ЛюбаяСсылка';
+    if (raw === 'cfg:AnyIBRef') return 'ЛюбаяСсылкаИБ';
+    m = raw.match(/^cfg:(\w+Ref)$/);
+    if (m && REF_TYPE_MAP[m[1]]) return `${REF_TYPE_MAP[m[1]]} (все)`;
+    m = raw.match(/^cfg:(\w+)$/);
+    if (m && OBJECT_TYPE_MAP[m[1]]) return `${OBJECT_TYPE_MAP[m[1]]} (все)`;
+    return raw.replace(/^cfg:/, '');
+  }
+  if (raw === 'xs:string') {
+    const len = (typeBlock.match(/<v8:Length>(\d+)<\/v8:Length>/) || [])[1];
+    return len && len !== '0' ? `Строка(${len})` : 'Строка';
+  }
+  if (raw === 'xs:decimal') {
+    const d = (typeBlock.match(/<v8:Digits>(\d+)<\/v8:Digits>/) || [])[1];
+    const f = (typeBlock.match(/<v8:FractionDigits>(\d+)<\/v8:FractionDigits>/) || [])[1] || '0';
+    return d ? `Число(${d},${f})` : 'Число';
+  }
+  if (raw === 'xs:boolean') return 'Булево';
+  if (raw === 'xs:dateTime') {
+    const df = (typeBlock.match(/<v8:DateFractions>([^<]+)<\/v8:DateFractions>/) || [])[1];
+    if (df === 'Date') return 'Дата';
+    if (df === 'Time') return 'Время';
+    return 'ДатаВремя';
+  }
+  if (raw === 'v8:ValueStorage') return 'ХранилищеЗначения';
+  if (raw === 'v8:UUID') return 'УникальныйИдентификатор';
+  if (raw === 'xs:base64Binary') return 'ДвоичныеДанные';
+  if (raw === 'v8:Null') return 'Null';
+  let m = raw.match(/^cfg:(\w+Ref)\.(.+)$/);
+  if (m && REF_TYPE_MAP[m[1]]) return `${REF_TYPE_MAP[m[1]]}.${m[2]}`;
+  m = raw.match(/^cfg:DefinedType\.(.+)$/);
+  if (m) return `ОпределяемыйТип.${m[1]}`;
+  m = raw.match(/^cfg:Characteristic\.(.+)$/);
+  if (m) return `Характеристика.${m[1]}`;
+  m = raw.match(/^cfg:(\w+)\.(.+)$/);
+  if (m && OBJECT_TYPE_MAP[m[1]]) return `${OBJECT_TYPE_MAP[m[1]]}.${m[2]}`;
+  m = raw.match(/^cfg:(\w+)$/);
+  if (m && OBJECT_TYPE_MAP[m[1]]) return OBJECT_TYPE_MAP[m[1]];
+  return raw.replace(/^cfg:/, '');
+}
+
+export function parseTypesXml(block, tag = 'Type') {
+  const m = block.match(new RegExp(`<${tag}>([\\s\\S]*?)<\\/${tag}>`));
+  if (!m) return [];
+  const inner = m[1];
+  const out = [];
+  for (const tm of inner.matchAll(/<v8:(Type|TypeSet)>([^<]+)<\/v8:\1>/g)) {
+    const formatted = formatSingleXmlType(tm[2], inner, tm[1] === 'TypeSet');
+    if (formatted) out.push(formatted);
+  }
+  return out;
+}
+
+// Нормализует английское имя ссылки на метаданные ("AccumulationRegister.Товары" → "РегистрНакопления.Товары")
+function normalizeMdRef(raw) {
+  const s = String(raw || '').trim();
+  const m = s.match(/^([A-Za-zА-Яа-яЁё]+)\.(.+)$/);
+  if (!m) return s;
+  const dir = TYPE_ALIASES.get(norm(m[1]));
+  if (dir && TYPES[dir]) return `${TYPES[dir][0]}.${m[2]}`;
+  return s;
+}
+
+// Объект метаданных: имя, синоним, реквизиты с типами, табличные части, движения, подписки, регламентные задания и др.
 export function parseObjectXml(text) {
   const name = (text.match(RX_NAME) || [])[1];
   if (!name) return null;
-  const head = text.slice(0, text.indexOf('<ChildObjects>') > 0 ? text.indexOf('<ChildObjects>') : text.length);
-  const obj = { name, syn: unescapeXml(synonymOf(head)), adopted: /<ObjectBelonging>Adopted<\/ObjectBelonging>/.test(head), attrs: [], ts: [] };
-  const child = text.indexOf('<ChildObjects>') > 0 ? text.slice(text.indexOf('<ChildObjects>')) : '';
+  const childIdx = text.indexOf('<ChildObjects>');
+  const head = text.slice(0, childIdx > 0 ? childIdx : text.length);
+  const obj = {
+    name,
+    syn: unescapeXml(synonymOf(head)),
+    adopted: /<ObjectBelonging>Adopted<\/ObjectBelonging>/.test(head),
+    attrs: [],
+    ts: [],
+  };
+
+  // Типы самого объекта (для DefinedType, Constant, ChartOfCharacteristicTypes, CommonAttribute)
+  const headTypes = parseTypesXml(head, 'Type');
+  if (headTypes.length) obj.types = headTypes;
+
+  // Иерархия, длина кода/наименования/номера, периодичность и вид регистра
+  if (/<Hierarchical>true<\/Hierarchical>/.test(head)) obj.hierarchical = true;
+  else if (/<Hierarchical>false<\/Hierarchical>/.test(head)) obj.hierarchical = false;
+  const codeLen = (head.match(/<CodeLength>(\d+)<\/CodeLength>/) || [])[1];
+  if (codeLen !== undefined) obj.codeLength = Number(codeLen);
+  const descLen = (head.match(/<DescriptionLength>(\d+)<\/DescriptionLength>/) || [])[1];
+  if (descLen !== undefined) obj.descriptionLength = Number(descLen);
+  const numLen = (head.match(/<NumberLength>(\d+)<\/NumberLength>/) || [])[1];
+  if (numLen !== undefined) obj.numberLength = Number(numLen);
+
+  const per = (head.match(/<InformationRegisterPeriodicity>([^<]+)<\/InformationRegisterPeriodicity>/) || [])[1];
+  if (per) obj.periodicity = per;
+  const wm = (head.match(/<WriteMode>([^<]+)<\/WriteMode>/) || [])[1];
+  if (wm) obj.writeMode = wm;
+  const rt = (head.match(/<RegisterType>([^<]+)<\/RegisterType>/) || [])[1];
+  if (rt) obj.registerType = rt;
+
+  // Владельцы справочника (<Owners>)
+  const ownersBlock = (head.match(/<Owners>([\s\S]*?)<\/Owners>/) || [])[1];
+  if (ownersBlock) {
+    const owners = [...ownersBlock.matchAll(/<xr:Item\b[^>]*>([^<]+)<\/xr:Item>/g)].map((m) => normalizeMdRef(m[1]));
+    if (owners.length) obj.owners = owners;
+  }
+
+  // Движения документа по регистрам (<RegisterRecords>)
+  const regRecBlock = (head.match(/<RegisterRecords>([\s\S]*?)<\/RegisterRecords>/) || [])[1];
+  if (regRecBlock) {
+    const recs = [...regRecBlock.matchAll(/<xr:Item\b[^>]*>([^<]+)<\/xr:Item>/g)].map((m) => normalizeMdRef(m[1]));
+    if (recs.length) obj.registerRecords = recs;
+  }
+
+  // Ввод на основании (<BasedOn>)
+  const basedOnBlock = (head.match(/<BasedOn>([\s\S]*?)<\/BasedOn>/) || [])[1];
+  if (basedOnBlock) {
+    const based = [...basedOnBlock.matchAll(/<xr:Item\b[^>]*>([^<]+)<\/xr:Item>/g)].map((m) => normalizeMdRef(m[1]));
+    if (based.length) obj.basedOn = based;
+  }
+
+  // Подписка на событие (EventSubscription): <Event>, <Handler>, <Source>
+  const evMatch = (head.match(/<Event>([^<]+)<\/Event>/) || [])[1];
+  const handlerMatch = (head.match(/<Handler>([^<]+)<\/Handler>/) || [])[1];
+  if (evMatch || handlerMatch) {
+    const sources = parseTypesXml(head, 'Source');
+    if (evMatch || sources.length) {
+      obj.subscription = {
+        event: EVENT_MAP_RU[evMatch] || evMatch || '',
+        rawEvent: evMatch || '',
+        handler: normalizeMdRef(handlerMatch || ''),
+        sources,
+      };
+    }
+  }
+
+  // Регламентное задание (ScheduledJob): <MethodName>
+  const sjMethod = (head.match(/<MethodName>([^<]+)<\/MethodName>/) || [])[1];
+  if (sjMethod) {
+    obj.scheduledJob = {
+      methodName: normalizeMdRef(sjMethod),
+      use: /<Use>true<\/Use>/.test(head),
+    };
+  }
+
+  // Функциональная опция (FunctionalOption): <Location>, <Content>
+  const foLoc = (head.match(/<Location>([^<]+)<\/Location>/) || [])[1];
+  if (foLoc) obj.location = normalizeMdRef(foLoc);
+  const contentBlock = (head.match(/<Content>([\s\S]*?)<\/Content>/) || [])[1];
+  if (contentBlock) {
+    const foObjs = [...contentBlock.matchAll(/<xr:Object>([^<]+)<\/xr:Object>/g)].map((m) => normalizeMdRef(m[1]));
+    if (foObjs.length) obj.foContent = foObjs;
+    // Для CommonAttribute: <xr:Item><xr:Metadata>...</xr:Metadata><xr:Use>Use|DontUse</xr:Use></xr:Item>
+    const caItems = [...contentBlock.matchAll(/<xr:Item>[\s\S]*?<xr:Metadata>([^<]+)<\/xr:Metadata>[\s\S]*?<xr:Use>([^<]+)<\/xr:Use>[\s\S]*?<\/xr:Item>/g)];
+    if (caItems.length) {
+      obj.contentUse = {};
+      for (const it of caItems) {
+        obj.contentUse[norm(normalizeMdRef(it[1]))] = it[2] === 'Use';
+      }
+    }
+  }
+  if (/<AutoUse>Use<\/AutoUse>/.test(head)) obj.autoUse = true;
+
+  const child = childIdx > 0 ? text.slice(childIdx) : '';
+
+  // HTTPService: шаблоны URL и обработчики методов
+  if (child.includes('<URLTemplate')) {
+    const httpMethods = [];
+    for (const tm of child.matchAll(/<URLTemplate\b[^>]*>([\s\S]*?)<\/URLTemplate>/g)) {
+      const tplName = (tm[1].match(RX_NAME) || [])[1] || '';
+      const tplPath = (tm[1].match(/<Template>([^<]*)<\/Template>/) || [])[1] || '';
+      for (const mm of tm[1].matchAll(/<Method\b[^>]*>([\s\S]*?)<\/Method>/g)) {
+        const mName = (mm[1].match(RX_NAME) || [])[1] || '';
+        const httpVerb = (mm[1].match(/<HTTPMethod>([^<]+)<\/HTTPMethod>/) || [])[1] || '';
+        const hnd = (mm[1].match(/<Handler>([^<]+)<\/Handler>/) || [])[1] || '';
+        if (hnd) httpMethods.push({ template: tplPath || tplName, name: mName, httpMethod: httpVerb, handler: hnd });
+      }
+    }
+    if (httpMethods.length) obj.httpMethods = httpMethods;
+  }
+
+  // WebService: операции и ProcedureName
+  if (child.includes('<Operation')) {
+    const wsOps = [];
+    for (const om of child.matchAll(/<Operation\b[^>]*>([\s\S]*?)<\/Operation>/g)) {
+      const opName = (om[1].match(RX_NAME) || [])[1] || '';
+      const proc = (om[1].match(/<ProcedureName>([^<]+)<\/ProcedureName>/) || [])[1] || '';
+      if (proc) wsOps.push({ name: opName, handler: proc });
+    }
+    if (wsOps.length) obj.wsOperations = wsOps;
+  }
+
   // Табличные части — отдельно, чтобы их реквизиты не смешались с реквизитами объекта
   const tsRx = /<TabularSection\b[^>]*>([\s\S]*?)<\/TabularSection>/g;
   let rest = child;
@@ -108,7 +354,7 @@ export function parseObjectXml(text) {
     const ts = { name: tname, syn: unescapeXml(synonymOf(tsHead)), attrs: [] };
     for (const a of m[1].matchAll(/<Attribute\b[^>]*>([\s\S]*?)<\/Attribute>/g)) {
       const an = (a[1].match(RX_NAME) || [])[1];
-      if (an) ts.attrs.push([an, unescapeXml(synonymOf(a[1]))]);
+      if (an) ts.attrs.push([an, unescapeXml(synonymOf(a[1])), parseTypesXml(a[1], 'Type')]);
     }
     obj.ts.push(ts);
     rest = rest.replace(m[0], '');
@@ -117,42 +363,82 @@ export function parseObjectXml(text) {
     const rx = new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'g');
     for (const a of rest.matchAll(rx)) {
       const an = (a[1].match(RX_NAME) || [])[1];
-      if (an) obj.attrs.push([an, unescapeXml(synonymOf(a[1])), tag]);
+      if (an) obj.attrs.push([an, unescapeXml(synonymOf(a[1])), tag, tag === 'EnumValue' ? [] : parseTypesXml(a[1], 'Type')]);
     }
   }
   return obj;
 }
 
-const RX_METHOD_START = /^\s*(Процедура|Функция|Procedure|Function)\s+([A-Za-zА-Яа-яЁё_][\wА-Яа-яЁё]*)\s*\(/i;
+// Разбор управляемой формы (Ext/Form.xml): события формы, события элементов и обработчики команд
+export function parseFormXml(text) {
+  const events = [];
+  const commands = [];
+  // Команды формы: <Command name="..."><Action ...>Обработчик</Action>
+  const cmdsBlock = (text.match(/<Commands>([\s\S]*?)<\/Commands>/) || [])[1] || '';
+  for (const cm of cmdsBlock.matchAll(/<Command\b[^>]*\bname="([^"]+)"[^>]*>([\s\S]*?)<\/Command>/g)) {
+    const cmdName = cm[1];
+    for (const am of cm[2].matchAll(/<Action\b[^>]*>([^<]+)<\/Action>/g)) {
+      const handler = am[1].trim();
+      if (handler) commands.push([cmdName, handler]);
+    }
+  }
+  // Все блоки <Events><Event name="...">Обработчик</Event></Events>
+  for (const em of text.matchAll(/<Event\b[^>]*\bname="([^"]+)"[^>]*>([^<]+)<\/Event>/g)) {
+    const evtName = em[1].trim();
+    const handler = em[2].trim();
+    if (handler) events.push([evtName, handler]);
+  }
+  return { events, commands };
+}
+
+const RX_METHOD_START = /^\s*(?:Асинх\s+|Async\s+)?(Процедура|Функция|Procedure|Function)\s+([A-Za-zА-Яа-яЁё_][\wА-Яа-яЁё]*)\s*\(/i;
 // \b в JS не работает с кириллицей — границу слова проверяем явно
 const RX_METHOD_END = /^\s*(КонецПроцедуры|КонецФункции|EndProcedure|EndFunction)(?![\wА-Яа-яЁё])/i;
 const RX_EXPORT = /\)\s*(Экспорт|Export)(?![\wА-Яа-яЁё])/i;
+const RX_INTERCEPTOR = /^&\s*(Перед|После|Вместо|ИзменениеИКонтроль|Before|After|Around|ChangeAndValidate)\s*\(\s*"([^"]+)"\s*\)/i;
+const INTERCEPT_NORM = {
+  перед: 'Перед', before: 'Перед',
+  после: 'После', after: 'После',
+  вместо: 'Вместо', around: 'Вместо',
+  изменениеиконтроль: 'ИзменениеИКонтроль', changeandvalidate: 'ИзменениеИКонтроль',
+};
 
-// Методы модуля: имя, строки начала/конца, экспорт, директива компиляции, сигнатура
+// Методы модуля: имя, строки начала/конца, экспорт, директива компиляции, аннотация перехвата CFE
 export function parseMethods(text) {
   const lines = text.split(/\r?\n/);
   const methods = [];
   let cur = null;
-  let directive = '';
+  let directives = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
     if (!cur) {
       const t = line.trim();
-      if (t.startsWith('&')) { directive = t; continue; }
+      if (t.startsWith('&')) { directives.push(t); continue; }
       const m = line.match(RX_METHOD_START);
       if (m) {
         // сигнатура может занимать несколько строк — до закрывающей скобки
         let sig = line.trim();
         let j = i;
         while (!sig.includes(')') && j < i + 30 && j + 1 < lines.length) { j++; sig += ' ' + lines[j].trim(); }
-        cur = { name: m[2], kind: /^(Функция|Function)$/i.test(m[1]) ? 'Функция' : 'Процедура', line: i + 1,
-          export: RX_EXPORT.test(sig), dir: directive };
-      } else if (t && !t.startsWith('//') && !t.startsWith('#')) directive = '';
+        let intercept = null;
+        for (const d of directives) {
+          const im = d.match(RX_INTERCEPTOR);
+          if (im) intercept = { kind: INTERCEPT_NORM[im[1].toLowerCase()] || im[1], target: im[2] };
+        }
+        cur = {
+          name: m[2],
+          kind: /^(Функция|Function)$/i.test(m[1]) ? 'Функция' : 'Процедура',
+          line: i + 1,
+          export: RX_EXPORT.test(sig),
+          dir: directives.join(' '),
+          ...(intercept ? { intercept } : {}),
+        };
+      } else if (t && !t.startsWith('//') && !t.startsWith('#')) directives = [];
     } else if (RX_METHOD_END.test(line)) {
       cur.end = i + 1;
       methods.push(cur);
       cur = null;
-      directive = '';
+      directives = [];
     }
   }
   if (cur) { cur.end = lines.length; methods.push(cur); }
@@ -177,6 +463,17 @@ export function moduleId(relPath) {
   return `${obj}.${kind}`;
 }
 
+export function formId(relPath) {
+  const p = relPath.split(/[\\/]/);
+  const type = TYPES[p[0]];
+  if (!type) return relPath;
+  const obj = `${type[0]}.${p[1]}`;
+  if (p[0] === 'CommonForms') return obj;
+  const iForm = p.indexOf('Forms');
+  if (iForm >= 0 && p[iForm + 1]) return `${obj}.Форма.${p[iForm + 1]}`;
+  return obj;
+}
+
 // ---------------------------------------------------------------------------
 // Индекс
 // ---------------------------------------------------------------------------
@@ -193,15 +490,16 @@ function findConfigRoots(root) {
   return out;
 }
 
-function listBsl(dir, acc = []) {
+function listFilesByExt(dir, bslAcc = [], formXmlAcc = []) {
   let list;
-  try { list = readdirSync(dir, { withFileTypes: true }); } catch { return acc; }
+  try { list = readdirSync(dir, { withFileTypes: true }); } catch { return { bslAcc, formXmlAcc }; }
   for (const e of list) {
     const p = join(dir, e.name);
-    if (e.isDirectory()) listBsl(p, acc);
-    else if (e.name.endsWith('.bsl')) acc.push(p);
+    if (e.isDirectory()) listFilesByExt(p, bslAcc, formXmlAcc);
+    else if (e.name.endsWith('.bsl')) bslAcc.push(p);
+    else if (e.name === 'Form.xml') formXmlAcc.push(p);
   }
-  return acc;
+  return { bslAcc, formXmlAcc };
 }
 
 // Кэш — свой у каждого пользователя (на Linux /tmp общий; на Windows %TEMP% и так у каждого свой).
@@ -216,7 +514,7 @@ function cacheFile(root) {
   return join(cacheDir(), `${h}.json`);
 }
 
-const indexes = new Map();   // root → { built, configs, objects, modules }
+const indexes = new Map();   // root → { built, configs, objects, modules, forms }
 
 export function buildIndex(root, { force = false } = {}) {
   root = resolve(root);
@@ -250,11 +548,13 @@ export function buildIndex(root, { force = false } = {}) {
     const props = cfgXml.slice(cfgXml.indexOf('<Properties>'));
     const name = (props.match(/<Name>([^<]+)<\/Name>/) || [])[1] || basename(dir);
     const isExt = /<ConfigurationExtensionPurpose>|<NamePrefix>/.test(cfgXml);
-    return { dir, rel: relative(root, dir).split(sep).join('/') || '.', name, isExt };
+    const prefix = (props.match(/<NamePrefix>([^<]+)<\/NamePrefix>/) || [])[1] || '';
+    return { dir, rel: relative(root, dir).split(sep).join('/') || '.', name, isExt, prefix };
   });
 
   const objects = [];
   const modules = [];
+  const forms = [];
   for (const c of configs) {
     for (const typeDir of Object.keys(TYPES)) {
       const d = join(c.dir, typeDir);
@@ -263,15 +563,22 @@ export function buildIndex(root, { force = false } = {}) {
       for (const f of list) {
         if (!f.endsWith('.xml')) continue;
         const o = take(join(d, f), parseObjectXml);
-        if (o) objects.push({ ...o, type: typeDir, cfg: c.rel, file: join(d, f) });
+        if (o) objects.push({ ...o, type: typeDir, cfg: c.rel, isExt: c.isExt, file: join(d, f) });
       }
     }
-    for (const f of listBsl(c.dir)) {
+    const { bslAcc, formXmlAcc } = listFilesByExt(c.dir);
+    for (const f of bslAcc) {
       const methods = take(f, parseMethods) || [];
-      modules.push({ file: f, cfg: c.rel, id: moduleId(relative(c.dir, f)), methods });
+      modules.push({ file: f, cfg: c.rel, isExt: c.isExt, id: moduleId(relative(c.dir, f)), methods });
+    }
+    for (const f of formXmlAcc) {
+      const fm = take(f, parseFormXml);
+      if (fm && (fm.events.length || fm.commands.length)) {
+        forms.push({ file: f, cfg: c.rel, id: formId(relative(c.dir, f)), events: fm.events, commands: fm.commands });
+      }
     }
   }
-  const idx = { built: Date.now(), root, configs, objects, modules, parsed, ms: Date.now() - started };
+  const idx = { built: Date.now(), root, configs, objects, modules, forms, parsed, ms: Date.now() - started };
   indexes.set(root, idx);
   if (parsed) {
     try {
@@ -334,11 +641,13 @@ export function findObject(idx, { query, type, limit = 10 }) {
   }
   res.sort((a, b) => b.s - a.s || a.o.name.length - b.o.name.length);
   if (!res.length) return `Ничего не найдено по «${query}». Объектов в индексе: ${idx.objects.length}.`;
-  const out = res.slice(0, limit).map(({ o, why }) =>
-    `- ${objTitle(o)}${o.syn && o.syn !== o.name ? ` — «${o.syn}»` : ''}${o.adopted ? ' (заимствован)' : ''}` +
-    `${cfgMark(idx, o.cfg)}${why ? `; совпало: ${why}` : ''}\n  ${rel(idx, o.file)}; реквизитов ${o.attrs.length}, ТЧ ${o.ts.length}`);
+  const out = res.slice(0, limit).map(({ o, why }) => {
+    const regNote = o.registerRecords?.length ? `, движений ${o.registerRecords.length}` : '';
+    return `- ${objTitle(o)}${o.syn && o.syn !== o.name ? ` — «${o.syn}»` : ''}${o.adopted ? ' (заимствован)' : ''}` +
+      `${cfgMark(idx, o.cfg)}${why ? `; совпало: ${why}` : ''}\n  ${rel(idx, o.file)}; реквизитов ${o.attrs.length}, ТЧ ${o.ts.length}${regNote}`;
+  });
   return `Найдено ${res.length}${res.length > limit ? `, показаны первые ${limit}` : ''}:\n${out.join('\n')}\n` +
-    'Подробная структура объекта — навык meta-info.';
+    'Подробная структура объекта — навык meta-info; граф связей (подписки, движения, перехваты CFE, где используется как тип) — object_refs.';
 }
 
 function moduleMatches(mod, objectFilter) {
@@ -371,7 +680,8 @@ function selectModules(idx, spec) {
 
 function methodCode(file, m, maxLines) {
   const lines = readText(file).split(/\r?\n/);
-  const from = Math.max(0, m.line - 1 - (m.dir ? 1 : 0));
+  const dirCount = m.dir ? m.dir.split(/\s+(?=&)/).length : 0;
+  const from = Math.max(0, m.line - 1 - dirCount);
   const to = Math.min(lines.length, m.end, from + maxLines);
   const body = lines.slice(from, to).join('\n');
   return to < m.end ? `${body}\n// … ещё ${m.end - to} строк (до ${m.end})` : body;
@@ -384,16 +694,37 @@ export function findMethod(idx, { name, object, with_code = true, limit = 5, max
   for (const mod of selectModules(idx, object)) {
     for (const m of mod.methods) {
       const n = norm(m.name);
-      if (n === qn) exact.push({ mod, m });
-      else if (n.includes(qn)) partial.push({ mod, m });
+      const t = m.intercept ? norm(m.intercept.target) : '';
+      if (n === qn || t === qn) exact.push({ mod, m });
+      else if (n.includes(qn) || (t && t.includes(qn))) partial.push({ mod, m });
     }
   }
   const found = exact.length ? exact : partial;
   if (!found.length) return `Метод «${name}» не найден${object ? ` в «${object}»` : ''}. Модулей в индексе: ${idx.modules.length}.`;
+
+  // Дополнительно находим перехваты в расширениях для найденных базовых методов (если они ещё не в списке)
+  const seenKeys = new Set(found.map(({ mod, m }) => `${mod.file}:${m.line}`));
+  for (const { mod, m } of [...found]) {
+    if (mod.isExt) continue;
+    for (const extMod of idx.modules) {
+      if (!extMod.isExt || norm(extMod.id) !== norm(mod.id)) continue;
+      for (const em of extMod.methods) {
+        if (em.intercept && norm(em.intercept.target) === norm(m.name)) {
+          const k = `${extMod.file}:${em.line}`;
+          if (!seenKeys.has(k)) {
+            seenKeys.add(k);
+            found.push({ mod: extMod, m: em });
+          }
+        }
+      }
+    }
+  }
+
   const showCode = with_code && found.length <= 3;
   const out = [];
   for (const { mod, m } of found.slice(0, showCode ? 3 : Math.max(limit, 20))) {
-    out.push(`- ${mod.id}${cfgMark(idx, mod.cfg)} → ${m.kind} ${m.name}${m.export ? ' Экспорт' : ''}${m.dir ? ` ${m.dir}` : ''}\n  ${rel(idx, mod.file)}:${m.line}-${m.end}`);
+    const interceptBadge = m.intercept ? ` [перехват &${m.intercept.kind}("${m.intercept.target}")]` : '';
+    out.push(`- ${mod.id}${cfgMark(idx, mod.cfg)} → ${m.kind} ${m.name}${m.export ? ' Экспорт' : ''}${m.dir ? ` ${m.dir}` : ''}${interceptBadge}\n  ${rel(idx, mod.file)}:${m.line}-${m.end}`);
     if (showCode) out.push('```bsl\n' + methodCode(mod.file, m, max_lines) + '\n```');
   }
   const more = found.length > (showCode ? 3 : Math.max(limit, 20)) ? `\n… ещё ${found.length - out.length}` : '';
@@ -410,7 +741,10 @@ export function moduleMethods(idx, { module, exported_only = false }) {
   for (const mod of mods.slice(0, 15)) {
     const ms = mod.methods.filter((m) => !exported_only || m.export);
     out.push(`${mod.id}${cfgMark(idx, mod.cfg)} — ${rel(idx, mod.file)} (методов ${ms.length})`);
-    for (const m of ms) out.push(`  ${m.line}: ${m.kind} ${m.name}${m.export ? ' Экспорт' : ''}${m.dir ? ` ${m.dir}` : ''}`);
+    for (const m of ms) {
+      const interceptBadge = m.intercept ? ` [перехват &${m.intercept.kind}("${m.intercept.target}")]` : '';
+      out.push(`  ${m.line}: ${m.kind} ${m.name}${m.export ? ' Экспорт' : ''}${m.dir ? ` ${m.dir}` : ''}${interceptBadge}`);
+    }
   }
   if (mods.length > 15) out.push(`… ещё модулей: ${mods.length - 15} — уточните запрос.`);
   return out.join('\n');
@@ -420,7 +754,7 @@ function escapeRx(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
 export function findUsages(idx, { name, object, limit = 40 }) {
   const rx = new RegExp(`(^|[^\\wА-Яа-яЁё])${escapeRx(name)}\\s*\\(`, 'i');
-  const defRx = new RegExp(`^\\s*(Процедура|Функция|Procedure|Function)\\s+${escapeRx(name)}\\s*\\(`, 'i');
+  const defRx = new RegExp(`^\\s*(?:Асинх\\s+|Async\\s+)?(Процедура|Функция|Procedure|Function)\\s+${escapeRx(name)}\\s*\\(`, 'i');
   const hits = [];
   const perModule = new Map();
   let total = 0;
@@ -440,13 +774,310 @@ export function findUsages(idx, { name, object, limit = 40 }) {
       }
     }
   }
-  if (!total) return `Вызовы «${name}» не найдены.`;
-  const summary = [...perModule.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15).map(([m, n]) => `${m} ×${n}`).join(', ');
-  return `Вызовов: ${total} в ${perModule.size} модулях. По модулям: ${summary}\n${hits.join('\n')}` +
-    (total > hits.length ? `\n… показаны первые ${hits.length}` : '');
+
+  // Привязки в метаданных (подписки на события, регламентные задания, HTTP/Web-сервисы), формах (Form.xml) и перехватах CFE
+  const metaUsages = [];
+  const qn = norm(name);
+  for (const o of idx.objects) {
+    if (object && !norm(objTitle(o)).includes(norm(object))) continue;
+    if (o.subscription && o.subscription.handler) {
+      const hParts = o.subscription.handler.split('.');
+      if (norm(hParts[hParts.length - 1]) === qn || norm(o.subscription.handler) === qn) {
+        metaUsages.push(`- [ПодпискаНаСобытие.${o.name}] событие ${o.subscription.event} → ${o.subscription.handler} (${rel(idx, o.file)})`);
+      }
+    }
+    if (o.scheduledJob && o.scheduledJob.methodName) {
+      const mParts = o.scheduledJob.methodName.split('.');
+      if (norm(mParts[mParts.length - 1]) === qn || norm(o.scheduledJob.methodName) === qn) {
+        metaUsages.push(`- [РегламентноеЗадание.${o.name}] метод → ${o.scheduledJob.methodName} (${rel(idx, o.file)})`);
+      }
+    }
+    for (const hm of o.httpMethods || []) {
+      if (norm(hm.handler) === qn) {
+        metaUsages.push(`- [HTTPСервис.${o.name}] ${hm.httpMethod} ${hm.template} → ${hm.handler} (${rel(idx, o.file)})`);
+      }
+    }
+    for (const op of o.wsOperations || []) {
+      if (norm(op.handler) === qn) {
+        metaUsages.push(`- [WebСервис.${o.name}] операция ${op.name} → ${op.handler} (${rel(idx, o.file)})`);
+      }
+    }
+  }
+  for (const fm of idx.forms || []) {
+    if (object && !moduleMatches({ id: fm.id }, object)) continue;
+    for (const [evtName, handler] of fm.events) {
+      if (norm(handler) === qn) {
+        metaUsages.push(`- [${fm.id}] событие формы/элемента ${evtName} → ${handler} (${rel(idx, fm.file)})`);
+      }
+    }
+    for (const [cmdName, handler] of fm.commands) {
+      if (norm(handler) === qn) {
+        metaUsages.push(`- [${fm.id}] команда формы ${cmdName} → ${handler} (${rel(idx, fm.file)})`);
+      }
+    }
+  }
+  for (const mod of selectModules(idx, object)) {
+    for (const m of mod.methods) {
+      if (m.intercept && norm(m.intercept.target) === qn) {
+        metaUsages.push(`- [Перехват CFE в ${mod.id}${cfgMark(idx, mod.cfg)}] &${m.intercept.kind}("${m.intercept.target}") → ${m.name} (${rel(idx, mod.file)}:${m.line})`);
+      }
+    }
+  }
+
+  if (!total && !metaUsages.length) return `Вызовы «${name}» не найдены.`;
+  const parts = [];
+  if (total) {
+    const summary = [...perModule.entries()].sort((a, b) => b[1] - a[1]).slice(0, 15).map(([m, n]) => `${m} ×${n}`).join(', ');
+    parts.push(`Вызовов: ${total} в ${perModule.size} модулях. По модулям: ${summary}\n${hits.join('\n')}` +
+      (total > hits.length ? `\n… показаны первые ${hits.length}` : ''));
+  } else {
+    parts.push(`Прямых вызовов в коде .bsl: 0.`);
+  }
+  if (metaUsages.length) {
+    parts.push(`Привязки в метаданных, формах и расширениях (${metaUsages.length}):\n${metaUsages.slice(0, limit).join('\n')}`);
+  }
+  return parts.join('\n\n');
 }
 
 function short(s, n) { return s.length > n ? s.slice(0, n - 1) + '…' : s; }
+
+// ---------------------------------------------------------------------------
+// Граф связей и зависимостей объекта метаданных (object_refs)
+// ---------------------------------------------------------------------------
+function resolveTargetObject(idx, query) {
+  const qn = norm(query).trim();
+  let typeFilter = null;
+  let objName = qn;
+  const m = qn.match(/^([a-zа-я]+)[.\s]+(.+)$/);
+  if (m && TYPE_ALIASES.has(m[1])) {
+    typeFilter = TYPE_ALIASES.get(m[1]);
+    objName = m[2].trim();
+  }
+  const exact = idx.objects.filter((o) => (!typeFilter || o.type === typeFilter) && norm(o.name) === objName);
+  if (exact.length) {
+    // Предпочитаем объект основной конфигурации как базовый, но собираем и все экземпляры из расширений
+    const base = exact.find((o) => !o.isExt) || exact[0];
+    return { base, all: exact };
+  }
+  const partial = idx.objects.filter((o) => (!typeFilter || o.type === typeFilter) && (norm(o.name).includes(objName) || norm(o.syn).includes(objName)));
+  if (partial.length) {
+    const first = partial.find((o) => !o.isExt) || partial[0];
+    const allSame = idx.objects.filter((o) => o.type === first.type && norm(o.name) === norm(first.name));
+    return { base: first, all: allSame };
+  }
+  return null;
+}
+
+export function objectRefs(idx, { object, limit = 40 }) {
+  const resolved = resolveTargetObject(idx, object);
+  if (!resolved) {
+    return `Объект «${object}» не найден в индексе (всего объектов: ${idx.objects.length}). Используйте find_object для поиска.`;
+  }
+  const { base, all } = resolved;
+  const title = objTitle(base);
+  const titleNorm = norm(title);
+  const out = [];
+
+  // 1. Заголовок и сводка по файлам (база + расширения)
+  const filesLine = all.map((o) => `${rel(idx, o.file)}${o.adopted ? ' (заимствован в расширении)' : ''}${cfgMark(idx, o.cfg)}`).join(', ');
+  out.push(`=== ${title}${base.syn && base.syn !== base.name ? ` — «${base.syn}»` : ''} ===`);
+  out.push(`Файлы: ${filesLine}`);
+
+  // Собираем карту ОпределяемыхТипов: какие ОпределяемыеТипы включают наш объект
+  const definedTypesContainingObj = new Set();
+  const refPrefix = {
+    Catalogs: 'СправочникСсылка', Documents: 'ДокументСсылка', Enums: 'ПеречислениеСсылка',
+    ChartsOfCharacteristicTypes: 'ПланВидовХарактеристикСсылка', ChartsOfAccounts: 'ПланСчетовСсылка',
+    ChartsOfCalculationTypes: 'ПланВидовРасчетаСсылка', ExchangePlans: 'ПланОбменаСсылка',
+    BusinessProcesses: 'БизнесПроцессСсылка', Tasks: 'ЗадачаСсылка',
+  }[base.type];
+  const objPrefix = {
+    Catalogs: 'СправочникОбъект', Documents: 'ДокументОбъект',
+    ChartsOfCharacteristicTypes: 'ПланВидовХарактеристикОбъект', ChartsOfAccounts: 'ПланСчетовОбъект',
+    ChartsOfCalculationTypes: 'ПланВидовРасчетаОбъект', ExchangePlans: 'ПланОбменаОбъект',
+    BusinessProcesses: 'БизнесПроцессОбъект', Tasks: 'ЗадачаОбъект',
+    InformationRegisters: 'НаборЗаписейРегистраСведений', AccumulationRegisters: 'НаборЗаписейРегистраНакопления',
+    AccountingRegisters: 'НаборЗаписейРегистраБухгалтерии', CalculationRegisters: 'НаборЗаписейРегистраРасчета',
+  }[base.type];
+  const mgrPrefix = {
+    Catalogs: 'СправочникМенеджер', Documents: 'ДокументМенеджер', Enums: 'ПеречислениеМенеджер',
+    InformationRegisters: 'РегистрСведенийМенеджер', AccumulationRegisters: 'РегистрНакопленияМенеджер',
+    AccountingRegisters: 'РегистрБухгалтерииМенеджер', CalculationRegisters: 'РегистрРасчетаМенеджер',
+    Constants: 'КонстантаМенеджерЗначения',
+  }[base.type];
+
+  const matchTypeTargets = new Set([titleNorm]);
+  if (refPrefix) matchTypeTargets.add(norm(`${refPrefix}.${base.name}`));
+  if (objPrefix) matchTypeTargets.add(norm(`${objPrefix}.${base.name}`));
+  if (mgrPrefix) matchTypeTargets.add(norm(`${mgrPrefix}.${base.name}`));
+
+  for (const dt of idx.objects) {
+    if (dt.type !== 'DefinedTypes') continue;
+    if ((dt.types || []).some((t) => matchTypeTargets.has(norm(t)))) {
+      definedTypesContainingObj.add(norm(`ОпределяемыйТип.${dt.name}`));
+    }
+  }
+
+  // Если сам исследуемый объект — ОпределяемыйТип, покажем его состав
+  const mergedTypes = [...new Set(all.flatMap((o) => o.types || []))];
+  if (mergedTypes.length) {
+    out.push(`Тип / Состав типов (${mergedTypes.length}): ${mergedTypes.join(' | ')}`);
+  }
+
+  // 2. Движения по регистрам (для документа — какие регистры двигает; для регистра — какие документы его двигают)
+  const regRecords = [...new Set(all.flatMap((o) => o.registerRecords || []))];
+  if (regRecords.length) {
+    out.push(`\nДвижения документа по регистрам (${regRecords.length}):`);
+    for (const r of regRecords) out.push(`  - ${r}`);
+  }
+  if (base.type.endsWith('Registers')) {
+    const recorders = [];
+    for (const o of idx.objects) {
+      if ((o.registerRecords || []).some((r) => norm(r) === titleNorm)) {
+        recorders.push(`${objTitle(o)}${cfgMark(idx, o.cfg)}`);
+      }
+    }
+    const uniqRecorders = [...new Set(recorders)];
+    out.push(`\nРегистраторы (документы, двигающие регистр) (${uniqRecorders.length}):`);
+    if (uniqRecorders.length) {
+      for (const r of uniqRecorders.slice(0, limit)) out.push(`  - ${r}`);
+    } else {
+      out.push('  (нет документов в RegisterRecords)');
+    }
+  }
+
+  // 3. Ввод на основании (BasedOn) и Владельцы справочников (Owners)
+  const basedOn = [...new Set(all.flatMap((o) => o.basedOn || []))];
+  const basedOnReverse = idx.objects
+    .filter((o) => (o.basedOn || []).some((b) => norm(b) === titleNorm))
+    .map((o) => objTitle(o));
+  if (basedOn.length || basedOnReverse.length) {
+    if (basedOn.length) out.push(`\nВводится на основании: ${basedOn.join(', ')}`);
+    if (basedOnReverse.length) out.push(`На основании него вводятся: ${[...new Set(basedOnReverse)].join(', ')}`);
+  }
+
+  const owners = [...new Set(all.flatMap((o) => o.owners || []))];
+  const subordinates = idx.objects
+    .filter((o) => (o.owners || []).some((ow) => norm(ow) === titleNorm))
+    .map((o) => objTitle(o));
+  if (owners.length || subordinates.length) {
+    if (owners.length) out.push(`\nВладельцы справочника: ${owners.join(', ')}`);
+    if (subordinates.length) out.push(`Подчинённые справочники: ${[...new Set(subordinates)].join(', ')}`);
+  }
+
+  // 4. Подписки на события (EventSubscriptions), срабатывающие на этот объект
+  const classWildcards = new Set();
+  if (objPrefix) classWildcards.add(norm(`${objPrefix} (все)`));
+  if (mgrPrefix) classWildcards.add(norm(`${mgrPrefix} (все)`));
+
+  const subscriptions = [];
+  for (const o of idx.objects) {
+    if (o.type !== 'EventSubscriptions' || !o.subscription) continue;
+    const sub = o.subscription;
+    let via = null;
+    for (const src of sub.sources || []) {
+      const sn = norm(src);
+      if (matchTypeTargets.has(sn)) { via = 'прямая привязка'; break; }
+      if (definedTypesContainingObj.has(sn)) { via = `через ${src}`; break; }
+      if (classWildcards.has(sn)) { via = `на все объекты вида (${src})`; break; }
+    }
+    if (via) {
+      subscriptions.push(`  - ПодпискаНаСобытие.${o.name}${cfgMark(idx, o.cfg)}: событие «${sub.event}» → ${sub.handler} (${via})`);
+    }
+  }
+  out.push(`\nПодписки на события (${subscriptions.length}):`);
+  if (subscriptions.length) {
+    out.push(...subscriptions.slice(0, limit));
+  } else {
+    out.push('  (подписок на этот объект не найдено)');
+  }
+
+  // 5. Перехваты и доработки в расширениях (CFE)
+  const cfeLines = [];
+  for (const o of all) {
+    if (!o.isExt) continue;
+    const ownAttrs = (o.attrs || []).map((a) => a[0]);
+    const ownTs = (o.ts || []).map((t) => t.name);
+    cfeLines.push(`  - Заимствован в расширении [${o.cfg}] (${rel(idx, o.file)})` +
+      (ownAttrs.length ? `; реквизиты в расширении: ${ownAttrs.join(', ')}` : '') +
+      (ownTs.length ? `; ТЧ в расширении: ${ownTs.join(', ')}` : ''));
+  }
+  for (const mod of idx.modules) {
+    if (!mod.isExt || !isExactModule(mod, title)) continue;
+    for (const m of mod.methods) {
+      if (m.intercept) {
+        cfeLines.push(`  - Перехват метода в [${mod.cfg}] ${mod.id}: &${m.intercept.kind}("${m.intercept.target}") → ${m.kind} ${m.name} (${rel(idx, mod.file)}:${m.line})`);
+      } else {
+        cfeLines.push(`  - Собственный метод в [${mod.cfg}] ${mod.id}: ${m.kind} ${m.name}${m.export ? ' Экспорт' : ''} (${rel(idx, mod.file)}:${m.line})`);
+      }
+    }
+  }
+  if (cfeLines.length) {
+    out.push(`\nДоработки и перехваты в расширениях CFE (${cfeLines.length}):`);
+    out.push(...cfeLines.slice(0, limit));
+  }
+
+  // 6. Где объект используется как тип данных (Where Used)
+  const whereUsed = [];
+  const checkTypeMatch = (types) => {
+    for (const t of types || []) {
+      const tn = norm(t);
+      if (matchTypeTargets.has(tn)) return t;
+      if (definedTypesContainingObj.has(tn)) return `через ${t}`;
+    }
+    return null;
+  };
+
+  for (const o of idx.objects) {
+    if (o.type === base.type && norm(o.name) === norm(base.name)) continue;
+    const objHit = checkTypeMatch(o.types);
+    if (objHit) {
+      whereUsed.push(`  - ${objTitle(o)}${cfgMark(idx, o.cfg)} (${objHit})`);
+    }
+    for (const [an, , tag, atypes] of o.attrs || []) {
+      const hit = checkTypeMatch(atypes);
+      if (hit) {
+        const tagRu = { Dimension: 'измерение', Resource: 'ресурс', Attribute: 'реквизит' }[tag] || 'реквизит';
+        whereUsed.push(`  - ${objTitle(o)}.${an} (${tagRu}, тип: ${hit})`);
+      }
+    }
+    for (const t of o.ts || []) {
+      for (const [an, , atypes] of t.attrs || []) {
+        const hit = checkTypeMatch(atypes);
+        if (hit) {
+          whereUsed.push(`  - ${objTitle(o)}.${t.name}.${an} (реквизит ТЧ, тип: ${hit})`);
+        }
+      }
+    }
+  }
+  out.push(`\nГде используется как тип (${whereUsed.length}):`);
+  if (whereUsed.length) {
+    out.push(...whereUsed.slice(0, limit));
+    if (whereUsed.length > limit) out.push(`  … ещё ${whereUsed.length - limit}`);
+  } else {
+    out.push('  (ссылок на этот тип в реквизитах/измерениях не найдено)');
+  }
+
+  // 7. Общие реквизиты и Функциональные опции
+  const commonAttrs = [];
+  const funcOptions = [];
+  for (const o of idx.objects) {
+    if (o.type === 'CommonAttributes') {
+      const explicit = o.contentUse?.[titleNorm];
+      if (explicit === true || (explicit === undefined && o.autoUse)) {
+        commonAttrs.push(o.name);
+      }
+    } else if (o.type === 'FunctionalOptions') {
+      if (norm(o.location) === titleNorm || (o.foContent || []).some((c) => norm(c) === titleNorm)) {
+        funcOptions.push(o.name);
+      }
+    }
+  }
+  if (commonAttrs.length) out.push(`\nОбщие реквизиты объекта: ${[...new Set(commonAttrs)].join(', ')}`);
+  if (funcOptions.length) out.push(`Функциональные опции: ${[...new Set(funcOptions)].join(', ')}`);
+
+  return out.join('\n');
+}
 
 export function searchCode(idx, { pattern, regex = false, path_filter, include_xml = false, limit = 40 }) {
   let rx;
@@ -780,15 +1411,19 @@ export async function semanticIndex(idx, a = {}, { env = process.env } = {}) {
 export const ARG_ALIASES = {
   semantic_search: { query: ['text', 'q', 'question'] },
   find_object: { query: ['name', 'object', 'text', 'q'] },
+  object_refs: { object: ['query', 'name', 'target'] },
   find_method: { name: ['method', 'method_name', 'query'] },
   module_methods: { module: ['object', 'name', 'query'] },
   find_usages: { name: ['method', 'method_name', 'query'] },
   search_code: { pattern: ['query', 'text', 'string'] },
+  validate_query: { query: ['text', 'sql', 'q'] },
 };
 const ARG_EXAMPLES = {
   semantic_search: '{"query": "где проверяется кредитный лимит"}', find_object: '{"query": "ЗадачиМне"}',
+  object_refs: '{"object": "Документ.ЗаказКлиента"}',
   find_method: '{"name": "ПриЗаписи", "object": "Документ.Задача"}', module_methods: '{"module": "Документ.Задача"}',
   find_usages: '{"name": "ПриЗаписи"}', search_code: '{"pattern": "ЗаписатьИзменения("}',
+  validate_query: '{"query": "ВЫБРАТЬ Ссылка ИЗ Справочник.Номенклатура"}',
 };
 
 function aliasProps(canonical, names) {
@@ -841,23 +1476,52 @@ const TOOLS = [
       query: { type: 'string', description: 'Обязательно. Имя, синоним, реквизит или «Вид.Имя», например «ЗадачиМне» или «Документ.Задача»' },
       type: { type: 'string', description: 'Вид объекта: Справочник, Документ, РегистрСведений…' }, limit: { type: 'number' }, root: ROOT_ARG,
       ...aliasProps('query', ['name', 'object']) } } },
+  { name: 'object_refs', description: 'Граф связей и зависимостей объекта метаданных 1С: подписки на события (EventSubscriptions), ' +
+      'движения документа по регистрам (RegisterRecords) или регистраторы регистра, перехваты методов и заимствования в расширениях (CFE), ' +
+      'ввод на основании (BasedOn), где объект используется как тип реквизита/измерения/ресурса (where used), общие реквизиты и функциональные опции.',
+    inputSchema: { type: 'object', properties: {
+      object: { type: 'string', description: 'Обязательно. «Вид.Имя» или имя объекта, например «Документ.ЗаказКлиента» или «Справочник.Номенклатура»' },
+      limit: { type: 'number', description: 'Максимум элементов в каждой секции (по умолчанию 40)' }, root: ROOT_ARG,
+      ...aliasProps('object', ['query', 'name', 'target']) } } },
   { name: 'find_method', description: 'Найти процедуру/функцию по имени и сразу получить её код (если совпадений до 3). ' +
+      'Автоматически показывает и перехваты этого метода в расширениях CFE (&Перед, &После, &Вместо, &ИзменениеИКонтроль). ' +
       'Аргументы: name — имя метода (обязательно); object сужает поиск: «ОбщийМодуль.Имя», «Документ.Задача», «Документ.Задача.Форма.ФормаДокумента».',
     inputSchema: { type: 'object', properties: {
       name: { type: 'string', description: 'Обязательно. Имя процедуры/функции или его часть' },
       object: { type: 'string', description: 'Сузить поиск: «ОбщийМодуль.Имя», «Документ.Задача»' },
       with_code: { type: 'boolean' }, max_lines: { type: 'number' }, root: ROOT_ARG, ...aliasProps('name', ['method']) } } },
-  { name: 'module_methods', description: 'Список процедур и функций модулей объекта или общего модуля со строками, экспортом и директивами. ' +
+  { name: 'module_methods', description: 'Список процедур и функций модулей объекта или общего модуля со строками, экспортом, директивами и перехватами CFE. ' +
       'Аргумент — module: {"module": "Документ.Задача"}.',
     inputSchema: { type: 'object', properties: {
       module: { type: 'string', description: 'Обязательно. «Документ.Задача», «ОбщийМодуль.ОбщегоНазначения» или часть пути' },
       exported_only: { type: 'boolean' }, root: ROOT_ARG, ...aliasProps('module', ['object', 'name']) } } },
-  { name: 'find_usages', description: 'Где вызывается метод: файлы и строки вызовов с именем вызывающего метода, сводка по модулям. ' +
+  { name: 'find_usages', description: 'Где вызывается или привязан метод: вызовы в .bsl, обработчики событий и команд в Form.xml, ' +
+      'подписки на события, регламентные задания, HTTP/Web-сервисы и перехваты в расширениях CFE. ' +
       'Аргументы: name — имя метода (обязательно), object — сузить по модулю.',
     inputSchema: { type: 'object', properties: {
       name: { type: 'string', description: 'Обязательно. Точное имя вызываемой процедуры/функции' },
       object: { type: 'string', description: 'Искать вызовы только в модулях этого объекта' },
       limit: { type: 'number' }, root: ROOT_ARG, ...aliasProps('name', ['method']) } } },
+  { name: 'validate_query', description: 'Статическая проверка текста запроса 1С по схеме метаданных конфигурации (без запуска 1С): ' +
+      'проверяет существование таблиц, табличных частей, виртуальных таблиц регистров (СрезПоследних, Остатки, Обороты и др.), ' +
+      'реквизитов, измерений, ресурсов, стандартных и общих реквизитов, цепочек через точку (Т.Договор.Валюта), ' +
+      'литералов ЗНАЧЕНИЕ(Перечисление.Х.У) и временных таблиц пакета (ПОМЕСТИТЬ). При опечатках подсказывает похожие имена.',
+    inputSchema: { type: 'object', properties: {
+      query: { type: 'string', description: 'Обязательно. Текст запроса 1С («ВЫБРАТЬ ... ИЗ ...», допускается с символами «|» из модуля .bsl)' },
+      root: ROOT_ARG, ...aliasProps('query', ['text', 'sql', 'q']) } } },
+  { name: 'event_log', description: 'Чтение Журнала регистрации 1С (SQLite 1Cv8.lgd и текстовый *.lgp + 1Cv8.lgf) без запуска конфигуратора. ' +
+      'Возвращает последние ошибки выполнения, проблемы проведения и фоновых заданий с полным комментарием 1С и автоматически ' +
+      'привязывает серверный стек-трейс BSL ({Модуль(Строка)}) к файлам и строкам проекта.',
+    inputSchema: { type: 'object', properties: {
+      database: { type: 'string', description: 'ID, имя или алиас базы из .v8-project.json (по умолчанию берётся default)' },
+      log_path: { type: 'string', description: 'Явный путь к файлу 1Cv8.lgd, папке 1Cv8Log или каталогу файловой базы' },
+      errors_only: { type: 'boolean', description: 'Только ошибки (по умолчанию true; передайте false для всех событий)' },
+      search: { type: 'string', description: 'Фильтр по тексту ошибки/комментария, объекту метаданных или пользователю' },
+      event: { type: 'string', description: 'Фильтр по виду события (например «Проведение», «PerformError», «Job»)' },
+      since_minutes: { type: 'number', description: 'Только записи за последние N минут' },
+      limit: { type: 'number', description: 'Количество записей (по умолчанию 20, максимум 100)' },
+      with_code: { type: 'boolean', description: 'Показывать фрагмент кода .bsl вокруг строки ошибки из стек-трейса (по умолчанию true)' },
+      root: ROOT_ARG } } },
   { name: 'search_code', description: 'Поиск строки (или регулярного выражения) по BSL-модулям выгрузки с ограниченным выводом. ' +
       'Аргумент — pattern: {"pattern": "ЗаписатьИзменения("}.',
     inputSchema: { type: 'object', properties: {
@@ -868,10 +1532,13 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: { refresh: { type: 'boolean' }, root: ROOT_ARG } } },
 ];
 
-const INSTRUCTIONS = 'Поиск по XML-выгрузке 1С. Для поиска объектов, методов и вызовов используй эти инструменты, а не grep/sed/cat ' +
+const INSTRUCTIONS = 'Поиск и статический анализ по XML-выгрузке 1С. Для поиска объектов, связей, методов и вызовов используй эти инструменты, а не grep/sed/cat ' +
   'по файлам выгрузки: ответы короткие. semantic_search(query) — где реализовано X (по смыслу, когда имя неизвестно); ' +
-  'find_object(query) — объект по имени/синониму; find_method(name, object?) — метод с кодом; ' +
-  'module_methods(module) — состав модуля; find_usages(name, object?) — кто вызывает; search_code(pattern) — строка в коде.';
+  'find_object(query) — объект по имени/синониму/реквизиту; object_refs(object) — граф связей объекта (подписки на события, движения регистров, перехваты CFE, где используется как тип); ' +
+  'find_method(name, object?) — метод с кодом и перехватами CFE; module_methods(module) — состав модуля; ' +
+  'find_usages(name, object?) — кто вызывает (включая Form.xml, подписки, регл. задания); ' +
+  'validate_query(query) — проверить таблицы и поля запроса 1С по метаданным; event_log() — прочитать ошибки и стек-трейсы из Журнала регистрации 1С; ' +
+  'search_code(pattern) — строка в коде.';
 
 function semanticStatusLine(idx) {
   try {
@@ -888,6 +1555,7 @@ async function handleCall(name, a, root) {
   a = normalizeArgs(name, a || {});
   if (!existsSync(root)) throw new Error(`каталог не найден: ${root}`);
   const idx = buildIndex(root, { force: name === 'index_status' && a.refresh });
+  if (name === 'event_log') return readEventLog(idx, a);
   if (!idx.configs.length) {
     return `В ${root} не найдено выгрузок 1С (Configuration.xml). Запустите OpenCode из папки проекта или передайте root.`;
   }
@@ -895,9 +1563,11 @@ async function handleCall(name, a, root) {
     case 'semantic_search': return semanticSearch(idx, a);
     case 'semantic_index': return semanticIndex(idx, a);
     case 'find_object': return findObject(idx, a);
+    case 'object_refs': return objectRefs(idx, a);
     case 'find_method': return findMethod(idx, a);
     case 'module_methods': return moduleMethods(idx, a);
     case 'find_usages': return findUsages(idx, a);
+    case 'validate_query': return validateQuery(idx, a);
     case 'search_code': return searchCode(idx, a);
     case 'index_status': return `${indexStatus(idx)}\n${semanticStatusLine(idx)}`;
     default: throw new Error(`неизвестный инструмент ${name}`);

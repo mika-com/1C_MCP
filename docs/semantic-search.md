@@ -275,21 +275,66 @@ Get-ChildItem "$env:LOCALAPPDATA\1c-opencode\semantic\vectors" -Directory -Filte
    `lmstudio-autostart.ps1 -Run` вызывает `lmstudio-load.ps1 -Reload`, так что при автозапуске модели всегда
    перезагружаются с `--gpu max`.
 
-## Несколько пользователей (RDP)
+## Несколько пользователей (RDP) и оптимальное распределение памяти (например, 32 ГБ ОЗУ + 32 ГБ VRAM)
 
-- LM Studio — один на сервер, установлен у одного пользователя, слушает 127.0.0.1:1234. Модели загружены один раз,
-  запросы всех пользователей идут в него.
-- Хранилище векторов по умолчанию своё у каждого пользователя. Общее — один раз от администратора:
-  `install.cmd -Machine -WithSemantic` создаёт `C:\ProgramData\1c-opencode\semantic` (пользователям — изменение,
-  только этот каталог) и переменную машины `SEMANTIC_STORE_DIR`.
-- Запись атомарная (временный файл → переименование), строит индекс в одном хранилище только один процесс
-  (`build.lock` с heartbeat; брошенная блокировка снимается через 2 мин). Остальные в это время ищут по готовым
-  векторам. Процессы других пользователей не трогаются.
-- Автозапуск LM Studio без входа владельца (необязательно, окно администратора):
-  `scripts\lmstudio-autostart.ps1 -Register` — задача планировщика «1c-agent LM Studio» при старте системы
-  (`lms daemon up`, `lms server start --bind 127.0.0.1`, загрузка моделей шага 5) от имени владельца LM Studio.
-  Удаление — `-Unregister`. Проще, если владелец всё равно входит: в LM Studio Settings → «Run the LLM server on
-  login».
+На терминальном сервере с несколькими RDP-сессиями **узкое место — системная ОЗУ** (каждая сессия с 1С, браузером,
+OpenCode и BSL LS расходует 4–8 ГБ RAM). Поэтому все модели и вычисления должны целиком жить в **VRAM**, а кэш
+векторов — быть общим для всех пользователей:
+
+1. **Один LM Studio на весь сервер (`127.0.0.1:1234`):**
+   - Не запускайте LM Studio в каждой пользовательской сессии. Запустите один экземпляр под учётной записью
+     администратора / сервисной учёткой — все RDP-сессии обращаются к нему через `http://127.0.0.1:1234/v1`.
+   - Автозапуск при старте Windows (даже без входа владельца в RDP):
+     ```powershell
+     powershell -ExecutionPolicy Bypass -File scripts\lmstudio-autostart.ps1 -Register
+     ```
+     (удаление — `-Unregister`).
+
+2. **100% моделей в VRAM, 0 ГБ в системной ОЗУ:**
+   - `Qwen3-Embedding-4B (Q8_0)` (~4,5 ГБ) + `Qwen3-Reranker-4B (Q8_0)` (~4,5 ГБ) + контекст/батчи занимают
+     **~10–11 ГБ VRAM** (из 32 ГБ VRAM остаётся ещё ~21 ГБ под основную LLM или запас).
+   - Если стоят две карты (например, 2×16 ГБ) — в `Ctrl+Shift+H` (Hardware) выберите **Priority order** и поставьте
+     первой карту, свободную от чат-модели (не *Split evenly*).
+   - Обязательно включите **Limit offload to dedicated GPU memory**, чтобы при нехватке VRAM слои не выгружались в
+     системную ОЗУ.
+   - Загрузите модели на GPU:
+     ```powershell
+     powershell -ExecutionPolicy Bypass -File scripts\lmstudio-load.ps1 -Reload
+     ```
+
+3. **Общее content-addressed хранилище векторов (`C:\ProgramData\1c-opencode\semantic`):**
+   - Векторы в `1c-search` хранятся по **SHA-1 хэшу текста процедуры/объекта** (`vectors/<модель>-d1024/seg-*.vec`), а
+     манифест рабочей папки — отдельно в `projects/<хэш-пути>.json`. Если у 5 разработчиков 5 своих git-клонов одной
+     конфигурации, 99% процедур совпадают и считаются видеокартой **ровно один раз**.
+   - Настройка один раз от Администратора:
+     ```powershell
+     install.cmd -Machine -WithSemantic
+     ```
+     или вручную из PowerShell (Администратор):
+     ```powershell
+     $dir = 'C:\ProgramData\1c-opencode\semantic'
+     New-Item -ItemType Directory -Force -Path $dir | Out-Null
+     icacls $dir /grant "*S-1-5-32-545:(OI)(CI)M" | Out-Null
+
+     [Environment]::SetEnvironmentVariable('SEMANTIC_STORE_DIR', $dir, 'Machine')
+     [Environment]::SetEnvironmentVariable('SEMANTIC_SEARCH', 'auto', 'Machine')
+     [Environment]::SetEnvironmentVariable('SEMANTIC_BATCH', '64', 'Machine')
+     [Environment]::SetEnvironmentVariable('SEMANTIC_RERANK_CONCURRENCY', '4', 'Machine')
+     ```
+   - `SEMANTIC_BATCH=64` (вместо 16 по умолчанию) на 32 ГБ VRAM ускоряет первичную векторизацию крупной конфигурации
+     в **2,5–3 раза**.
+   - В оперативной памяти каждого процесса `1c-search` квантованные `Int8`-векторы (`dim=1024`) занимают всего
+     **~150 МБ на 150 000 процедур** (~750 МБ суммарно на 5 RDP-сессий).
+
+4. **Первичное построение индекса (один раз из консоли):**
+   ```powershell
+   powershell -ExecutionPolicy Bypass -File scripts\check-lmstudio.ps1
+   node mcp\code-search.mjs --semantic-build --root D:\1c\my-config
+   ```
+   Когда остальные пользователи откроют свои клоны конфигурации в своих RDP-сессиях, `1c-search` возьмёт готовые
+   векторы из `C:\ProgramData\1c-opencode\semantic` и досчитает только изменённые в их ветке модули за 2–5 секунд.
+   Запись сегментов атомарная (временный файл → rename), одновременно достраивает индекс только один процесс
+   (`build.lock` с heartbeat; брошенная блокировка снимается через 2 мин), остальные в это время ищут без блокировок.
 
 ## Другой сервер реранкера: `/v1/rerank`
 
