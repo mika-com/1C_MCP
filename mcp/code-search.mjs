@@ -1602,7 +1602,7 @@ async function cli(argv) {
 
 if (process.argv[1] && resolve(process.argv[1]) === resolve(fileURLToPath(import.meta.url))) {
   const argv = process.argv.slice(2);
-  if (argv.includes('--semantic-build') || argv.includes('--semantic-status')) {
+  if (argv.includes('--semantic-build') || argv.includes('--build-vectors') || argv.includes('--semantic-status') || argv.includes('--status')) {
     cli(argv).then((code) => process.exit(code), (e) => { console.error(e.stack || e.message); process.exit(1); });
   } else {
     startServer({
