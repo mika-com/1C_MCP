@@ -10,6 +10,7 @@
         "type": "local",
         "command": [
           "node",
+          "--max-old-space-size=8192",
           "./mcp/code-search.mjs"
         ],
         "timeout": {

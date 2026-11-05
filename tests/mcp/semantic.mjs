@@ -412,5 +412,45 @@ console.log('semantic: EOS (appendEos) — по умолчанию выключ�
   for (const d of [storeL, store2]) rmSync(d, { recursive: true, force: true });
 }
 
+console.log('semantic: алиасы моделей LM Studio, родительский .v8-project.json и манифесты подпапок');
+{
+  // В LM Studio модели загружены как text-embedding-qwen3-embedding-4b и qwen.qwen3-reranker-4b
+  const fake = await startFake({
+    models: ['text-embedding-qwen3-embedding-4b', 'qwen.qwen3-reranker-4b'],
+    embedModelMissing: 'text-embedding-qwen3-embedding-4b',
+  });
+  const root = makeProject();
+  const subCf = join(root, 'src', 'cf');
+  const store = mkdtempSync(join(tmpdir(), 'sem-alias-'));
+  // .v8-project.json лежит в корне проекта root, а поиск вызывается в подпапке src/cf
+  writeFileSync(join(root, '.v8-project.json'), JSON.stringify({ semanticSearch: { storeDir: store, topK: 9 } }));
+  const subCfg = sem.loadConfig(subCf, {});
+  ok(subCfg.storeDir === store && subCfg.topK === 9, 'readProjectSection поднимается к родительскому .v8-project.json');
+
+  // Строим индекс для подпапки src/cf (по умолчанию embedModel=qwen3-embedding-4b, а сервер ждёт text-embedding-qwen3-embedding-4b)
+  const env = envFor(fake, store);
+  reset();
+  const stSub = await build(subCf, env);
+  ok(/5 из 5 фрагментов с векторами \(100%\)/.test(stSub), 'build сработал через авто-сопоставление text-embedding-qwen3-embedding-4b', stSub);
+  ok(fake.stats.inputs.every((i) => i.model === 'text-embedding-qwen3-embedding-4b'), 'в /embeddings передан фактический ID модели из /models');
+
+  // Теперь ищем из родительской папки root (для которой своего манифеста ещё нет — должен подхватиться манифест src/cf!)
+  const srParent = await search(root, env, { query: 'где проверяется кредитный лимит контрагента' });
+  ok(/Режим: гибридный/.test(srParent) && /^1\. .*ПроверитьКредитныйЛимит/m.test(srParent), 'поиск из родительской папки root подхватил манифест подпапки src/cf', srParent);
+
+  // Статус на родительской папке показывает сопоставление моделей и подхваченный манифест
+  const stParent = await withEnv(env, () => semanticIndex(buildIndex(root, { force: true }), { action: 'status' }, { env }));
+  ok(/сопоставлены: .*qwen3-embedding-4b → text-embedding-qwen3-embedding-4b/.test(stParent) && /подхвачен из/.test(stParent), 'статус показывает сопоставленные модели и адаптированный манифест', stParent);
+
+  // И наоборот: если в .v8-project.json прописали text-embedding-qwen3-embedding-4b, хранилище vectors/qwen3-embedding-4b-d64 продолжает работать
+  const envPrefixed = envFor(fake, store, { SEMANTIC_EMBED_MODEL: 'text-embedding-qwen3-embedding-4b' });
+  ok(sem.vectorDir(sem.loadConfig(subCf, envPrefixed)).endsWith('qwen3-embedding-4b-d64'), 'vectorDir сохраняет совместимость с канонической папкой qwen3-embedding-4b-d64');
+  const srPrefixed = await search(subCf, envPrefixed, { query: 'кредитный лимит контрагента' });
+  ok(/Режим: гибридный/.test(srPrefixed), 'манифест qwen3-embedding-4b подходит при SEMANTIC_EMBED_MODEL=text-embedding-qwen3-embedding-4b', srPrefixed);
+
+  await fake.close();
+  rmSync(store, { recursive: true, force: true });
+}
+
 console.log(`\nsemantic: ${passed} ok, ${failed} fail`);
 process.exit(failed ? 1 : 0);

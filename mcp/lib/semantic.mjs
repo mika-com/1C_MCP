@@ -12,9 +12,9 @@
 // Общий каталог для всех пользователей сервера — SEMANTIC_STORE_DIR / semanticSearch.storeDir.
 
 import { readFileSync, writeFileSync, renameSync, mkdirSync, readdirSync, statSync, unlinkSync, openSync, closeSync,
-  writeSync, utimesSync, existsSync } from 'node:fs';
+  writeSync, readSync, utimesSync, existsSync } from 'node:fs';
 import { join, resolve } from 'node:path';
-import { homedir, hostname, userInfo } from 'node:os';
+import { homedir, hostname, tmpdir, userInfo } from 'node:os';
 import { createHash, randomBytes } from 'node:crypto';
 
 export const CHUNK_FORMAT = 1;
@@ -87,12 +87,22 @@ export function defaultStoreDir(env = process.env) {
 
 export function readProjectSection(root) {
   try {
-    const f = join(root, '.v8-project.json');
-    if (!existsSync(f)) return {};
-    const j = JSON.parse(stripJsonComments(readFileSync(f, 'utf8').replace(/^\uFEFF/, '')));
-    const s = j.semanticSearch;
-    if (s === false) return { enabled: false };
-    return s && typeof s === 'object' ? s : {};
+    let dir = resolve(root);
+    const home = resolve(homedir());
+    const tmp = resolve(tmpdir());
+    for (let depth = 0; depth < 5; depth++) {
+      const f = join(dir, '.v8-project.json');
+      if (existsSync(f)) {
+        const j = JSON.parse(stripJsonComments(readFileSync(f, 'utf8').replace(/^\uFEFF/, '')));
+        const s = j.semanticSearch;
+        if (s === false) return { enabled: false };
+        return s && typeof s === 'object' ? s : {};
+      }
+      const parent = resolve(dir, '..');
+      if (parent === dir || dir === home || parent === tmp) break;
+      dir = parent;
+    }
+    return {};
   } catch { return {}; }
 }
 
@@ -183,12 +193,12 @@ export async function httpJson(url, { method = 'GET', body, apiKey, timeoutMs = 
 // Доступен ли сервер: GET /models (3 с), результат кэшируется на 30 с
 const probes = new Map();
 export async function probe(cfg, { fresh = false } = {}) {
-  const key = cfg.baseUrl;
+  const key = String(cfg.baseUrl || '').replace(/\/+$/, '');
   const c = probes.get(key);
   if (!fresh && c && Date.now() - c.at < 30000) return c;
   let r;
   try {
-    const j = await httpJson(`${cfg.baseUrl}/models`, { apiKey: cfg.apiKey, timeoutMs: 3000 });
+    const j = await httpJson(`${key}/models`, { apiKey: cfg.apiKey, timeoutMs: 3000 });
     r = { ok: true, models: (j.data || []).map((m) => m.id).filter(Boolean) };
   } catch (e) {
     r = { ok: false, error: e.status === 401 || e.status === 403
@@ -199,6 +209,32 @@ export async function probe(cfg, { fresh = false } = {}) {
   return r;
 }
 export function resetProbes() { probes.clear(); }
+
+// Каноническое имя модели: в LM Studio при загрузке через GUI к идентификатору часто добавляется
+// префикс text-embedding- или qwen. / qwen/ (например, text-embedding-qwen3-embedding-4b, qwen.qwen3-reranker-4b).
+export function canonicalModel(m) {
+  return String(m || '').trim().toLowerCase()
+    .replace(/^(?:[a-z0-9_.-]+\/|[a-z0-9_]+\.(?=[a-z]))/i, '')
+    .replace(/^text-embedding-/i, '')
+    .replace(/(?:-gguf)?(?:[@:][^@:]+)?$/i, '');
+}
+export function sameModel(a, b) {
+  if (!a || !b) return a === b;
+  return a === b || canonicalModel(a) === canonicalModel(b);
+}
+export function matchModelId(wanted, available = []) {
+  if (!wanted || !Array.isArray(available) || !available.length) return null;
+  if (available.includes(wanted)) return wanted;
+  const low = String(wanted).toLowerCase();
+  const ci = available.find((m) => String(m).toLowerCase() === low);
+  if (ci) return ci;
+  const cw = canonicalModel(wanted);
+  return available.find((m) => canonicalModel(m) === cw) || null;
+}
+export function resolveServerModel(baseUrl, wanted) {
+  const c = probes.get(String(baseUrl || '').replace(/\/+$/, ''));
+  return (c?.ok && matchModelId(wanted, c.models)) || wanted;
+}
 
 // ---------------------------------------------------------------------------
 // Эмбеддинги
@@ -238,10 +274,27 @@ export function eosLabel(cfg) {
 
 export async function embed(cfg, texts, { timeoutMs, signal } = {}) {
   const eos = embedEos(cfg);
-  const j = await httpJson(`${cfg.baseUrl}/embeddings`, {
-    method: 'POST', apiKey: cfg.apiKey, timeoutMs: timeoutMs || cfg.timeoutMs, signal,
-    body: { model: cfg.embedModel, input: texts.map((t) => withEos(t, eos)), encoding_format: 'float' },
-  });
+  const input = texts.map((t) => withEos(t, eos));
+  let model = resolveServerModel(cfg.baseUrl, cfg.embedModel);
+  let j;
+  try {
+    j = await httpJson(`${cfg.baseUrl}/embeddings`, {
+      method: 'POST', apiKey: cfg.apiKey, timeoutMs: timeoutMs || cfg.timeoutMs, signal,
+      body: { model, input, encoding_format: 'float' },
+    });
+  } catch (e) {
+    if ((e.status === 404 || e.status === 400) && !probes.has(cfg.baseUrl)) {
+      const p = await probe(cfg, { fresh: true });
+      const alt = p.ok && matchModelId(cfg.embedModel, p.models);
+      if (alt && alt !== model) {
+        model = alt;
+        j = await httpJson(`${cfg.baseUrl}/embeddings`, {
+          method: 'POST', apiKey: cfg.apiKey, timeoutMs: timeoutMs || cfg.timeoutMs, signal,
+          body: { model, input, encoding_format: 'float' },
+        });
+      } else throw e;
+    } else throw e;
+  }
   const data = Array.isArray(j.data) ? [...j.data] : [];
   if (data.length !== texts.length) throw new Error(`сервер вернул ${data.length} векторов вместо ${texts.length}`);
   data.sort((a, b) => (a.index ?? 0) - (b.index ?? 0));
@@ -260,7 +313,16 @@ export async function embed(cfg, texts, { timeoutMs, signal } = {}) {
 const slug = (s) => String(s).toLowerCase().replace(/[^a-z0-9._-]+/g, '_').slice(0, 80);
 // Набор векторов = модель + размерность + EOS: векторы без EOS и с EOS разные и не смешиваются
 const eosTag = (eos) => (eos ? `-eos${createHash('sha1').update(eos).digest('hex').slice(0, 6)}` : '');
-export const vectorDir = (cfg) => join(cfg.storeDir, 'vectors', `${slug(cfg.embedModel)}-d${cfg.dimensions}${eosTag(embedEos(cfg))}`);
+export const vectorDir = (cfg) => {
+  const tag = `-d${cfg.dimensions}${eosTag(embedEos(cfg))}`;
+  const exact = join(cfg.storeDir, 'vectors', `${slug(cfg.embedModel)}${tag}`);
+  const canon = canonicalModel(cfg.embedModel);
+  if (canon && slug(canon) !== slug(cfg.embedModel)) {
+    const canonDir = join(cfg.storeDir, 'vectors', `${slug(canon)}${tag}`);
+    if (!existsSync(exact) && existsSync(canonDir)) return canonDir;
+  }
+  return exact;
+};
 export const manifestFile = (cfg, root) =>
   join(cfg.storeDir, 'projects', `${createHash('sha1').update(resolve(root).toLowerCase()).digest('hex').slice(0, 16)}.json`);
 // Хэш фрагмента учитывает EOS: без EOS — прежний формат (старые векторы других моделей остаются годными)
@@ -428,17 +490,89 @@ export function acquireLock(file, { staleMs = LOCK_STALE_MS } = {}) {
 // ---------------------------------------------------------------------------
 // Манифест проекта
 // ---------------------------------------------------------------------------
-const manifests = new Map();   // файл → { mtimeMs, data }
+const manifests = new Map();   // файл → { mtimeMs, size, at, data }
+
+function isValidManifest(data, cfg) {
+  return data && data.version === MANIFEST_VERSION && data.format === CHUNK_FORMAT &&
+    sameModel(data.model, cfg.embedModel) && data.dim === cfg.dimensions && (data.eos || '') === embedEos(cfg);
+}
+
+function readManifestRootHeader(file) {
+  let fd;
+  try {
+    fd = openSync(file, 'r');
+    const buf = Buffer.alloc(1024);
+    const n = readSync(fd, buf, 0, 1024, 0);
+    const m = buf.toString('utf8', 0, n).match(/"root"\s*:\s*"((?:[^"\\]|\\.)*)"/);
+    return m ? JSON.parse(`"${m[1]}"`) : null;
+  } catch { return null; } finally {
+    if (fd !== undefined) { try { closeSync(fd); } catch { /* */ } }
+  }
+}
+
+// Если точного манифеста для root ещё нет, проверяет манифесты дочерних/родительских папок того же проекта
+// (например, манифест собран для main\src\ERP-copia, а OpenCode открыт в main или наоборот).
+function loadAdaptedManifest(cfg, root) {
+  const projDir = join(cfg.storeDir, 'projects');
+  let list;
+  try { list = readdirSync(projDir).filter((x) => x.endsWith('.json')); } catch { return null; }
+  if (!list.length) return null;
+  const norm = (p) => String(p || '').replace(/\\/g, '/').replace(/\/+$/, '');
+  const cmp = (p) => { const s = norm(p); return IS_WIN || /^[a-z]:\//i.test(s) ? s.toLowerCase() : s; };
+  const targetNorm = norm(resolve(root));
+  const targetCmp = cmp(targetNorm);
+  const files = {};
+  const matchedRoots = [];
+  let latestUpdated = '';
+  for (const name of list) {
+    const pf = join(projDir, name);
+    const candRootRaw = readManifestRootHeader(pf);
+    if (!candRootRaw) continue;
+    const candNorm = norm(candRootRaw);
+    const candCmp = cmp(candNorm);
+    const isChild = candCmp.startsWith(targetCmp + '/');
+    const isParent = targetCmp.startsWith(candCmp + '/');
+    if (!isChild && !isParent) continue;
+    let data;
+    try { data = JSON.parse(readFileSync(pf, 'utf8')); } catch { continue; }
+    if (!isValidManifest(data, cfg) || !data.files) continue;
+    if (isChild) {
+      const prefix = candNorm.slice(targetNorm.length + 1) + '/';
+      for (const [k, v] of Object.entries(data.files)) files[prefix + k] = v;
+      matchedRoots.push(candRootRaw);
+    } else if (isParent) {
+      const prefix = targetNorm.slice(candNorm.length + 1) + '/';
+      const prefixCmp = cmp(prefix);
+      for (const [k, v] of Object.entries(data.files)) {
+        if (cmp(k).startsWith(prefixCmp)) files[k.slice(prefix.length)] = v;
+      }
+      matchedRoots.push(candRootRaw);
+    }
+    if (data.updated && (!latestUpdated || data.updated > latestUpdated)) latestUpdated = data.updated;
+  }
+  if (!Object.keys(files).length) return null;
+  return {
+    version: MANIFEST_VERSION, format: CHUNK_FORMAT, model: cfg.embedModel, dim: cfg.dimensions, eos: embedEos(cfg),
+    root: resolve(root), updated: latestUpdated, adaptedFrom: matchedRoots.join(', '), files,
+  };
+}
+
 export function loadManifest(cfg, root) {
   const f = manifestFile(cfg, root);
   let st;
-  try { st = statSync(f); } catch { manifests.delete(f); return null; }
+  try { st = statSync(f); } catch {
+    const c = manifests.get(f);
+    if (c?.adapted && Date.now() - c.at < 10000) return c.data;
+    const adapted = loadAdaptedManifest(cfg, root);
+    if (adapted) { manifests.set(f, { adapted: true, at: Date.now(), data: adapted }); return adapted; }
+    manifests.delete(f);
+    return null;
+  }
   const c = manifests.get(f);
-  if (c && c.mtimeMs === st.mtimeMs && c.size === st.size) return c.data;
+  if (c && !c.adapted && c.mtimeMs === st.mtimeMs && c.size === st.size) return c.data;
   try {
     const data = JSON.parse(readFileSync(f, 'utf8'));
-    if (data.version !== MANIFEST_VERSION || data.format !== CHUNK_FORMAT || data.model !== cfg.embedModel || data.dim !== cfg.dimensions ||
-      (data.eos || '') !== embedEos(cfg)) return null;   // сменилась модель/размерность/EOS — индекс строится заново
+    if (!isValidManifest(data, cfg)) return null;   // сменилась модель/размерность/EOS — индекс строится заново
     manifests.set(f, { mtimeMs: st.mtimeMs, size: st.size, data });
     return data;
   } catch { return null; }
@@ -447,7 +581,7 @@ export function loadManifest(cfg, root) {
 export function manifestMismatch(cfg, root) {
   let data;
   try { data = JSON.parse(readFileSync(manifestFile(cfg, root), 'utf8')); } catch { return ''; }
-  if (data.model !== cfg.embedModel || data.dim !== cfg.dimensions) return `построен для ${data.model} d=${data.dim}`;
+  if (!sameModel(data.model, cfg.embedModel) || data.dim !== cfg.dimensions) return `построен для ${data.model} d=${data.dim}`;
   if ((data.eos || '') !== embedEos(cfg)) return data.eos ? `построен с дописыванием EOS ${data.eos}` : 'построен без дописывания EOS';
   if (data.version !== MANIFEST_VERSION || data.format !== CHUNK_FORMAT) return 'старый формат';
   return '';
@@ -694,7 +828,7 @@ export function rerankUserMessage(cfg, query, doc) {
 
 export function responsesBody(cfg, query, doc, maxOut) {
   return {
-    model: cfg.rerankModel,
+    model: resolveServerModel(cfg.rerankBaseUrl || cfg.baseUrl, cfg.rerankModel),
     input: [{ role: 'system', content: RERANK_SYSTEM }, { role: 'user', content: rerankUserMessage(cfg, query, doc) }],
     temperature: 0, max_output_tokens: maxOut, top_logprobs: 20,
     include: ['message.output_text.logprobs'], store: false,
@@ -704,7 +838,8 @@ export function responsesBody(cfg, query, doc, maxOut) {
 class RerankFatal extends Error {}
 
 async function scoreLogprobs(cfg, st, query, doc, signal, timeoutMs) {
-  for (let attempt = 0; attempt < 2; attempt++) {
+  let probedRerank = false;
+  for (let attempt = 0; attempt < 3; attempt++) {
     let resp;
     const used = st.maxOut;
     try {
@@ -713,7 +848,14 @@ async function scoreLogprobs(cfg, st, query, doc, signal, timeoutMs) {
     } catch (e) {
       // сервер требует max_output_tokens ≥ 16 (как OpenAI) — дальше просим 16, нужен всё равно только первый токен
       if (e.status === 400 && used === 1 && /max_output_tokens|max.?tokens|minimum|at least/i.test(e.body || e.message)) { st.maxOut = 16; continue; }
-      if (e.status === 404 || (e.status === 400 && /model/i.test(e.body || ''))) throw new RerankFatal(`модель ${cfg.rerankModel} недоступна (${e.message})`);
+      if (e.status === 404 || (e.status === 400 && /model/i.test(e.body || ''))) {
+        if (!probedRerank && !probes.has(cfg.rerankBaseUrl)) {
+          probedRerank = true;
+          const p = await probe({ ...cfg, baseUrl: cfg.rerankBaseUrl }, { fresh: true });
+          if (p.ok && matchModelId(cfg.rerankModel, p.models)) continue;
+        }
+        throw new RerankFatal(`модель ${cfg.rerankModel} недоступна (${e.message})`);
+      }
       if (e.status === 401 || e.status === 403) throw new RerankFatal(`${e.message} — нужен токен API (${cfg.apiKeyEnv})`);
       throw e;
     }
@@ -733,7 +875,7 @@ async function rerankApi(cfg, query, docs, signal) {
   let j;
   try {
     j = await httpJson(`${cfg.rerankBaseUrl}/rerank`, { method: 'POST', apiKey: cfg.apiKey, timeoutMs: cfg.rerankTimeoutMs, signal,
-      body: { model: cfg.rerankModel, query, documents: docs, top_n: docs.length } });
+      body: { model: resolveServerModel(cfg.rerankBaseUrl || cfg.baseUrl, cfg.rerankModel), query, documents: docs, top_n: docs.length } });
   } catch (e) {
     if (e.status === 404 || e.status === 501) throw new RerankFatal(`${cfg.rerankBaseUrl}/rerank не поддерживается (${e.message})`);
     throw e;

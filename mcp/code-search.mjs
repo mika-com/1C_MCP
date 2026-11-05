@@ -1362,9 +1362,14 @@ export async function semanticIndex(idx, a = {}, { env = process.env } = {}) {
   if (cfg.enabled !== false) {
     p = await sem.probe(cfg, { fresh: true });
     if (p.ok) {
-      const miss = [cfg.embedModel, cfg.rerankBackend === 'lmstudio-logprobs' ? cfg.rerankModel : null]
-        .filter((m) => m && p.models.length && !p.models.includes(m));
-      lines.push(`Сервер отвечает; моделей в /models: ${p.models.length}${miss.length ? ` · [!] нет идентификаторов: ${miss.join(', ')} (загрузите: scripts\\lmstudio-load.ps1)` : ''}`);
+      const wanted = [cfg.embedModel, cfg.rerankBackend === 'lmstudio-logprobs' ? cfg.rerankModel : null].filter(Boolean);
+      const miss = wanted.filter((m) => p.models.length && !sem.matchModelId(m, p.models));
+      const aliased = wanted
+        .map((m) => { const actual = sem.matchModelId(m, p.models); return actual && actual !== m ? `${m} → ${actual}` : ''; })
+        .filter(Boolean);
+      lines.push(`Сервер отвечает; моделей в /models: ${p.models.length}` +
+        `${aliased.length ? ` · сопоставлены: ${aliased.join(', ')}` : ''}` +
+        `${miss.length ? ` · [!] нет идентификаторов: ${miss.join(', ')} (загрузите: scripts\\lmstudio-load.ps1)` : ''}`);
     } else lines.push(`[!] Сервер недоступен: ${p.error}`);
   }
   if ((action === 'build' || action === 'rebuild') && cfg.enabled !== false) {
@@ -1383,7 +1388,7 @@ export async function semanticIndex(idx, a = {}, { env = process.env } = {}) {
     let total = 0; let have = 0;
     const seen = new Set();
     for (const f of Object.values(man.files)) for (const c of f.c) { if (seen.has(c[0])) continue; seen.add(c[0]); total++; if (store.has(c[0])) have++; }
-    lines.push(`Индекс проекта: ${have} из ${total} фрагментов с векторами (${total ? Math.round((have / total) * 100) : 0}%), файлов ${Object.keys(man.files).length}, обновлён ${man.updated}`);
+    lines.push(`Индекс проекта: ${have} из ${total} фрагментов с векторами (${total ? Math.round((have / total) * 100) : 0}%), файлов ${Object.keys(man.files).length}, обновлён ${man.updated}${man.adaptedFrom ? ` (подхвачен из ${man.adaptedFrom})` : ''}`);
   } else {
     const why = sem.manifestMismatch(cfg, idx.root);
     lines.push(why ? `Индекс проекта: [!] ${why} — устарел, строится заново (semantic_index build или автоматически при поиске).` : 'Индекс проекта: ещё не построен.');
