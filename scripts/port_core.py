@@ -257,10 +257,11 @@ SAFE_MODE_NOTE = (
     '> **Расширение и безопасный режим.** Расширение, впервые загруженное в базу, создаётся '
     'с **включённым безопасным режимом**: перехватчики модулей (`&Перед`, `&После`, `&Вместо`, '
     '`&ИзменениеИКонтроль`) в нём **не применяются**, обращения к файлам и внешним ресурсам запрещены. '
-    'Если после загрузки и обновления доработка расширения «не работает» — сначала проверь свойства: '
+    'Сразу после загрузки расширения, до проверки в браузере, сними режим (скрипт загрузки печатает '
+    'строку `[безопасный режим]`). Сначала проверь свойства: '
     '`/db-cfe-admin list`, и сними режим: `/db-cfe-admin set-properties <база> -Name <Расширение> '
     '-SafeMode off` (нужен `ibcmd` и файловая база). Если `ibcmd` нет или база серверная — не ищи '
-    'обходных путей, а скажи пользователю снять флажок вручную: в Предприятии «Все функции → '
+    'обходных путей и не открывай веб-клиент, а спроси пользователя снять флажок вручную: в Предприятии «Все функции → '
     'Стандартные → Управление расширениями конфигурации» или в конфигураторе «Конфигурация → '
     'Расширения конфигурации».\n\n'
 )
@@ -280,7 +281,10 @@ WEB_TEST_REPORTS_NOTE = (
     'Все артефакты — в `build/reports/web/`: регресс `test ... --format=allure --report-dir=build/reports/web/allure` '
     '(скриншоты и видео попадают туда же), JUnit — `node <1c-test>/scripts/allure-to-junit.mjs '
     'build/reports/web/allure build/reports/web/junit.xml`. Скриншот ошибки `exec`/`run` пишется в '
-    '`$TMPDIR/web-test-error-shot.png` (путь — в поле `screenshot` ответа): скопируй его в `build/reports/web/`.\n\n'
+    '`$TMPDIR/web-test-error-shot.png` (путь — в поле `screenshot` ответа): скопируй его в `build/reports/web/`.\n'
+    '> Текст ленты, HTML-поля и табличного документа лежит во фрейме: `getFormState().frameTexts` '
+    '(или `readFrameText()`). Скриншот этого текста не заменяет. `"ok": true` на клике не проверяет надписи. '
+    'В итог цитируй прочитанные строки. Не встраивай диагностический вывод в модуль конфигурации, чтобы прочитать форму.\n\n'
 )
 WEB_TEST_NOTES = {
     'web-test': '## Execution modes',
@@ -432,6 +436,23 @@ SCRIPT_PATCHES['.mjs'] += [
      "hostname: '127.0.0.1', port: sess.port, path: (sess.token ? `/${sess.token}` : '') + '/exec',"),
     ("`http://127.0.0.1:${sess.port}/",
      "`http://127.0.0.1:${sess.port}${sess.token ? `/${sess.token}` : ''}/"),
+    # getFormState читает текст iframe (лента, HTML, табличный документ); файл — skill-overlays
+    ("import { checkForErrors, detectPlatformDialogs } from '../core/errors.mjs';",
+     "import { checkForErrors, detectPlatformDialogs } from '../core/errors.mjs';\n"
+     "import { readFrameTexts } from './frame-text.mjs';  // OpenCode: текст iframe (лента, HTML, табличный документ)"),
+    ("  const pd = await detectPlatformDialogs();\n  if (pd.length) state.platformDialogs = pd;\n  return state;",
+     "  const pd = await detectPlatformDialogs();\n  if (pd.length) state.platformDialogs = pd;\n"
+     "  // Текст внутри iframe (лента, HTML-поле, табличный документ) page.evaluate не видит.\n"
+     "  if (state?.iframes) {\n"
+     "    try {\n"
+     "      const frameTexts = await readFrameTexts(page, { formNum: state.form });\n"
+     "      if (frameTexts.length) state.frameTexts = frameTexts;\n"
+     "    } catch { /* форма без доступного фрейма */ }\n"
+     "  }\n"
+     "  return state;"),
+    ("export { getFormState } from './engine/forms/state.mjs';",
+     "export { getFormState } from './engine/forms/state.mjs';\n"
+     "export { readFrameText } from './engine/forms/frame-text.mjs';  // OpenCode"),
 ]
 
 # Файлы порта, которых нет в upstream: копируются поверх собранных навыков (skill-overlays/<навык>/...)
@@ -496,6 +517,35 @@ SCRIPT_PATCHES['.ps1'] += [
     ("    [int]$Port = 8081,", "    [int]$Port = 0,  # OpenCode: 0 — первый свободный от 8081"),
     ("$listenLines =", WEB_PUBLISH_PORT_PS1),
 ]
+
+# После успешной загрузки расширения — строка в stdout, которую модель видит в том же шаге,
+# а не только в тексте навыка. Одна строка, чтобы совпасть при любом отступе.
+_SAFE_PY = (
+    'print("[безопасный режим] Расширение после загрузки включено в безопасном режиме: перехватчики не выполняются. '
+    'До браузера сними его — db-cfe-admin set-properties <база> -Name <Имя> -SafeMode off (только ibcmd и файловая база). '
+    'Нет ibcmd или база серверная — остановись и спроси пользователя, веб-клиент не открывай.") '
+    'if (getattr(args, "Extension", None) or getattr(args, "AllExtensions", None)) else None'
+)
+_SAFE_PS = (
+    'if ($Extension -or $AllExtensions) { Write-Host "[безопасный режим] Расширение после загрузки включено в безопасном режиме: '
+    'перехватчики не выполняются. До браузера сними его — db-cfe-admin set-properties <база> -Name <Имя> -SafeMode off '
+    '(только ibcmd и файловая база). Нет ibcmd или база серверная — остановись и спроси пользователя, веб-клиент не открывай." '
+    '-ForegroundColor Yellow }'
+)
+for _old in (
+    'print("Load completed successfully")',
+    'print("Database configuration updated successfully")',
+    'print(f"Configuration loaded successfully from: {args.ConfigDir}")',
+    'print(f"Configuration loaded successfully from: {args.InputFile}")',
+):
+    SCRIPT_PATCHES['.py'] += [(_old, _old + '; ' + _SAFE_PY)]
+for _old in (
+    'Write-Host "Load completed successfully" -ForegroundColor Green',
+    'Write-Host "Database configuration updated successfully" -ForegroundColor Green',
+    'Write-Host "Configuration loaded successfully from: $ConfigDir" -ForegroundColor Green',
+    'Write-Host "Configuration loaded successfully from: $InputFile" -ForegroundColor Green',
+):
+    SCRIPT_PATCHES['.ps1'] += [(_old, _old + '; ' + _SAFE_PS)]
 
 
 def patch_scripts(skills_dir):

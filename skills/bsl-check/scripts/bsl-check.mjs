@@ -14,6 +14,7 @@ import { tmpdir } from 'node:os';
 import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { findBslLs, installBslLs, bslEnv, bslVersion, INSTALL_HINT } from './bsl-ls.mjs';
+import { adjustForExtension, findStringLength, projectRoot } from './bsl-diag.mjs';
 
 const LEVELS = ['Error', 'Warning', 'Information', 'Hint'];
 const LEVEL_RU = { Error: 'ошибка', Warning: 'предупреждение', Information: 'замечание', Hint: 'подсказка' };
@@ -87,20 +88,36 @@ function main() {
   const counts = { Error: 0, Warning: 0, Information: 0, Hint: 0 };
   const rows = [];
   let files = 0;
+  let hiddenMissing = 0;
+  const root = projectRoot(target);
+  const lengths = new Map();
+  const lookup = (name) => {
+    if (!root) return null;
+    if (lengths.has(name)) return lengths.get(name);
+    const len = findStringLength(root, name);
+    lengths.set(name, len);
+    return len;
+  };
   for (const fi of data.fileinfos || []) {
     const file = uriToPath(fi.path);
     if (isFile && resolve(file) !== target) continue;
     files++;
+    const diags = [];
     for (const d of fi.diagnostics || []) {
       const lvl = LEVELS.includes(d.severity) ? d.severity : 'Information';
-      counts[lvl]++;
-      if (LEVELS.indexOf(lvl) <= args.maxLevel) {
-        let msg = String(d.message || '').split('\n')[0];
-        // Перечень ожидаемых токенов парсера модели не помогает — сокращаем.
-        msg = msg.replace(/\.?\s*Ожидался один из следующих токенов:.*$/u, ' — синтаксическая ошибка');
-        if (msg.length > 200) msg = msg.slice(0, 199) + '…';
-        rows.push({ file, lvl, line: (d.range?.start?.line ?? 0) + 1, col: (d.range?.start?.character ?? 0) + 1, code: d.code, msg });
-      }
+      let msg = String(d.message || '').split('\n')[0];
+      // Перечень ожидаемых токенов парсера модели не помогает — сокращаем.
+      msg = msg.replace(/\.?\s*Ожидался один из следующих токенов:.*$/u, ' — синтаксическая ошибка');
+      if (msg.length > 200) msg = msg.slice(0, 199) + '…';
+      diags.push({ lvl, line: (d.range?.start?.line ?? 0) + 1, col: (d.range?.start?.character ?? 0) + 1, code: d.code, msg });
+    }
+    let source = '';
+    try { source = readFileSync(file, 'utf8'); } catch { source = ''; }
+    const adjusted = adjustForExtension(file, diags, { source, lookup });
+    hiddenMissing += adjusted.hiddenMissing;
+    for (const row of adjusted.rows) {
+      counts[row.lvl] = (counts[row.lvl] || 0) + 1;
+      if (LEVELS.indexOf(row.lvl) <= args.maxLevel) rows.push({ file, ...row });
     }
   }
   rows.sort((a, b) => LEVELS.indexOf(a.lvl) - LEVELS.indexOf(b.lvl) || a.file.localeCompare(b.file) || a.line - b.line);
@@ -114,6 +131,12 @@ function main() {
   const secs = ((Date.now() - started) / 1000).toFixed(0);
   console.log(`BSL LS: проверено модулей ${files} за ${secs} с — ошибок ${counts.Error}, предупреждений ${counts.Warning}, ` +
     `замечаний ${counts.Information + counts.Hint}. Показаны уровни до «${LEVEL_RU[LEVELS[args.maxLevel]]}».`);
+  if (hiddenMissing) {
+    console.log(`QueryToMissingMetadata скрыто: ${hiddenMissing} — в расширении это метаданные основной конфигурации, не ошибка. Запрос из-за этого кода не переписывай.`);
+  }
+  if (counts.Warning && rows.some((r) => r.code === 'StringCompareInQuery')) {
+    console.log('StringCompareInQuery — не стиль: перед загрузкой подтверди длину поля. Неограниченная строка в сравнении с "" роняет запрос в рантайме.');
+  }
   let shown = 0;
   let lastFile = null;
   for (const row of rows) {

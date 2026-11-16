@@ -805,7 +805,7 @@ def main():
         if result.returncode != 0:
             print(f"Error loading configuration from files (code: {result.returncode}){describe_exit(result.returncode)}")
             sys.exit(result.returncode)
-        print(f"Configuration loaded successfully from: {args.ConfigDir}")
+        print(f"Configuration loaded successfully from: {args.ConfigDir}"); print("[безопасный режим] Расширение после загрузки включено в безопасном режиме: перехватчики не выполняются. До браузера сними его — db-cfe-admin set-properties <база> -Name <Имя> -SafeMode off (только ibcmd и файловая база). Нет ibcmd или база серверная — остановись и спроси пользователя, веб-клиент не открывай.") if (getattr(args, "Extension", None) or getattr(args, "AllExtensions", None)) else None
         exit_code = 0
         if args.UpdateDB:
             apply_args = ["infobase", "config", "apply", f"--db-path={args.InfoBasePath}", "--force"]
@@ -819,7 +819,7 @@ def main():
             ar = run_ibcmd([v8path] + apply_args, bool(args.UserName))
             exit_code = ar.returncode
             if exit_code == 0:
-                print("Database configuration updated successfully")
+                print("Database configuration updated successfully"); print("[безопасный режим] Расширение после загрузки включено в безопасном режиме: перехватчики не выполняются. До браузера сними его — db-cfe-admin set-properties <база> -Name <Имя> -SafeMode off (только ibcmd и файловая база). Нет ibcmd или база серверная — остановись и спроси пользователя, веб-клиент не открывай.") if (getattr(args, "Extension", None) or getattr(args, "AllExtensions", None)) else None
             else:
                 print(f"Error updating database configuration (code: {exit_code}){describe_exit(exit_code)}")
             print_platform_output(ar)
@@ -945,7 +945,7 @@ def main():
         # rejection warnings) is always printed to stdout for visibility. With -StrictLog,
         # elevate exit code to 1 when rejection patterns are found even if platform said 0.
         if exit_code == 0:
-            print("Load completed successfully")
+            print("Load completed successfully"); print("[безопасный режим] Расширение после загрузки включено в безопасном режиме: перехватчики не выполняются. До браузера сними его — db-cfe-admin set-properties <база> -Name <Имя> -SafeMode off (только ibcmd и файловая база). Нет ibcmd или база серверная — остановись и спроси пользователя, веб-клиент не открывай.") if (getattr(args, "Extension", None) or getattr(args, "AllExtensions", None)) else None
         else:
             print(f"Error loading configuration (code: {exit_code}){describe_exit(exit_code)}")
 

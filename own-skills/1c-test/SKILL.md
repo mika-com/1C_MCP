@@ -32,6 +32,7 @@ argument-hint: "[web|bdd|unit] [база]"
 - `build/reports/` — vrunner (`--report-path`).
 
 В итоговом ответе всегда перечисляй пути к отчётам и скриншотам упавших шагов.
+Текст ленты, HTML-поля и табличного документа — `getFormState().frameTexts` или `readFrameText()`; скриншот его не заменяет, `"ok": true` на клике надписи не проверяет.
 
 ## web-test: preflight и запуск
 

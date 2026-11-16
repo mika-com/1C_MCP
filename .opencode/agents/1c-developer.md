@@ -12,6 +12,21 @@ permissions:
   - action: skill
     resource: "db-update"
     effect: deny
+  - action: shell
+    resource: "*LoadConfigFromFiles*"
+    effect: deny
+  - action: shell
+    resource: "*UpdateDBCfg*"
+    effect: deny
+  - action: shell
+    resource: "*db-load-*"
+    effect: deny
+  - action: shell
+    resource: "*db-update*"
+    effect: deny
+  - action: shell
+    resource: "*web-test*"
+    effect: deny
 ---
 
 Ты вносишь изменения в XML-выгрузку 1С по готовому плану. Это этап РЕАЛИЗАЦИИ.
@@ -31,7 +46,9 @@ permissions:
    `edit`/`write`/`patch` — ошибки исправь немедленно, не откладывая. Если в коде или СКД добавлен/изменён запрос 1С
    (`ВЫБРАТЬ …`), обязательно проверь его текст через `validate_query` из MCP `1c-search` (проверяет таблицы, виртуальные
    таблицы регистров, реквизиты, цепочки через точку, `ЗНАЧЕНИЕ(...)` и временные таблицы `ПОМЕСТИТЬ` по индексу метаданных).
-   В конце проверь результат целиком: `*-validate`
+   `QueryToMissingMetadata` в расширении не ошибка (метаданные основной конфигурации) — запрос из-за неё не переписывай.
+   `UnlimitedStringCompare` и `StringCompareInQuery` исправь: сравнение неограниченной строки с `""` падает в рантайме.
+   `IfElseIfEndsWithElse` процедуру не перестраивает. В конце проверь результат целиком: `*-validate`
    по изменённым объектам и `bsl-check` по каталогу расширения или изменённых объектов (узкий `-Path`, не весь
    `src/cf`). Исправь все ошибки. MCP `1c-bsl` на большом проекте
    не жди: «не ответил за N с» → `bsl-check -Path`. В Code Mode — только короткие конечные блоки, без обещаний без

@@ -781,7 +781,7 @@ try {
             Write-PlatformOutput $output
             exit $exitCode
         }
-        Write-Host "Configuration loaded successfully from: $ConfigDir" -ForegroundColor Green
+        Write-Host "Configuration loaded successfully from: $ConfigDir" -ForegroundColor Green; if ($Extension -or $AllExtensions) { Write-Host "[безопасный режим] Расширение после загрузки включено в безопасном режиме: перехватчики не выполняются. До браузера сними его — db-cfe-admin set-properties <база> -Name <Имя> -SafeMode off (только ibcmd и файловая база). Нет ibcmd или база серверная — остановись и спроси пользователя, веб-клиент не открывай." -ForegroundColor Yellow }
         Write-PlatformOutput $output
 
         if ($UpdateDB) {
@@ -795,7 +795,7 @@ try {
             $applyOut = $__ib.Output
             $exitCode = $__ib.ExitCode
             if ($exitCode -eq 0) {
-                Write-Host "Database configuration updated successfully" -ForegroundColor Green
+                Write-Host "Database configuration updated successfully" -ForegroundColor Green; if ($Extension -or $AllExtensions) { Write-Host "[безопасный режим] Расширение после загрузки включено в безопасном режиме: перехватчики не выполняются. До браузера сними его — db-cfe-admin set-properties <база> -Name <Имя> -SafeMode off (только ibcmd и файловая база). Нет ibcmd или база серверная — остановись и спроси пользователя, веб-клиент не открывай." -ForegroundColor Yellow }
             } else {
                 Write-Host "Error updating database configuration (code: $exitCode)$(Get-ExitAnnotation $exitCode)" -ForegroundColor Red
             }
@@ -915,7 +915,7 @@ try {
     # rejection warnings) is always printed to stdout for visibility. With -StrictLog,
     # elevate exit code to 1 when rejection patterns are found even if platform said 0.
     if ($exitCode -eq 0) {
-        Write-Host "Load completed successfully" -ForegroundColor Green
+        Write-Host "Load completed successfully" -ForegroundColor Green; if ($Extension -or $AllExtensions) { Write-Host "[безопасный режим] Расширение после загрузки включено в безопасном режиме: перехватчики не выполняются. До браузера сними его — db-cfe-admin set-properties <база> -Name <Имя> -SafeMode off (только ibcmd и файловая база). Нет ibcmd или база серверная — остановись и спроси пользователя, веб-клиент не открывай." -ForegroundColor Yellow }
     } else {
         Write-Host "Error loading configuration (code: $exitCode)$(Get-ExitAnnotation $exitCode)" -ForegroundColor Red
     }

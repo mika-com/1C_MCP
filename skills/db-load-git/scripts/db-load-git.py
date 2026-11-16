@@ -1011,7 +1011,7 @@ def main():
                 ar = run_ibcmd([v8path] + apply_args, bool(args.UserName))
                 exit_code = ar.returncode
                 if exit_code == 0:
-                    print("Database configuration updated successfully")
+                    print("Database configuration updated successfully"); print("[безопасный режим] Расширение после загрузки включено в безопасном режиме: перехватчики не выполняются. До браузера сними его — db-cfe-admin set-properties <база> -Name <Имя> -SafeMode off (только ibcmd и файловая база). Нет ibcmd или база серверная — остановись и спроси пользователя, веб-клиент не открывай.") if (getattr(args, "Extension", None) or getattr(args, "AllExtensions", None)) else None
                 else:
                     print(f"Error updating database configuration (code: {exit_code}){describe_exit(exit_code)}")
                 print_platform_output(ar)
@@ -1085,7 +1085,7 @@ def main():
         # --- Result ---
         print("")
         if exit_code == 0:
-            print("Load completed successfully")
+            print("Load completed successfully"); print("[безопасный режим] Расширение после загрузки включено в безопасном режиме: перехватчики не выполняются. До браузера сними его — db-cfe-admin set-properties <база> -Name <Имя> -SafeMode off (только ibcmd и файловая база). Нет ibcmd или база серверная — остановись и спроси пользователя, веб-клиент не открывай.") if (getattr(args, "Extension", None) or getattr(args, "AllExtensions", None)) else None
         else:
             print(f"Error loading configuration (code: {exit_code}){describe_exit(exit_code)}")
 

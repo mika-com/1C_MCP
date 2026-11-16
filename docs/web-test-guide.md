@@ -287,6 +287,7 @@ console.log('Расшифровка:', JSON.stringify(drilldown.rows));
 - **errorModal** — 1С показала ошибку
 - **confirmation** — диалог Да/Нет, вызовите `clickElement('Да')` или `clickElement('Нет')`
 - **platformDialogs** — `[{ type, title }]` — платформенные диалоги (О программе, Информация для техподдержки). Невидимы для обычного определения форм, но блокируют интерфейс. `closeForm()` закрывает их. Автоочистка через `dismissPendingErrors` перед каждым action
+- **frameTexts** — текст видимых iframe формы (HTML-поле, табличный документ, лента): `[{ id, text, truncated?, blocked? }]`. Скрипт страницы этот документ не читает, поэтому его забирает `readFrameText()` / `getFormState()`. `"ok": true` у клика эти надписи не проверяет; в проверке цитируйте `text`
 
 #### readTable — подробнее
 

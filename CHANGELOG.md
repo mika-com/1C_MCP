@@ -5,6 +5,11 @@
 ## [Unreleased]
 
 ### Добавлено
+- `1c-search` запускается через `mcp/restart-stdio.mjs`: при падении процесса (код 134, нехватка памяти) незакрытый
+  запрос получает ошибку, сервер поднимается снова и не пропадает из каталога OpenCode. Дочернему процессу задаётся
+  куча `SEARCH_MAX_OLD_SPACE_MB` (по умолчанию 4096). `search_code` и `find_usages` читают модули построчно и
+  останавливаются по объёму; ответ «поиск остановлен» просит сузить `path_filter`.
+- `web-test`: `getFormState().frameTexts` и `readFrameText()` читают текст iframe (лента, HTML-поле, табличный документ).
 - Установщик (`register-opencode-mcp.mjs`, его вызывают `opencode_port.py install` и `install.ps1`) прописывает
   `"default_agent": "1c"` в `~/.config/opencode/opencode.json`, только если `default_agent` ещё не задан;
   удаление убирает его, только если он равен `"1c"`. Отключить при ручной регистрации — `--no-default-agent`.
@@ -27,6 +32,13 @@
   `AGENTS.md`: «где реализовано X» — сначала `semantic_search`.
 
 ### Изменено
+- Агент `1c` не загружает конфигурацию и не гоняет браузер сам: shell на `db-load-*`, `db-update`,
+  `/LoadConfigFromFiles`, `/UpdateDBCfg` и `web-test` запрещён, это `1c-deployer` и `1c-tester`. Согласие на общую
+  базу покрывает одну загрузку. Сразу после загрузки расширения, до браузера, снимается безопасный режим — скрипты
+  `db-load-*` и `db-update` печатают строку `[безопасный режим]`.
+- `bsl-check` и `bsl-autocheck` не считают `QueryToMissingMetadata` ошибкой расширения. Сравнение с `""` в запросе —
+  предупреждение `StringCompareInQuery`, а для строки неограниченной длины (длина 0 в метаданных) — ошибка
+  `UnlimitedStringCompare`.
 - `1c-search`: таймаут вызова в конфиге OpenCode — `execution: 120000`; `index_status` показывает состояние
   семантического индекса. Без LM Studio поведение прежнее, `semantic_search` отвечает по ключевым словам с `[!]`.
 

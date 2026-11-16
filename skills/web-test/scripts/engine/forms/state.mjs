@@ -11,6 +11,7 @@
 import { page, ensureConnected } from '../core/state.mjs';
 import { getFormStateScript } from '../../dom.mjs';
 import { checkForErrors, detectPlatformDialogs } from '../core/errors.mjs';
+import { readFrameTexts } from './frame-text.mjs';  // OpenCode: текст iframe (лента, HTML, табличный документ)
 
 /** Read current form state. Single evaluate call via combined script. */
 export async function getFormState() {
@@ -28,5 +29,12 @@ export async function getFormState() {
   // These are NOT 1C forms — invisible to detectForms() and not closeable via Escape.
   const pd = await detectPlatformDialogs();
   if (pd.length) state.platformDialogs = pd;
+  // Текст внутри iframe (лента, HTML-поле, табличный документ) page.evaluate не видит.
+  if (state?.iframes) {
+    try {
+      const frameTexts = await readFrameTexts(page, { formNum: state.form });
+      if (frameTexts.length) state.frameTexts = frameTexts;
+    } catch { /* форма без доступного фрейма */ }
+  }
   return state;
 }
