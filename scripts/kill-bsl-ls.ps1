@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     Завершить зависшие процессы BSL Language Server (1c-bsl, bsl-autocheck, bsl-check) ТЕКУЩЕГО пользователя в ТЕКУЩЕМ сеансе.
 .DESCRIPTION
