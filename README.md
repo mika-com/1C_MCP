@@ -5,9 +5,10 @@
 - **85 навыков**: 81 из [cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills) (конфигурации, расширения,
   EPF/ERF, формы, СКД, макеты, роли, XDTO, базы, веб-публикация, web-test) + свои `bsl-check`, `vrunner`, `1c-test` (стратегия тестирования, preflight, шаблоны Vanessa) и `print-form`
   (печатные формы «сначала макет» с PNG-предпросмотром макета);
-- **6 агентов**: основной `1c` и субагенты по этапам `1c-analyst` → `1c-developer` → `1c-deployer` → `1c-tester`,
-  плюс `1c-test-author` (пишет регресс web-test и BDD-сценарии);
-- **6 команд**: `/1c-analyze`, `/1c-implement`, `/1c-deploy`, `/1c-webtest`, `/1c-bdd`, `/1c-check`;
+- **9 агентов**: основной `1c`, субагенты по этапам `1c-analyst` → `1c-developer` → `1c-deployer` → `1c-tester` (+ `1c-test-author`),
+  и профильные субагенты `1c-explorer` (разведка кода и расширений CFE), `1c-debugger` (расследование ошибок и ЖР `event_log`),
+  `1c-query-expert` (разработка, валидация `validate_query` и оптимизация запросов 1С);
+- **9 команд**: `/1c-analyze`, `/1c-implement`, `/1c-deploy`, `/1c-webtest`, `/1c-bdd`, `/1c-check`, `/1c-explore`, `/1c-debug`, `/1c-query`;
 - **MCP-серверы**: `1c-search` (поиск по XML-выгрузке), `1c-bsl` (BSL Language Server), `1c-help` (синтакс-помощник
   по справке установленной платформы 1С),
   `vrunner` ([vanessa-runner 3.x](https://github.com/vanessa-opensource/vanessa-runner), `vrunner-mcp`, по умолчанию выключен).
@@ -70,6 +71,9 @@ python scripts/opencode_port.py install --project-dir /путь/к/1С-прое�
 ## Как пользоваться
 
 ```text
+/1c-explore где проверяется лимит задолженности в заказе клиента и какие расширения его перехватывают
+/1c-debug почему не проводится заказ клиента в базе dev
+/1c-query запрос остатков и резервов товаров по складам с параметрами виртуальной таблицы
 /1c-analyze Добавить в документ ЗаказКлиента реквизит «Приоритет» и вывести его в список
 /1c-implement <вставьте план>
 /1c-check src/cfe/МоёРасширение
