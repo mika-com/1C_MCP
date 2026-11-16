@@ -25,7 +25,7 @@ OpenCode по умолчанию выбрана слабая. Конкретна
 ### Windows одной командой
 
 1. Скачайте проект: ZIP-архив с GitHub (Code → Download ZIP, распакуйте) или
-   `git clone https://github.com/mika-com/1C-Agent.git`.
+   `git clone https://github.com/mika-com/1C_MCP.git`.
 2. Откройте папку проекта и дважды щёлкните **`install.cmd`**. Можно запустить и из PowerShell в этой папке:
 
 ```powershell
@@ -58,8 +58,8 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 ### Вручную (любая ОС)
 
 ```bash
-git clone https://github.com/mika-com/1C-Agent.git
-cd 1C-Agent
+git clone https://github.com/mika-com/1C_MCP.git
+cd 1C_MCP
 python scripts/opencode_port.py install --project-dir /путь/к/1С-проекту
 ```
 
@@ -104,7 +104,7 @@ python scripts/opencode_port.py install --project-dir /путь/к/1С-прое�
 | BDD (Vanessa Automation) | `/1c-bdd <сценарий>` — `features/*.feature` на русском Gherkin, запуск через `vrunner run enterprise` с `tools/vanessa/VAParams.json` | `build/reports/va/` |
 | Модульные тесты | YAxUnit: `vrunner test yaxunit` | `build/reports/yaxunit.xml` |
 
-Как выбрать инструмент — навык [`1c-test`](own-skills/1c-test/SKILL.md) и [docs/testing-guide.md](docs/testing-guide.md).
+Как выбрать инструмент — навык [`1c-test`](skills/1c-test/SKILL.md) и [docs/testing-guide.md](docs/testing-guide.md).
 
 > **Vanessa Automation ≠ Vanessa-ADD.** `vrunner test vanessa` в vanessa-runner 3.x запускает Vanessa-ADD
 > (`bddRunner.epf`, VBParams). Vanessa Automation (`vanessa-automation.epf`, VAParams) запускается через
@@ -117,7 +117,7 @@ python scripts/opencode_port.py install --project-dir /путь/к/1С-прое�
 ## Печатные формы
 
 Агенты делают печатную форму **через макет**, а не программным построением таблицы: навык
-[`print-form`](own-skills/print-form/SKILL.md) ведёт путь «вопросы → `template-add` → JSON DSL → `mxl-compile` →
+[`print-form`](skills/print-form/SKILL.md) ведёт путь «вопросы → `template-add` → JSON DSL → `mxl-compile` →
 `mxl-validate` → предпросмотр PNG (`mxl-render`) → модуль заполнения по эталону» (области, `Параметры.Заполнить`,
 `ПроверитьВывод` с повтором шапки таблицы, итоги, `ЧислоПрописью`) для внешней печатной формы БСП, документа с БСП
 и без. Существующий макет правится через `mxl-decompile` → JSON → `mxl-compile`. Предпросмотр:
@@ -192,8 +192,7 @@ UTF-8 для PowerShell и `cmd` и `PYTHONIOENCODING`/`PYTHONUTF8` для Pytho
 |------|-----|
 | `.opencode/agents/` | агенты OpenCode v2 (Markdown + frontmatter) |
 | `.opencode/commands/` | команды `/1c-*` |
-| `skills/` | собранные навыки (генерируются, руками не править) |
-| `own-skills/` | свои навыки (`bsl-check`, `vrunner`, `1c-test`, `print-form`) — источник для `skills/` |
+| `skills/` | 85 навыков: 81 из `cc-1c-skills` + собственные (`bsl-check`, `vrunner`, `1c-test`, `print-form`) |
 | `mcp/` | MCP-серверы и `register-opencode-mcp.mjs` (пишет `mcp.servers`, удаляет старую запись `lsp.bsl`) |
 | `plugins/` | плагин OpenCode v2 `bsl-autocheck.mjs` — проверка BSL после каждой правки (`.opencode/plugins/bsl-autocheck.js` — переходник для работы в репозитории) |
 | `opencode.json` | конфиг v2 для работы в самом репозитории (`skills`, `mcp.servers`, `default_agent`) |
@@ -206,8 +205,7 @@ UTF-8 для PowerShell и `cmd` и `PYTHONIOENCODING`/`PYTHONUTF8` для Pytho
 | `tests/mcp/power1c.mjs` | тесты графа метаданных (`object_refs`, `find_method`, `find_usages`), статического валидатора запросов (`validate_query`) и чтения ЖР (`event_log`) |
 | `tests/web-test/session.mjs` | тесты сеанса `web-test` на поддельном браузере: `open` → много `exec` в одном браузере, сеанс переживает конец вызова shell, токен, простой, смена адреса |
 | `scripts/opencode_port.py` | сборка из upstream и установка; ядро — `scripts/port_core.py` |
-| `skill-overlays/` | файлы порта, которых нет в upstream; `build` копирует их в `skills/` (сейчас `web-test`: `open`, `keepalive`) |
-| `docs/` | гайды и спецификации форматов 1С: [quickstart](docs/quickstart.md), [тестирование](docs/testing-guide.md), [индекс спецификаций](docs/1c-specs-index.md); гайды [cf](docs/cf-guide.md), [cfe](docs/cfe-guide.md), [epf](docs/epf-guide.md), [db](docs/db-guide.md), [meta](docs/meta-guide.md), [form](docs/form-guide.md), [skd](docs/skd-guide.md), [mxl](docs/mxl-guide.md), [role](docs/role-guide.md), [subsystem](docs/subsystem-guide.md), [xdto](docs/xdto-guide.md), [web](docs/web-guide.md), [web-test](docs/web-test-guide.md), [.v8-project.json](docs/v8-project-guide.md) |
+| `docs/` | руководства: [quickstart](docs/quickstart.md), [семантический поиск](docs/semantic-search.md), [тестирование](docs/testing-guide.md), [.v8-project.json](docs/v8-project-guide.md), [web-test](docs/web-test-guide.md), [mxl](docs/mxl-guide.md) и гайды по объектам 1С |
 
 ## Обновление из upstream
 
@@ -216,7 +214,7 @@ python scripts/opencode_port.py build                         # git clone cc-1c-
 python scripts/opencode_port.py build --upstream ../cc-1c-skills
 ```
 
-[`UPSTREAM`](UPSTREAM) хранит коммит сборки (сейчас cc-1c-skills `b102d9d`). Свои навыки берутся из `own-skills/`,
+[`UPSTREAM`](UPSTREAM) хранит коммит сборки (сейчас cc-1c-skills `b102d9d`). Собственные навыки в `skills/` сохраняются,
 адаптация под OpenCode — в `scripts/port_core.py`.
 
 GitHub Action [`upstream-sync`](.github/workflows/upstream-sync.yml) раз в неделю (понедельник, 05:17 UTC) или вручную

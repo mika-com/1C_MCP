@@ -13,7 +13,7 @@
 | `print-form` → `scripts/mxl-render.py` | `<Template.xml> [-o html] [--png png]` | Предпросмотр макета: HTML и PNG (Playwright/Chromium) — ширины, объединения, рамки, шрифты, области, параметры |
 
 Печатную форму целиком (макет + модуль заполнения + команда печати БСП) ведёт навык
-[`print-form`](../own-skills/print-form/SKILL.md): правило «сначала макет, код только заполняет».
+[`print-form`](../skills/print-form/SKILL.md): правило «сначала макет, код только заполняет».
 
 ## Сценарии использования
 

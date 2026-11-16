@@ -30,9 +30,8 @@ const here = dirname(fileURLToPath(import.meta.url));
 const env = process.env;
 
 async function loadLocator() {
-  const p = [join(here, '..', 'skills', 'bsl-check', 'scripts', 'bsl-ls.mjs'),
-    join(here, '..', 'own-skills', 'bsl-check', 'scripts', 'bsl-ls.mjs')].find((x) => existsSync(x));
-  return p ? import(pathToFileURL(p).href) : null;
+  const p = join(here, '..', 'skills', 'bsl-check', 'scripts', 'bsl-ls.mjs');
+  return existsSync(p) ? import(pathToFileURL(p).href) : null;
 }
 
 // ---- один экземпляр на каталог проекта ----

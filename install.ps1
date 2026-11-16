@@ -1,4 +1,4 @@
-﻿<#
+<#
 .SYNOPSIS
     Установка агента 1С для OpenCode v2 на Windows одной командой.
 
@@ -452,10 +452,10 @@ else {
     $machineBsl = [Environment]::GetEnvironmentVariable('BSL_LS_PATH', 'Machine')
     if ($machineBsl -and -not $env:BSL_LS_PATH) { $env:BSL_LS_PATH = $machineBsl }
     if ($env:BSL_LS_PATH) { Write-Ok "Используется общий/заданный BSL LS: BSL_LS_PATH = $env:BSL_LS_PATH" }
-    elseif ($found.Count -gt 0) { Write-Ok "Уже установлен: $($found[0].FullName) (обновить: node `"$InstallDir\own-skills\bsl-check\scripts\bsl-check.mjs`" -Install)" }
+    elseif ($found.Count -gt 0) { Write-Ok "Уже установлен: $($found[0].FullName) (обновить: node `"$InstallDir\skills\bsl-check\scripts\bsl-check.mjs`" -Install)" }
     else {
-        $code = Invoke-Native -File 'node' -Arguments @((Join-Path $InstallDir 'own-skills\bsl-check\scripts\bsl-check.mjs'), '-Install') -AllowFail
-        if ($code -eq 0) { Write-Ok "Установлен в $bslDir" } else { Write-Warn 'BSL LS не установлен (сеть?). Повторите позже: node own-skills\bsl-check\scripts\bsl-check.mjs -Install' }
+        $code = Invoke-Native -File 'node' -Arguments @((Join-Path $InstallDir 'skills\bsl-check\scripts\bsl-check.mjs'), '-Install') -AllowFail
+        if ($code -eq 0) { Write-Ok "Установлен в $bslDir" } else { Write-Warn 'BSL LS не установлен (сеть?). Повторите позже: node skills\bsl-check\scripts\bsl-check.mjs -Install' }
     }
 }
 

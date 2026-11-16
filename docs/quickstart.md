@@ -32,8 +32,8 @@ powershell -ExecutionPolicy Bypass -File .\install.ps1
 ## Шаг 1. Получите репозиторий
 
 ```bash
-git clone https://github.com/mika-com/1C-Agent.git
-cd 1C-Agent
+git clone https://github.com/mika-com/1C_MCP.git
+cd 1C_MCP
 ```
 
 Если Git не нужен, можно скачать ZIP архива репозитория и распаковать его в любую папку.
@@ -48,8 +48,8 @@ python scripts/opencode_port.py install --global
 
 Установщик:
 - копирует 85 навыков в `<проект>/.opencode/skills/` (глобально — `~/.config/opencode/skills/`);
-- копирует агентов (`1c`, `1c-analyst`, `1c-developer`, `1c-deployer`, `1c-tester`, `1c-test-author`) в
-  `.opencode/agents/` и команды `/1c-analyze`, `/1c-implement`, `/1c-deploy`, `/1c-webtest`, `/1c-bdd`, `/1c-check`
+- копирует 9 агентов (`1c`, `1c-analyst`, `1c-developer`, `1c-deployer`, `1c-tester`, `1c-test-author`, `1c-explorer`, `1c-debugger`, `1c-query-expert`) в
+  `.opencode/agents/` и 9 команд `/1c-analyze`, `/1c-implement`, `/1c-deploy`, `/1c-webtest`, `/1c-bdd`, `/1c-check`, `/1c-explore`, `/1c-debug`, `/1c-query`
   в `.opencode/commands/`;
 - создаёт шаблон `AGENTS.md` в проекте, если его ещё нет;
 - регистрирует MCP-серверы в `~/.config/opencode/opencode.json` (формат v2, `mcp.servers`); запись `lsp.bsl`

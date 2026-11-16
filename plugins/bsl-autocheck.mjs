@@ -27,8 +27,8 @@ import { existsSync, statSync, readFileSync, mkdtempSync, mkdirSync, copyFileSyn
 import { tmpdir } from 'node:os';
 import { join, resolve, relative, dirname, isAbsolute, basename, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { findBslLs, bslEnv } from '../own-skills/bsl-check/scripts/bsl-ls.mjs';
-import { adjustForExtension } from '../own-skills/bsl-check/scripts/bsl-diag.mjs';
+import { findBslLs, bslEnv } from '../skills/bsl-check/scripts/bsl-ls.mjs';
+import { adjustForExtension } from '../skills/bsl-check/scripts/bsl-diag.mjs';
 import { killTree } from '../mcp/lib/proc-tree.mjs';
 import { writeAutocheckState } from '../mcp/lib/agent-meta.mjs';
 
@@ -281,7 +281,7 @@ export function formatResults(results, { root, severity = 'Warning', limit = 20,
       if (!state.missingHinted) {
         state.missingHinted = true;
         lines.push(`${TAG} BSL Language Server не найден — автопроверка .bsl после правок не выполняется (подсказка показывается один раз). ` +
-          'Установка: node own-skills/bsl-check/scripts/bsl-check.mjs -Install или переменная BSL_LS_PATH; отключить: BSL_AUTOCHECK=0.');
+          'Установка: node skills/bsl-check/scripts/bsl-check.mjs -Install или переменная BSL_LS_PATH; отключить: BSL_AUTOCHECK=0.');
       }
       continue;
     }

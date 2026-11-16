@@ -3,7 +3,7 @@
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { adjustForExtension, findStringLength, isExtensionFile, queryStringCompares } from '../own-skills/bsl-check/scripts/bsl-diag.mjs';
+import { adjustForExtension, findStringLength, isExtensionFile, queryStringCompares } from '../skills/bsl-check/scripts/bsl-diag.mjs';
 import { formatResults } from '../plugins/bsl-autocheck.mjs';
 
 let passed = 0; let failed = 0;

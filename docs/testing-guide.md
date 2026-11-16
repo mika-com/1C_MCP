@@ -1,7 +1,7 @@
 # Тестирование в агенте 1С для OpenCode
 
 Краткий обзор того, что есть в ветке и как этим пользоваться. Подробности — в навыке
-[`1c-test`](../own-skills/1c-test/SKILL.md).
+[`1c-test`](../skills/1c-test/SKILL.md).
 
 ## Что выбрать
 
@@ -23,13 +23,13 @@
   `vrunner run enterprise --additional "/TESTMANAGER" --execute ./tools/vanessa/vanessa-automation.epf --command "StartFeaturePlayer;QuietInstallVanessaExt;VAParams=./tools/vanessa/VAParams.json"`.
   Итог читается из `build/reports/va/status.log` и `build/reports/va/junit/`, а не из кода возврата vrunner.
 - `vanessa-automation.epf` в репозиторий не входит: скачайте релиз и положите в `tools/vanessa/`.
-  Шаблоны: [`VAParams.json`](../own-skills/1c-test/templates/VAParams.json),
-  [`example.feature`](../own-skills/1c-test/templates/example.feature). Пути в VAParams — от корня проекта
+  Шаблоны: [`VAParams.json`](../skills/1c-test/templates/VAParams.json),
+  [`example.feature`](../skills/1c-test/templates/example.feature). Пути в VAParams — от корня проекта
   (на реальной базе ещё не проверялось).
 
 ## Preflight web-test
 
-[`preflight.mjs`](../own-skills/1c-test/scripts/preflight.mjs) ничего не устанавливает, только проверяет и
+[`preflight.mjs`](../skills/1c-test/scripts/preflight.mjs) ничего не устанавливает, только проверяет и
 подсказывает команду исправления:
 
 1. URL базы — из `.v8-project.json` (`webUrl` или `http://localhost:8081/<id>`) или аргумента;
@@ -51,7 +51,7 @@ build/reports/
 ```
 
 JUnit для web-test собирается из Allure того же прогона:
-[`allure-to-junit.mjs`](../own-skills/1c-test/scripts/allure-to-junit.mjs). HTML-отчёт Allure:
+[`allure-to-junit.mjs`](../skills/1c-test/scripts/allure-to-junit.mjs). HTML-отчёт Allure:
 `allure generate build/reports/web/allure -o build/reports/web/html` (Allure CLI ставится отдельно).
 
 ## Права агентов

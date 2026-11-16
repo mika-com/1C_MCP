@@ -339,8 +339,13 @@ PASSWORD_NOTE = (
     '`server`+`ref`), а если записи нет — из `V8_DB_USER` / `V8_DB_PASSWORD`. Явный `-Password` по-прежнему '
     'перекрывает файл и переменную.\n\n'
 )
-# Свои навыки порта (их нет в upstream): копируются в skills/ при каждой сборке
-OWN_SKILLS = 'own-skills'
+# Свои навыки порта (их нет в upstream): хранятся прямо в skills/ и сохраняются при пересборке
+OWN_SKILL_NAMES = ('1c-test', 'bsl-check', 'print-form', 'vrunner')
+OVERLAY_FILES = (
+    'web-test/scripts/cli/commands/open.mjs',
+    'web-test/scripts/cli/keepalive.mjs',
+    'web-test/scripts/engine/forms/frame-text.mjs',
+)
 
 
 def add_skill_notes(skills_dir):
@@ -376,16 +381,43 @@ def add_password_notes(skills_dir):
         write(path, content)
 
 
-def copy_own_skills(dst):
-    src = os.path.join(repo_root(), native(OWN_SKILLS))
-    names = scan_skills(src)
-    for name in names:
+def save_port_files(dst):
+    """Сохраняет свои навыки и файлы-оверлеи из skills/ во временный каталог перед очисткой."""
+    saved = {'own': {}, 'overlays': {}}
+    if not os.path.isdir(dst):
+        return saved
+    for name in OWN_SKILL_NAMES:
+        p = os.path.join(dst, name)
+        if os.path.isdir(p):
+            tmp = tempfile.mkdtemp(prefix=f'own-{name}-')
+            shutil.copytree(p, os.path.join(tmp, name), ignore=shutil.ignore_patterns('__pycache__', 'node_modules'))
+            saved['own'][name] = os.path.join(tmp, name)
+    for rel in OVERLAY_FILES:
+        p = os.path.join(dst, native(rel))
+        if os.path.isfile(p):
+            saved['overlays'][rel] = open(p, 'rb').read()
+    return saved
+
+
+def restore_port_files(dst, saved):
+    own_names = []
+    for name, src_dir in saved.get('own', {}).items():
         target = os.path.join(dst, name)
         if os.path.isdir(target):
             shutil.rmtree(target)
-        shutil.copytree(os.path.join(src, name), target,
-                        ignore=shutil.ignore_patterns('__pycache__', 'node_modules'))
-    return names
+        shutil.copytree(src_dir, target)
+        shutil.rmtree(os.path.dirname(src_dir), ignore_errors=True)
+        own_names.append(name)
+    overlay_rels = []
+    for rel, data in saved.get('overlays', {}).items():
+        skill_name = rel.split('/')[0]
+        if not os.path.isdir(os.path.join(dst, skill_name)):
+            continue
+        target = os.path.join(dst, native(rel))
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        open(target, 'wb').write(data)
+        overlay_rels.append(rel)
+    return own_names, overlay_rels
 
 
 # Навыки могут лежать вне проекта (~/.config/opencode/skills), поэтому корень проекта —
@@ -490,28 +522,6 @@ SCRIPT_PATCHES['.mjs'] += [
      "export { getFormState } from './engine/forms/state.mjs';\n"
      "export { readFrameText } from './engine/forms/frame-text.mjs';  // OpenCode"),
 ]
-
-# Файлы порта, которых нет в upstream: копируются поверх собранных навыков (skill-overlays/<навык>/...)
-OVERLAYS = 'skill-overlays'
-
-
-def copy_overlays(dst):
-    src = os.path.join(repo_root(), native(OVERLAYS))
-    copied = []
-    if not os.path.isdir(src):
-        return copied
-    for base, _dirs, files in os.walk(src):
-        for name in files:
-            if name.endswith('.pyc'):
-                continue
-            rel = os.path.relpath(os.path.join(base, name), src)
-            if not os.path.isdir(os.path.join(dst, rel.split(os.sep)[0])):
-                continue   # навыка нет в сборке — не создаём
-            target = os.path.join(dst, rel)
-            os.makedirs(os.path.dirname(target), exist_ok=True)
-            shutil.copy2(os.path.join(base, name), target)
-            copied.append(rel)
-    return copied
 
 
 # web-publish: порт по умолчанию 8081 занят другим пользователем/сеансом (RDP) → берём следующий свободный
@@ -1056,15 +1066,12 @@ def cmd_build(args):
         return 1
 
     dst = os.path.join(repo_root(), REPO_SKILLS)
+    saved = save_port_files(dst)
     if os.path.isdir(dst):
         shutil.rmtree(dst)
     os.makedirs(dst)
 
     ignore = shutil.ignore_patterns('node_modules', '__pycache__', '.browser-session.json')
-    for name in os.listdir(src):
-        p = os.path.join(src, name)
-        if os.path.isfile(p):
-            shutil.copy2(p, os.path.join(dst, name))
     for name in skills:
         shutil.copytree(os.path.join(src, name), os.path.join(dst, name), ignore=ignore)
         for md in collect_md_files(os.path.join(dst, name)):
@@ -1073,13 +1080,12 @@ def cmd_build(args):
             if new != content:
                 write(md, new)
     patched = patch_scripts(dst)
-    overlays = copy_overlays(dst)
+    own, overlays = restore_port_files(dst, saved)
     patched += patch_form_compile_events(dst)
     patched += patch_db_credentials(dst)
     patched += patch_powershell_utf8(dst)
     add_skill_notes(dst)
     apply_runtime(dst, args.runtime, verbose=False)
-    own = copy_own_skills(dst)
 
     left = [md for md in glob.glob(os.path.join(dst, '**', '*.md'), recursive=True)
             if 'CLAUDE_SKILL_DIR' in read(md)]

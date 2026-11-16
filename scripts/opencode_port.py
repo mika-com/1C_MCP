@@ -3,7 +3,7 @@
 Сборка и установка агента 1С для OpenCode v2.
 
 Команды:
-  build     — пересобрать skills/ из upstream cc-1c-skills (+ свои навыки из own-skills/)
+  build     — пересобрать skills/ из upstream cc-1c-skills (сохраняя собственные навыки в skills/)
   install   — установить навыки, агентов и команды в проект (.opencode/) или глобально (~/.config/opencode/)
               и зарегистрировать MCP-серверы (~/.config/opencode/opencode.json) и плагин bsl-autocheck
               (проверка BSL после каждой правки: <opencode>/plugins/bsl-autocheck.js)

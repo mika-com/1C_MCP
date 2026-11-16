@@ -12,7 +12,7 @@
 агента); изменения описаны в `scripts/port_core.py`. Уведомление об авторских правах и текст MIT-лицензии
 cc-1c-skills сохранены в [LICENSE](LICENSE) и должны сохраняться во всех копиях.
 
-Собственные компоненты 1C-Agent (MIT, © 2026 mika-com): `own-skills/` (`bsl-check`, `vrunner`, `1c-test`,
+Собственные компоненты 1C-Agent (MIT, © 2026 mika-com): навыки `bsl-check`, `vrunner`, `1c-test`, `print-form` в `skills/`,
 `print-form`), `.opencode/`, `mcp/`, `plugins/`, `scripts/`, `tests/`, `install.ps1`, `install.cmd`, `templates/`,
 `docs/quickstart.md`, `docs/testing-guide.md`, `docs/semantic-search.md`.
 
