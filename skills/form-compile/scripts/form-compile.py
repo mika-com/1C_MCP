@@ -2314,6 +2314,7 @@ KNOWN_EVENTS = {
     "picField": ["OnChange", "StartChoice", "ChoiceProcessing", "Click", "Clearing"],
     "calendar": ["OnChange", "OnActivate"],
     "picture": ["Click"],
+    "spreadsheet": ["DetailProcessing", "AdditionalDetailProcessing", "OnChangeAreaContent", "OnActivate", "Selection"],
     "cmdBar": [],
     "popup": [],
     "group": [],
@@ -2325,6 +2326,8 @@ KNOWN_FORM_EVENTS = [
     "AfterWrite", "BeforeWrite", "OnWriteAtServer", "FillCheckProcessingAtServer",
     "OnLoadDataFromSettingsAtServer", "BeforeLoadDataFromSettingsAtServer",
     "OnSaveDataInSettingsAtServer", "ExternalEvent", "OnReopen", "Opening",
+    "OnComposeResult", "OnSaveVariantAtServer", "BeforeLoadVariantAtServer", "OnLoadVariantAtServer",
+    "OnSaveUserSettingsAtServer", "BeforeLoadUserSettingsAtServer", "OnLoadUserSettingsAtServer",
 ]
 
 KNOWN_KEYS = {
@@ -2914,12 +2917,22 @@ def emit_events(lines, el, element_name, indent, type_key):
     if not pairs:
         return
 
-    # Validate event names
+    # Validate event names. Раньше это был [WARN] в stdout, и модель продолжала:
+    # платформа принимает XML и никогда не вызывает обработчик.
+    known_element_events = []
+    for _evs in KNOWN_EVENTS.values():
+        for _n in _evs:
+            if _n not in known_element_events:
+                known_element_events.append(_n)
     if type_key and type_key in KNOWN_EVENTS:
         allowed = KNOWN_EVENTS[type_key]
         for ev_name, _, _ in pairs:
-            if allowed and str(ev_name) not in allowed:
-                print(f"[WARN] Unknown event '{ev_name}' for {type_key} '{element_name}'. Known: {', '.join(allowed)}")
+            if str(ev_name) not in allowed:
+                reject_unknown_event(type_key or 'element', ev_name, element_name, allowed or ['(none)'])
+    else:
+        for ev_name, _, _ in pairs:
+            if str(ev_name) not in known_element_events:
+                reject_unknown_event(type_key or 'element', ev_name, element_name, known_element_events)
 
     lines.append(f"{indent}<Events>")
     for ev_name, handler, call_type in pairs:
@@ -7092,10 +7105,24 @@ def get_form_root_rank(tag):
     return order.index(tag)
 
 
-# Незнакомое событие формы — предупреждение (опечатка в имени события не даёт ошибки платформы).
+# Незнакомое событие — ошибка. Платформа кладёт имя в XML и молча не вызывает обработчик.
+def reject_unknown_event(kind, name, owner, known):
+    known_s = ', '.join(str(k) for k in known)
+    msg = (f"[ERROR] Unknown {kind} event '{name}' for '{owner}'. "
+           f"form-compile refuses it: the platform keeps the name in XML and never calls the handler. "
+           f"Check 1c-help before inventing an event. Known: {known_s}.")
+    if os.environ.get('FORM_COMPILE_ALLOW_UNKNOWN_EVENTS') == '1':
+        print(f"[WARN] {msg} FORM_COMPILE_ALLOW_UNKNOWN_EVENTS=1 — continuing.", file=sys.stderr)
+        print(f"[WARN] {msg} FORM_COMPILE_ALLOW_UNKNOWN_EVENTS=1 — continuing.")
+        return
+    print(msg, file=sys.stderr)
+    print(msg)
+    sys.exit(1)
+
+
 def warn_unknown_form_event(name):
     if name not in KNOWN_FORM_EVENTS:
-        print(f"[WARN] Unknown form event '{name}'. Known: {', '.join(KNOWN_FORM_EVENTS)}")
+        reject_unknown_event('form', name, 'Form', KNOWN_FORM_EVENTS)
 
 
 def emit_properties(lines, props, indent):

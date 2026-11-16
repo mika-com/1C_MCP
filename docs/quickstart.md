@@ -90,7 +90,13 @@ node mcp/register-opencode-mcp.mjs --vrunner  # включить vrunner-mcp (н
 
 Откройте каталог проекта в OpenCode Desktop (или `opencode` в терминале) — агент **1c** выбран по умолчанию
 (если в конфиге уже был свой `default_agent`, выберите **1c** вручную или поменяйте `default_agent`).
-Проверьте MCP: `/mcps` или `opencode mcp list`.
+Проверьте MCP: `/mcps` или `opencode mcp list`. `index_status` сервера `1c-search` показывает версию 1C-Agent
+(файл `VERSION`) и активен ли плагин `bsl-autocheck` этой сборки.
+
+Для длинных задач берите сильную модель. Flash и бесплатные модели выдумывают API платформы и раздувают
+контекст. В `.opencode/agents/1c.md` и `1c-developer.md` есть закомментированный `model:` — конкретная модель
+не задана, подставьте свою. Плагин `bsl-autocheck` перед командой PowerShell включает UTF-8 (`shell.create.before`);
+на живом OpenCode этот хук не проверялся. Если в выводе оболочки кракозябры, не разбирайте его как данные.
 
 ## Шаг 5. Откройте проект 1С
 
@@ -137,6 +143,10 @@ node mcp/register-opencode-mcp.mjs --vrunner  # включить vrunner-mcp (н
   "default": "dev"
 }
 ```
+
+Поля `user` и `password` записи базы скрипты (`epf-build`, `db-*` и другие с `-Password`) подставляют сами.
+Явный `-Password` по-прежнему перекрывает запись. Если записи нет, берутся `V8_DB_USER` и `V8_DB_PASSWORD`.
+Пароль в аргументы команды не пишите: он попадает в историю и в контекст модели.
 
 Подробности: [v8-project-guide.md](v8-project-guide.md).
 

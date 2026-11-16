@@ -13,6 +13,13 @@ param(
 	[string]$Preset = "erp-standard",
 	[string]$EmitDsl
 )
+# 1C-Agent: stdout UTF-8 (Windows PowerShell по умолчанию пишет в OEM/cp866)
+try {
+	$utf8 = New-Object System.Text.UTF8Encoding $false
+	[Console]::InputEncoding = $utf8
+	[Console]::OutputEncoding = $utf8
+	$OutputEncoding = $utf8
+} catch {}
 
 $ErrorActionPreference = "Stop"
 
@@ -2771,11 +2778,12 @@ $script:knownEvents = @{
 	"picField"  = @("OnChange","StartChoice","ChoiceProcessing","Click","Clearing")
 	"calendar"  = @("OnChange","OnActivate")
 	"picture"   = @("Click")
+	"spreadsheet" = @("DetailProcessing","AdditionalDetailProcessing","OnChangeAreaContent","OnActivate","Selection")
 	"cmdBar"    = @()
 	"popup"     = @()
 	"group"     = @()
 }
-$script:knownFormEvents = @("OnCreateAtServer","OnOpen","BeforeClose","OnClose","NotificationProcessing","ChoiceProcessing","OnReadAtServer","AfterWriteAtServer","BeforeWriteAtServer","AfterWrite","BeforeWrite","OnWriteAtServer","FillCheckProcessingAtServer","OnLoadDataFromSettingsAtServer","BeforeLoadDataFromSettingsAtServer","OnSaveDataInSettingsAtServer","ExternalEvent","OnReopen","Opening")
+$script:knownFormEvents = @("OnCreateAtServer","OnOpen","BeforeClose","OnClose","NotificationProcessing","ChoiceProcessing","OnReadAtServer","AfterWriteAtServer","BeforeWriteAtServer","AfterWrite","BeforeWrite","OnWriteAtServer","FillCheckProcessingAtServer","OnLoadDataFromSettingsAtServer","BeforeLoadDataFromSettingsAtServer","OnSaveDataInSettingsAtServer","ExternalEvent","OnReopen","Opening","OnComposeResult","OnSaveVariantAtServer","BeforeLoadVariantAtServer","OnLoadVariantAtServer","OnSaveUserSettingsAtServer","BeforeLoadUserSettingsAtServer","OnLoadUserSettingsAtServer")
 
 # Собрать упорядоченный список событий элемента (имя, обработчик) из DSL.
 # Основной формат: $el.events = { Событие: ИмяОбработчика } (null/"" → авто-имя по конвенции).
@@ -2836,12 +2844,24 @@ function Emit-Events {
 	$pairs = Get-EventPairs -el $el -elementName $elementName
 	if ($pairs.Count -eq 0) { return }
 
-	# Validate event names
+	# Validate event names (неизвестное имя → код 1; FORM_COMPILE_ALLOW_UNKNOWN_EVENTS=1 — только предупреждение)
+	$knownAll = New-Object System.Collections.Generic.List[string]
+	foreach ($k in $script:knownEvents.Keys) {
+		foreach ($n in @($script:knownEvents[$k])) {
+			if ($n -and -not $knownAll.Contains([string]$n)) { [void]$knownAll.Add([string]$n) }
+		}
+	}
 	if ($typeKey -and $script:knownEvents.ContainsKey($typeKey)) {
-		$allowed = $script:knownEvents[$typeKey]
+		$allowed = @($script:knownEvents[$typeKey])
 		foreach ($pr in $pairs) {
-			if ($allowed.Count -gt 0 -and $allowed -notcontains "$($pr.name)") {
-				Write-Host "[WARN] Unknown event '$($pr.name)' for $typeKey '$elementName'. Known: $($allowed -join ', ')"
+			if ($allowed -notcontains "$($pr.name)") {
+				Fail-UnknownEvent -Kind $typeKey -Name "$($pr.name)" -Owner $elementName -Known $allowed
+			}
+		}
+	} else {
+		foreach ($pr in $pairs) {
+			if ($knownAll -notcontains "$($pr.name)") {
+				Fail-UnknownEvent -Kind $(if ($typeKey) { $typeKey } else { 'element' }) -Name "$($pr.name)" -Owner $elementName -Known $knownAll
 			}
 		}
 	}
@@ -7206,10 +7226,21 @@ function Get-FormRootRank([string]$tag) {
 	return $i
 }
 
-# Незнакомое событие формы — предупреждение (опечатка в имени события не даёт ошибки платформы).
+# Незнакомое событие — ошибка. Платформа кладёт имя в XML и молча не вызывает обработчик.
+function Fail-UnknownEvent {
+	param([string]$Kind, [string]$Name, [string]$Owner, $Known)
+	$knownS = (@($Known) | Where-Object { $_ }) -join ', '
+	$msg = "[ERROR] Unknown $Kind event '$Name' for '$Owner'. form-compile refuses it: the platform keeps the name in XML and never calls the handler. Check 1c-help before inventing an event. Known: $knownS."
+	if ($env:FORM_COMPILE_ALLOW_UNKNOWN_EVENTS -eq '1') {
+		Write-Host "[WARN] $msg FORM_COMPILE_ALLOW_UNKNOWN_EVENTS=1 — continuing." -ForegroundColor Yellow
+		return
+	}
+	Write-Host $msg -ForegroundColor Red
+	exit 1
+}
 function Warn-UnknownFormEvent([string]$name) {
 	if ($script:knownFormEvents -notcontains $name) {
-		Write-Host "[WARN] Unknown form event '$name'. Known: $($script:knownFormEvents -join ', ')"
+		Fail-UnknownEvent -Kind 'form' -Name $name -Owner 'Form' -Known $script:knownFormEvents
 	}
 }
 

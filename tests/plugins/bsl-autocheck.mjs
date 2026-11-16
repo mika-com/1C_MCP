@@ -24,7 +24,7 @@ function project(files) {
   return dir;
 }
 async function load(dir, { env = {}, find = fakeFind, log } = {}) {
-  const e = { ...env }; if (log) e.FAKE_LOG = log;
+  const e = { ...env, BSL_AUTOCHECK_STATE: env.BSL_AUTOCHECK_STATE || join(dir, 'autocheck-state.json') }; if (log) e.FAKE_LOG = log;
   Object.assign(process.env, log ? { FAKE_LOG: log } : {});
   const plugin = P.createPlugin({ env: e, analyze: (files, o) => P.bslAnalyze(files, { ...o, find, env: { ...process.env, ...e } }) });
   const hooks = {};
@@ -126,6 +126,40 @@ if (process.platform !== 'win32') {
   await p.dispose?.();
   delete process.env.FAKE_PIDS;
 } else console.log('  (таймаут/дерево процессов — только POSIX в этом тесте)');
+
+console.log('кодировка оболочки и отметка плагина:');
+{
+  const ev = { command: 'Get-ChildItem', shell: 'powershell.exe', env: {} };
+  ok(P.applyShellUtf8(ev) && ev.command.startsWith(P.PS_UTF8_PREAMBLE) && ev.env.PYTHONUTF8 === '1' && ev.env.PYTHONIOENCODING === 'utf-8', 'powershell: преамбула UTF-8 и PYTHONUTF8');
+  ok(P.applyShellUtf8(ev) === false && ev.command.indexOf('UTF8Encoding $false') === ev.command.lastIndexOf('UTF8Encoding $false'), 'powershell: повтор не дублирует преамбулу');
+  const cmd = { command: 'dir', shell: 'C:\\Windows\\System32\\cmd.exe', env: {} };
+  ok(P.applyShellUtf8(cmd) && cmd.command.startsWith('chcp 65001 >nul & '), 'cmd: chcp 65001');
+  ok(P.applyShellUtf8(cmd) === false, 'cmd: повтор не дублирует chcp');
+  const bash = { command: 'ls', shell: 'bash', env: {} };
+  ok(P.applyShellUtf8(bash) === false && bash.command === 'ls' && bash.env.PYTHONIOENCODING === 'utf-8', 'bash: команда без изменений, Python в UTF-8');
+  const dir = project({ 'M.bsl': 'Процедура А()\nКонецПроцедуры\n' });
+  const state = join(dir, 'autocheck-state.json');
+  const hooks = {};
+  const plugin = P.createPlugin({ env: { BSL_AUTOCHECK_STATE: state }, analyze: async () => ({ status: 'ok', diags: new Map() }) });
+  const dispose = await plugin.setup({
+    location: { directory: dir },
+    tool: { hook: async (name, cb) => { hooks[name] = cb; return { dispose() {} }; } },
+    shell: { hook: async (name, cb) => { hooks['shell:' + name] = cb; return { dispose() {} }; } },
+  });
+  const ver = readFileSync(join(repo, 'VERSION'), 'utf8').trim().split(/\s+/)[0];
+  const data = JSON.parse(readFileSync(state, 'utf8'));
+  ok(data.version === ver && data.root === resolve(dir), 'setup пишет отметку версии плагина');
+  const sh = { command: 'echo hi', shell: 'pwsh', env: {} };
+  await hooks['shell:create.before'](sh);
+  ok(sh.command.startsWith(P.PS_UTF8_PREAMBLE), 'shell.create.before дописывает UTF-8');
+  const toolEv = { input: { command: 'echo x', shell: 'powershell' }, env: {} };
+  await hooks['execute.before'](toolEv);
+  ok(toolEv.input.command.startsWith(P.PS_UTF8_PREAMBLE), 'tool.execute.before для команды оболочки');
+  const editEv = { input: { path: 'M.bsl' } };
+  await hooks['execute.before'](editEv);
+  ok(editEv.input.path === 'M.bsl' && editEv.input.command === undefined, 'execute.before без оболочки не трогает edit');
+  await dispose?.();
+}
 
 console.log('миграция LSP:');
 {

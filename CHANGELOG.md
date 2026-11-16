@@ -7,12 +7,31 @@
 ### Добавлено
 - `1c-search` запускается через `mcp/restart-stdio.mjs`: при падении процесса (код 134, нехватка памяти) незакрытый
   запрос получает ошибку, сервер поднимается снова и не пропадает из каталога OpenCode. Дочернему процессу задаётся
-  куча `SEARCH_MAX_OLD_SPACE_MB` (по умолчанию 4096). `search_code` и `find_usages` читают модули построчно и
+  куча `SEARCH_MAX_OLD_SPACE_MB` (по умолчанию 8192). `search_code` и `find_usages` читают модули построчно и
   останавливаются по объёму; ответ «поиск остановлен» просит сузить `path_filter`.
 - `web-test`: `getFormState().frameTexts` и `readFrameText()` читают текст iframe (лента, HTML-поле, табличный документ).
 - Установщик (`register-opencode-mcp.mjs`, его вызывают `opencode_port.py install` и `install.ps1`) прописывает
   `"default_agent": "1c"` в `~/.config/opencode/opencode.json`, только если `default_agent` ещё не задан;
   удаление убирает его, только если он равен `"1c"`. Отключить при ручной регистрации — `--no-default-agent`.
+- Файл `VERSION` — единственный источник версии 1C-Agent. MCP-серверы пишут её в `instructions` и `serverInfo`
+  (`1c-search`, `1c-help`, заглушка `1c-bsl`; прокси `1c-bsl` дописывает её к ответу `initialize`, не затирая
+  версию BSL LS). `index_status` печатает `1C-Agent <версия>` и состояние плагина `bsl-autocheck`: активен,
+  отмечен старой версией или отметки нет. Плагин при загрузке пишет `%LOCALAPPDATA%` / `~/.cache/1c-opencode/bsl-autocheck.json`
+  (`BSL_AUTOCHECK_STATE` — свой путь). Нет строки `[bsl-autocheck]` после правки `.bsl` и нет отметки — установка устарела.
+- `form-compile` отклоняет незнакомое событие формы и элемента (`[ERROR]`, код выхода ≠ 0). Список событий формы
+  дополнен событиями отчёта СКД, у поля табличного документа — `DetailProcessing` и соседние. Обход:
+  `FORM_COMPILE_ALLOW_UNKNOWN_EVENTS=1` (остаётся `[WARN]`). Патч в `scripts/port_core.py`, переживает сборку навыков.
+- Скрипты навыков с `-Password` берут пользователя и пароль из записи `databases[]` в `.v8-project.json`
+  (по `path` или `server`+`ref`), иначе из `V8_DB_USER` / `V8_DB_PASSWORD`. Явный аргумент важнее. Пароль в вывод не пишется.
+- Плагин `bsl-autocheck` перед командой PowerShell/`cmd` включает UTF-8 (`shell.create.before` и `tool.execute.before`,
+  если указана оболочка): преамбула `[Console]::OutputEncoding` без BOM и `chcp 65001`. Скрипты навыков `.ps1`
+  делают то же в начале файла. `PYTHONIOENCODING`/`PYTHONUTF8` выставляются для Python.
+- Правила агентов: не запускать COM, typelib, правку реестра, UI Automation и GUI `1cv8` (проверка — веб-публикация
+  и `web-test`); внешний отчёт/обработка на БСП — сразу `epf-bsp-init`, штатная форма СКД и штатная расшифровка
+  (`DetailProcessing`, не выдуманное событие); после ~3 неудач — `1c-help` / `1c-search`, затем вопрос пользователю;
+  незнакомый API — сначала справка; циклы `web-test` — субагенту `1c-tester`, 1–2 скриншота, лучше текст и DOM;
+  план и подтверждение, один этап на сеанс; исходники (в том числе JSON СКД) в проекте, не в `%TEMP%`; пароль не
+  в аргументах команды.
 - Семантический поиск в MCP `1c-search` (`mcp/lib/semantic.mjs`): инструменты `semantic_search` (режимы `hybrid`,
   `semantic`, `keyword`; фильтр `object`, `with_code`) и `semantic_index` (`status`, `build`, `rebuild`).
   Фрагменты — процедуры/функции BSL с комментарием и директивами и объекты метаданных; эмбеддинги через
@@ -39,8 +58,10 @@
 - `bsl-check` и `bsl-autocheck` не считают `QueryToMissingMetadata` ошибкой расширения. Сравнение с `""` в запросе —
   предупреждение `StringCompareInQuery`, а для строки неограниченной длины (длина 0 в метаданных) — ошибка
   `UnlimitedStringCompare`.
+- В README, быстром старте и frontmatter `1c` / `1c-developer` — рекомендация сильной модели. `model:` закомментирован
+  и не привязан к конкретному идентификатору: flash и бесплатные модели на длинных задачах 1С работают плохо.
 - `1c-search`: таймаут вызова в конфиге OpenCode — `execution: 120000`; `index_status` показывает состояние
-  семантического индекса. Без LM Studio поведение прежнее, `semantic_search` отвечает по ключевым словам с `[!]`.
+  семантического индекса и версию агента. Без LM Studio поведение прежнее, `semantic_search` отвечает по ключевым словам с `[!]`.
 
 ### Исправлено
 - `web-test`: при работе по шагам браузер с 1С закрывался и открывался заново после каждого действия. Причины:

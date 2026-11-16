@@ -23,6 +23,7 @@ import { tmpdir, userInfo } from 'node:os';
 import { createHash } from 'node:crypto';
 import { createInterface } from 'node:readline';
 import { startServer } from './lib/stdio-server.mjs';
+import { agentVersion, instructionSuffix, agentBanner } from './lib/agent-meta.mjs';
 import { spawnSupervised, killTree, isAlive, processCommandLine, isOwnProcess } from './lib/proc-tree.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -123,7 +124,7 @@ export function createProxy({ toChild, toClient, timeoutMs, roots, log = () => {
         }
       }, timeoutMs);
       t.unref?.();
-      pending.set(key(msg.id), { timer: t });
+      pending.set(key(msg.id), { timer: t, method: msg.method });
     }
     toChild(line);
   }
@@ -142,6 +143,14 @@ export function createProxy({ toChild, toClient, timeoutMs, roots, log = () => {
       if (dropped.delete(k)) { log(`поздний ответ id ${k} отброшен`); return; }
       const p = pending.get(k);
       if (p) { clearTimeout(p.timer); pending.delete(k); }
+      if (p?.method === 'initialize' && msg.result && typeof msg.result === 'object') {
+        const prev = typeof msg.result.instructions === 'string' ? msg.result.instructions : '';
+        const note = instructionSuffix().trim();
+        msg.result.instructions = prev ? `${prev} ${note}` : note;
+        msg.result.serverInfo = { ...(msg.result.serverInfo && typeof msg.result.serverInfo === 'object' ? msg.result.serverInfo : {}), agent: agentBanner() };
+        toClient(JSON.stringify(msg));
+        return;
+      }
     }
     toClient(line);
   }
@@ -154,9 +163,11 @@ async function main() {
   const found = env.BSL_LS_MCP === 'off' || !loc ? null : loc.findBslLs();
   if (!found) {
     const off = env.BSL_LS_MCP === 'off';
+    const stubText = off ? '' : 'BSL Language Server не установлен: проверка и навигация по BSL-коду недоступны.';
     startServer({
       name: 'bsl-ls-stub',
-      instructions: off ? '' : 'BSL Language Server не установлен: проверка и навигация по BSL-коду недоступны.',
+      version: agentVersion(),
+      instructions: `${stubText}${instructionSuffix()}`.trim(),
       tools: [{
         name: 'bsl_ls_status',
         description: 'Состояние BSL Language Server (проверка BSL-кода): как установить, если он не установлен.',

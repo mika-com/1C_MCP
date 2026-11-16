@@ -90,6 +90,8 @@ powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/form-compile.ps1" -FromObje
 | `autoMaxWidth: false` | Снять предел ширины (поле тянется на всю доступную ширину) |
 | `events` | Обработчики: `{ "OnChange": "ИмяОбработчика" }`; `null` вместо имени — имя по шаблону `<Элемент><Событие>` |
 
+> **Неизвестное событие (OpenCode).** Имени нет в списках ниже — `form-compile` пишет `[ERROR]` и завершается с кодом 1, Form.xml не создаёт. Платформа иначе сохраняет событие и никогда его не вызывает. Расшифровка отчёта — `DetailProcessing` у поля табличного документа, не выдуманное имя. Незнакомое событие сначала проверь в `1c-help`. Обход: `FORM_COMPILE_ALLOW_UNKNOWN_EVENTS=1` (только предупреждение).
+
 ### События
 
 Имена регистрозависимы.
@@ -105,6 +107,8 @@ powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/form-compile.ps1" -FromObje
 **labelField:** `OnChange`, `StartChoice`, `ChoiceProcessing`, `Click`, `URLProcessing`, `Clearing`
 **button:** `Click`
 **pages:** `OnCurrentPageChange`
+**spreadsheet (поле табличного документа):** `DetailProcessing`, `AdditionalDetailProcessing`, `OnChangeAreaContent`, `OnActivate`, `Selection`
+**форма отчёта (СКД), дополнительно:** `OnComposeResult`, `OnSaveVariantAtServer`, `BeforeLoadVariantAtServer`, `OnLoadVariantAtServer`, `OnSaveUserSettingsAtServer`, `BeforeLoadUserSettingsAtServer`, `OnLoadUserSettingsAtServer`, `OnSaveDataInSettingsAtServer`, `OnReopen`
 
 ### Поле ввода (input)
 

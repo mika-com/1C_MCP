@@ -140,6 +140,50 @@ def find_project_database(args):
                 return db
     return None
 
+def apply_db_credentials(args):
+    """OpenCode: -UserName/-Password не обязательны. Источник (по убыванию): явный аргумент,
+    запись databases[] в .v8-project.json (path или server+ref), переменные V8_DB_USER / V8_DB_PASSWORD.
+    Значение пароля в вывод не попадает."""
+    if not hasattr(args, 'Password') and not hasattr(args, 'UserName'):
+        return args
+    # Снять окружающие кавычки до сопоставления с .v8-project.json (clean_path ещё впереди).
+    for _attr in ('InfoBasePath', 'InfoBaseServer', 'InfoBaseRef'):
+        _v = getattr(args, _attr, '') or ''
+        if isinstance(_v, str):
+            _v = _v.strip()
+            if len(_v) >= 2 and _v[0] == _v[-1] and _v[0] in (chr(34) + chr(39)):
+                _v = _v[1:-1].strip()
+            setattr(args, _attr, _v)
+    db = None
+    try:
+        db = find_project_database(args)
+    except Exception:
+        db = None
+    filled = []
+    if not getattr(args, 'UserName', None):
+        user, src = '', ''
+        if db and db.get('user'):
+            user, src = str(db.get('user')), '.v8-project.json'
+        elif os.environ.get('V8_DB_USER'):
+            user, src = os.environ.get('V8_DB_USER'), 'V8_DB_USER'
+        if user:
+            args.UserName = user
+            filled.append('user from ' + src)
+    if not getattr(args, 'Password', None):
+        pwd, src = '', ''
+        if db and db.get('password'):
+            pwd, src = str(db.get('password')), '.v8-project.json'
+        elif os.environ.get('V8_DB_PASSWORD'):
+            pwd, src = os.environ.get('V8_DB_PASSWORD'), 'V8_DB_PASSWORD'
+        if pwd:
+            args.Password = pwd
+            filled.append('password from ' + src)
+    if filled:
+        print('Infobase credentials (' + ', '.join(filled) + ') — not passed on the command line.')
+    return args
+
+
+
 
 def resolve_repository_settings(args):
     """Возвращает dict path/user/password/from_registry. Явные -Repository* сильнее реестра."""
@@ -704,6 +748,7 @@ def main():
     argv, v8_extra, ibcmd_extra = extract_extra_args(sys.argv[1:], known_opts)
     args = ci_parse_args(parser, argv)
 
+    apply_db_credentials(args)
     args.V8Path = clean_path(args.V8Path, "-V8Path")
     args.InfoBasePath = clean_path(args.InfoBasePath, "-InfoBasePath")
     assert_infobase_exists(args.InfoBasePath)
