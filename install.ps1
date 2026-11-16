@@ -186,10 +186,12 @@ function Get-RamGb {
 
 function Get-SessionCount {
     # Сеансы пользователей на сервере (RDP + консоль); минимум 1
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
     try {
         $lines = @(& quser 2>$null | Select-Object -Skip 1)
         if ($lines.Count -gt 0) { return $lines.Count }
     } catch { Write-Verbose 'quser недоступен' }
+    finally { $ErrorActionPreference = $prev }
     return 1
 }
 
@@ -418,7 +420,10 @@ try {
         Unblock-File -ErrorAction SilentlyContinue
 } catch { Write-Verbose 'Unblock-File недоступен' }
 if (Test-Path -LiteralPath (Join-Path $InstallDir '.git')) {
-    Write-Ok "Клон git, коммит $((& git -C $InstallDir rev-parse --short HEAD 2>$null))"
+    $prev = $ErrorActionPreference; $ErrorActionPreference = 'Continue'
+    $sha = (& git -c safe.directory=* -C $InstallDir rev-parse --short HEAD 2>$null)
+    $ErrorActionPreference = $prev
+    Write-Ok "Клон git$(if ($sha) { ", коммит $sha" } else { '' })"
 } else {
     Write-Ok 'Распакованный архив.'
 }
