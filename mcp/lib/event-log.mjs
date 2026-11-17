@@ -35,6 +35,17 @@ const EVENT_NAMES_RU = {
   '_$InfoBase$_.ConfigExtensionApplyError': 'Ошибка применения расширения',
   '_$InfoBase$_.DBConfigUpdate': 'Обновление конфигурации БД',
   '_$Transaction$_.RollBack': 'Отмена транзакции',
+  EXCP: 'Исключение ТЖ (EXCP)',
+  EXCPCNTX: 'Контекст исключения ТЖ',
+  TDEADLOCK: 'Взаимоблокировка ТЖ (TDEADLOCK)',
+  TTIMEOUT: 'Таймаут ожидания блокировки ТЖ (TTIMEOUT)',
+  TLOCK: 'Управляемая блокировка ТЖ (TLOCK)',
+  SDBL: 'Запрос 1С ТЖ (SDBL)',
+  DBMSSQL: 'Запрос СУБД (DBMSSQL)',
+  DBPOSTGRS: 'Запрос СУБД (DBPOSTGRS)',
+  QERR: 'Ошибка запроса ТЖ (QERR)',
+  CALL: 'Серверный вызов ТЖ (CALL)',
+  SCALL: 'Клиент-серверный вызов ТЖ (SCALL)',
 };
 
 // Секунд от 0001-01-01 00:00:00 до 1970-01-01 00:00:00 (григорианский календарь 1С)
@@ -82,6 +93,7 @@ export function resolveLogLocation(root, { log_path, database } = {}) {
   // Читаем .v8-project.json, если есть
   const v8ProjPath = join(root, '.v8-project.json');
   let serverDbNotice = null;
+  let notFoundDbNotice = null;
   if (existsSync(v8ProjPath)) {
     try {
       const proj = JSON.parse(readFileSync(v8ProjPath, 'utf8').replace(/^\uFEFF/, ''));
@@ -90,29 +102,55 @@ export function resolveLogLocation(root, { log_path, database } = {}) {
       if (database) {
         const q = norm(database);
         selected = dbs.find((d) => norm(d.id) === q) ||
+          dbs.find((d) => norm(d.ref) === q) ||
           dbs.find((d) => Array.isArray(d.aliases) && d.aliases.some((a) => norm(a) === q)) ||
-          dbs.find((d) => norm(d.name).includes(q));
+          dbs.find((d) => norm(d.name).includes(q)) ||
+          dbs.find((d) => d.configSrc && norm(d.configSrc).includes(q));
+        if (!selected) {
+          const avail = dbs.map((d) => `${d.id}${d.name ? ` («${d.name}»)` : ''}`).join(', ');
+          notFoundDbNotice = `База «${database}» не найдена в .v8-project.json${avail ? ` (доступны: ${avail})` : ''}. ` +
+            'Передайте корректный database из .v8-project.json или укажите log_path (путь к 1Cv8.lgd / папке 1Cv8Log).';
+        }
       }
-      if (!selected && proj.default) {
+      if (!selected && !database && proj.default) {
         selected = dbs.find((d) => d.id === proj.default);
       }
-      const ordered = selected ? [selected, ...dbs.filter((d) => d !== selected)] : dbs;
+      const ordered = selected ? [selected] : (database ? [] : dbs);
       for (const db of ordered) {
+        const customLog = db.eventLogPath || db.logPath;
+        if (customLog) {
+          const lp = resolve(root, customLog);
+          candidates.push({ path: lp, label: `база «${db.name || db.id}» (${customLog})` });
+        }
         if (db.path) {
           const dbDir = resolve(root, db.path);
           candidates.push({ path: join(dbDir, '1Cv8Log'), label: `база «${db.name || db.id}» (${db.path})` });
           candidates.push({ path: dbDir, label: `база «${db.name || db.id}» (${db.path})` });
         } else if (db.type === 'server' && (selected === db || !candidates.length)) {
           serverDbNotice = `База «${db.name || db.id}» (${db.server}/${db.ref}) — серверная. ` +
-            'Для чтения её журнала укажите log_path (путь к каталогу 1Cv8Log кластера 1С или выгруженному файлу 1Cv8.lgd).';
+            'Для чтения её журнала укажите log_path (путь к каталогу 1Cv8Log кластера 1С или выгруженному файлу 1Cv8.lgd) либо добавьте "eventLogPath" в запись базы в .v8-project.json.';
         }
       }
     } catch { /* некорректный .v8-project.json */ }
   }
 
-  // Стандартные локальные пути сборки в проекте
-  for (const sub of ['1Cv8Log', 'build/ib/1Cv8Log', 'ib/1Cv8Log', 'base/1Cv8Log', 'tmp/ib/1Cv8Log']) {
-    candidates.push({ path: join(root, sub), label: sub });
+  // Если передан database, проверим также локальные папки с таким именем (например src/<database>/1Cv8Log или base/<database>/1Cv8Log)
+  if (database) {
+    for (const sub of [
+      join('src', database, '1Cv8Log'),
+      join('base', database, '1Cv8Log'),
+      join('build', database, '1Cv8Log'),
+      database,
+    ]) {
+      candidates.push({ path: resolve(root, sub), label: sub });
+    }
+  }
+
+  // Стандартные локальные пути сборки в проекте (только если не запрашивалась конкретная серверная/несуществующая база)
+  if (!database || (!notFoundDbNotice && !serverDbNotice)) {
+    for (const sub of ['1Cv8Log', 'build/ib/1Cv8Log', 'ib/1Cv8Log', 'base/1Cv8Log', 'tmp/ib/1Cv8Log']) {
+      candidates.push({ path: join(root, sub), label: sub });
+    }
   }
 
   for (const c of candidates) {
@@ -120,7 +158,44 @@ export function resolveLogLocation(root, { log_path, database } = {}) {
     if (found) return { ...found, label: c.label };
   }
 
-  return { error: serverDbNotice || 'Журнал регистрации (1Cv8.lgd или *.lgp) не найден. Передайте log_path (путь к 1Cv8.lgd, папке 1Cv8Log или каталогу файловой базы) либо настройте путь к файловой базе в .v8-project.json.' };
+  return { error: notFoundDbNotice || serverDbNotice || 'Журнал регистрации (1Cv8.lgd или *.lgp) не найден. Передайте log_path (путь к 1Cv8.lgd, папке 1Cv8Log или каталогу файловой базы) либо настройте путь к файловой базе в .v8-project.json.' };
+}
+
+const TJ_HEADER_RX = /^\uFEFF?\d{2}:\d{2}\.\d+-\d+,[A-Za-z0-9_]+,\d+,/m;
+
+function isTechLogFile(filePath) {
+  if (!filePath.toLowerCase().endsWith('.log')) return false;
+  try {
+    const sample = readFileSync(filePath, 'utf8').slice(0, 4096);
+    return TJ_HEADER_RX.test(sample);
+  } catch {
+    return false;
+  }
+}
+
+function collectTechLogFiles(baseDir) {
+  const dirsToScan = [baseDir, join(baseDir, '1Cv8TechLog'), join(baseDir, 'tech_log'), join(baseDir, 'logs')];
+  const found = [];
+  for (const d of dirsToScan) {
+    if (!existsSync(d)) continue;
+    try {
+      const entries = readdirSync(d, { withFileTypes: true });
+      for (const e of entries) {
+        const full = join(d, e.name);
+        if (e.isFile() && isTechLogFile(full)) {
+          found.push(full);
+        } else if (e.isDirectory() && e.name !== '1Cv8Log') {
+          try {
+            for (const sub of readdirSync(full)) {
+              const subFull = join(full, sub);
+              if (sub.toLowerCase().endsWith('.log') && isTechLogFile(subFull)) found.push(subFull);
+            }
+          } catch { /* */ }
+        }
+      }
+    } catch { /* */ }
+  }
+  return [...new Set(found)].sort();
 }
 
 function inspectLogTarget(targetPath) {
@@ -131,6 +206,7 @@ function inspectLogTarget(targetPath) {
   if (st.isFile()) {
     if (targetPath.toLowerCase().endsWith('.lgd')) return { kind: 'lgd', file: targetPath, dir: dirname(targetPath) };
     if (targetPath.toLowerCase().endsWith('.lgp')) return { kind: 'lgp', files: [targetPath], lgf: join(dirname(targetPath), '1Cv8.lgf'), dir: dirname(targetPath) };
+    if (isTechLogFile(targetPath)) return { kind: 'tj', files: [targetPath], dir: dirname(targetPath) };
     return null;
   }
 
@@ -148,6 +224,9 @@ function inspectLogTarget(targetPath) {
         if (lgps.length) return { kind: 'lgp', files: lgps, lgf: join(dir, '1Cv8.lgf'), dir };
       } catch { /* */ }
     }
+    // 2. Файлы технологического журнала (*.log)
+    const tjFiles = collectTechLogFiles(targetPath);
+    if (tjFiles.length) return { kind: 'tj', files: tjFiles, dir: targetPath };
   }
   return null;
 }
@@ -300,6 +379,119 @@ function parseSingleLgpRecord(block, dicts, rowId) {
   };
 }
 
+function parseTjProps(body) {
+  const props = {};
+  let i = 0;
+  const len = body.length;
+  while (i < len) {
+    while (i < len && (body[i] === ',' || body[i] === ' ' || body[i] === '\r' || body[i] === '\n')) i++;
+    if (i >= len) break;
+    const eqIdx = body.indexOf('=', i);
+    if (eqIdx < 0) break;
+    const key = body.slice(i, eqIdx).trim();
+    i = eqIdx + 1;
+    let val = '';
+    if (body[i] === "'" || body[i] === '"') {
+      const q = body[i++];
+      const start = i;
+      let chunks = '';
+      while (i < len) {
+        if (body[i] === q) {
+          if (body[i + 1] === q) {
+            chunks += body.slice(start, i) + q;
+            i += 2;
+            continue;
+          }
+          chunks += body.slice(start, i);
+          i++;
+          break;
+        }
+        i++;
+      }
+      val = chunks || body.slice(start, i - 1);
+    } else {
+      const commaIdx = body.indexOf(',', i);
+      if (commaIdx < 0) {
+        val = body.slice(i).trim();
+        i = len;
+      } else {
+        val = body.slice(i, commaIdx).trim();
+        i = commaIdx + 1;
+      }
+    }
+    if (key) props[key] = val;
+  }
+  return props;
+}
+
+const TJ_ERROR_EVENTS = new Set(['EXCP', 'EXCPCNTX', 'TDEADLOCK', 'TTIMEOUT', 'QERR']);
+
+function readTechLogEvents(files, { errorsOnly, limit, search, eventFilter, sinceMinutes }) {
+  const rows = [];
+  for (const file of [...files].reverse()) {
+    let text = '';
+    try { text = readFileSync(file, 'utf8').replace(/^\uFEFF/, ''); } catch { continue; }
+    const base = basename(file);
+    const fnMatch = base.match(/^(\d{2})(\d{2})(\d{2})(\d{2})\.log$/i);
+    let datePrefix = '';
+    if (fnMatch) {
+      datePrefix = `20${fnMatch[1]}-${fnMatch[2]}-${fnMatch[3]} ${fnMatch[4]}:`;
+    } else {
+      try {
+        const mtime = statSync(file).mtime.toISOString();
+        datePrefix = `${mtime.slice(0, 10)} ${mtime.slice(11, 13)}:`;
+      } catch { /* */ }
+    }
+
+    const starts = [...text.matchAll(/^(\d{2}):(\d{2})\.(\d+)-(\d+),([A-Za-z0-9_]+),(\d+),/gm)];
+    for (let i = starts.length - 1; i >= 0; i--) {
+      const m = starts[i];
+      const bodyStart = m.index + m[0].length;
+      const bodyEnd = i + 1 < starts.length ? starts[i + 1].index : text.length;
+      const body = text.slice(bodyStart, bodyEnd).trim();
+      const props = parseTjProps(body);
+
+      const mm = m[1];
+      const ss = m[2];
+      const durationUs = Number(m[4]) || 0;
+      const durationMs = durationUs / 1000;
+      const evName = m[5].toUpperCase();
+      const isErrEvent = TJ_ERROR_EVENTS.has(evName);
+      const severity = isErrEvent ? 3 : (durationMs >= 1000 || props.WaitConnections ? 2 : 1);
+
+      const commentParts = [];
+      if (durationUs > 0) {
+        commentParts.push(`[Длительность: ${durationMs >= 10 ? Math.round(durationMs) : durationMs.toFixed(2)} мс]`);
+      }
+      if (props.Descr) commentParts.push(props.Descr.trim());
+      if (props.Txt && props.Txt !== props.Descr) commentParts.push(props.Txt.trim());
+      if (props.WaitConnections) commentParts.push(`Ожидание соединений (WaitConnections): ${props.WaitConnections}`);
+      if (props.Locks) commentParts.push(`Блокировки (Locks): ${props.Locks}`);
+      if (props.Regions) commentParts.push(`Пространства блокировок (Regions): ${props.Regions}`);
+      if (props.Sql) commentParts.push(`SQL: ${props.Sql.trim()}`);
+      if (props.Module && props.Line) commentParts.push(`{${props.Module}(${props.Line})}`);
+      if (props.Context) commentParts.push(`Контекст:\n${props.Context.trim()}`);
+
+      rows.push({
+        rowId: rows.length + 1,
+        date: datePrefix ? `${datePrefix}${mm}:${ss}` : `${mm}:${ss}`,
+        severity,
+        comment: commentParts.join('\n'),
+        dataPresentation: props.Func || props.Trans || '',
+        session: Number(props['t:connectID'] || props.SessionID) || 0,
+        transactionStatus: '',
+        userName: props.Usr || '',
+        appName: props['t:applicationName'] || props.process || props['p:processName'] || '',
+        eventName: evName,
+        metadataName: props.Regions || '',
+      });
+      if (rows.length >= Math.max(limit * 5, 200)) break;
+    }
+    if (rows.length >= Math.max(limit * 5, 200)) break;
+  }
+  return filterAndNormalizeEvents(rows, { errorsOnly, limit, search, eventFilter, sinceMinutes });
+}
+
 function filterAndNormalizeEvents(rows, { errorsOnly, limit, search, eventFilter, sinceMinutes }) {
   const q = search ? norm(search) : '';
   const evQ = eventFilter ? norm(eventFilter) : '';
@@ -342,17 +534,23 @@ function filterAndNormalizeEvents(rows, { errorsOnly, limit, search, eventFilter
   return out;
 }
 
-// Извлекает из текста ошибки 1С ссылки на модули вида {ОбщийМодуль.Имя.Модуль(123)} или {Документ.Заказ.МодульОбъекта(45)}
+// Извлекает из текста ошибки 1С или технологического журнала ссылки на модули вида:
+//   - {ОбщийМодуль.Имя.Модуль(123)} или {Документ.Заказ.МодульОбъекта(45)}
+//   - ОбщийМодуль.Имя.Модуль : 123 : ИмяМетода(...) (формат Context технологического журнала ТЖ)
 // и находит соответствующие файлы .bsl и процедуры в индексе проекта
 export function resolveStackLocations(comment, idx, { withCode = true } = {}) {
   if (!comment || !idx || !Array.isArray(idx.modules) || !idx.modules.length) return [];
-  const rx = /\{([^{}\r\n]+?)\((\d+)\)\}/g;
+  const rxBraces = /\{([^{}\r\n]+?)\((\d+)\)\}/g;
+  const rxTjContext = /((?:[A-Za-zА-Яа-яЁё0-9_]+\s+)?(?:ОбщийМодуль|CommonModule|Документ|Document|Справочник|Catalog|РегистрСведений|InformationRegister|РегистрНакопления|AccumulationRegister|РегистрБухгалтерии|AccountingRegister|РегистрРасчета|CalculationRegister|Обработка|DataProcessor|Отчет|Report|БизнесПроцесс|BusinessProcess|Задача|Task|ПланВидовХарактеристик|ChartOfCharacteristicTypes|ПланСчетов|ChartOfAccounts|ПланОбмена|ExchangePlan|HTTPСервис|HTTPService|WebСервис|WebService)\.[A-Za-zА-Яа-яЁё0-9_.]+)\s*:\s*(\d+)/g;
+
+  const frames = [];
+  for (const m of comment.matchAll(rxBraces)) frames.push({ rawMod: m[1].trim(), lineNum: Number(m[2]) });
+  for (const m of comment.matchAll(rxTjContext)) frames.push({ rawMod: m[1].trim(), lineNum: Number(m[2]) });
+
   const results = [];
   const seen = new Set();
 
-  for (const m of comment.matchAll(rx)) {
-    const rawMod = m[1].trim();
-    const lineNum = Number(m[2]);
+  for (const { rawMod, lineNum } of frames) {
     const key = `${rawMod}:${lineNum}`;
     if (seen.has(key)) continue;
     seen.add(key);
@@ -419,17 +617,27 @@ function matchModuleInIndex(rawMod, idx) {
 }
 
 export async function readEventLog(idx, args = {}) {
-  const errorsOnly = args.errors_only !== false;
-  const limit = Math.min(100, Math.max(1, Number(args.limit) || 20));
-  const withCode = args.with_code !== false;
-
   const loc = resolveLogLocation(idx.root, { log_path: args.log_path, database: args.database });
   if (loc.error) return loc.error;
+
+  const isTj = loc.kind === 'tj';
+  // Для ТЖ при явно заданном фильтре события (например SDBL, TLOCK, CALL) не отсекаем не-ошибки по умолчанию
+  const errorsOnly = args.errors_only !== undefined ? Boolean(args.errors_only) : !(isTj && args.event);
+  const limit = Math.min(100, Math.max(1, Number(args.limit) || 20));
+  const withCode = args.with_code !== false;
 
   let events = [];
   try {
     if (loc.kind === 'lgd') {
       events = await readSqliteEvents(loc.file, {
+        errorsOnly,
+        limit,
+        search: args.search,
+        eventFilter: args.event,
+        sinceMinutes: args.since_minutes,
+      });
+    } else if (loc.kind === 'tj') {
+      events = readTechLogEvents(loc.files, {
         errorsOnly,
         limit,
         search: args.search,
@@ -446,17 +654,18 @@ export async function readEventLog(idx, args = {}) {
       });
     }
   } catch (e) {
-    return `Ошибка чтения журнала регистрации (${loc.file || loc.dir}): ${e.message}`;
+    return `Ошибка чтения журнала (${loc.file || loc.dir}): ${e.message}`;
   }
 
+  const logKindTitle = isTj ? 'Технологический журнал 1С (ТЖ)' : 'Журнал регистрации';
   const srcTitle = loc.kind === 'lgd' ? relative(idx.root, loc.file) || loc.file : relative(idx.root, loc.dir) || loc.dir;
   if (!events.length) {
-    return `В журнале регистрации (${srcTitle}${loc.label ? `, ${loc.label}` : ''}) ` +
+    return `В журнале (${logKindTitle}: ${srcTitle}${loc.label ? `, ${loc.label}` : ''}) ` +
       `${errorsOnly ? 'ошибок' : 'событий по заданному фильтру'} не найдено.`;
   }
 
   const out = [
-    `Журнал регистрации: ${srcTitle}${loc.label ? ` (${loc.label})` : ''} — показано записей: ${events.length}`,
+    `${logKindTitle}: ${srcTitle}${loc.label ? ` (${loc.label})` : ''} — показано записей: ${events.length}`,
   ];
 
   events.forEach((ev, i) => {

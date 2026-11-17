@@ -17,8 +17,8 @@
 // BSL_LS_MCP=off или BSL LS не установлен — маленький сервер-заглушка с подсказкой.
 
 import { fileURLToPath, pathToFileURL } from 'node:url';
-import { dirname, join, resolve, basename } from 'node:path';
-import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from 'node:fs';
+import { dirname, join, resolve, basename, relative, sep } from 'node:path';
+import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync, readdirSync, statSync } from 'node:fs';
 import { tmpdir, userInfo } from 'node:os';
 import { createHash } from 'node:crypto';
 import { createInterface } from 'node:readline';
@@ -95,16 +95,136 @@ export function configuredRoots(value = env.BSL_LS_ROOT) {
     .filter((p) => existsSync(p)).map((p) => ({ uri: pathToFileURL(p).href, name: basename(p) }));
 }
 
-// ---- прокси JSON-RPC (по строке на сообщение) с таймаутами ----
-export function createProxy({ toChild, toClient, timeoutMs, roots, log = () => {} }) {
+// Определяет узкую рабочую папку для автоматической регистрации при обращении к файлу:
+// - для расширения (CFE) или компактной конфигурации (< 300 объектов) — корень конфигурации/расширения (где Configuration.xml);
+// - для гигантской типовой конфигурации (ERP/ДО/КА) — папку конкретного объекта метаданных (<Cfg>/<Class>/<Obj>), чтобы не подвесить BSL LS индексацией 60 тыс. модулей;
+// - иначе — директорию самого файла.
+export function findNarrowWorkspaceDir(absFilePath) {
+  let fileDir = absFilePath;
+  try {
+    if (existsSync(absFilePath) && statSync(absFilePath).isFile()) fileDir = dirname(absFilePath);
+  } catch {
+    fileDir = dirname(absFilePath);
+  }
+
+  let cur = fileDir;
+  let cfgDir = null;
+  for (let depth = 0; depth < 10; depth++) {
+    if (existsSync(join(cur, 'Configuration.xml')) || existsSync(join(cur, 'Configuration.mdo'))) {
+      cfgDir = cur;
+      break;
+    }
+    const parent = dirname(cur);
+    if (parent === cur) break;
+    cur = parent;
+  }
+
+  if (!cfgDir) return fileDir;
+
+  // Проверяем, является ли cfgDir расширением или компактной выгрузкой
+  let isCompactOrExt = false;
+  const cfgXml = join(cfgDir, 'Configuration.xml');
+  if (existsSync(cfgXml)) {
+    try {
+      const head = readFileSync(cfgXml, 'utf8').slice(0, 8192);
+      if (/<ConfigurationExtensionPurpose>|<ObjectPrefix>/i.test(head)) isCompactOrExt = true;
+    } catch { /* */ }
+  }
+  if (!isCompactOrExt) {
+    let objCount = 0;
+    for (const sub of ['CommonModules', 'Documents', 'Catalogs', 'InformationRegisters', 'AccumulationRegisters', 'DataProcessors', 'Reports']) {
+      const d = join(cfgDir, sub);
+      if (existsSync(d)) {
+        try { objCount += readdirSync(d).length; } catch { /* */ }
+      }
+      if (objCount > 300) break;
+    }
+    if (objCount <= 300) isCompactOrExt = true;
+  }
+
+  if (isCompactOrExt) return cfgDir;
+
+  // Огромная конфигурация: берём папку объекта метаданных (<cfgDir>/<ClassFolder>/<ObjectName>)
+  const relParts = relative(cfgDir, fileDir).split(sep).filter(Boolean);
+  if (relParts.length >= 2) {
+    const candidate = relParts[0] === 'mdClasses' && relParts.length >= 3
+      ? join(cfgDir, relParts[0], relParts[1], relParts[2])
+      : join(cfgDir, relParts[0], relParts[1]);
+    if (existsSync(candidate)) return candidate;
+  }
+  return fileDir;
+}
+
+const FILE_ARG_KEYS = ['file', 'path', 'filePath', 'uri'];
+
+function normalizeAndExtractFileArg(args, baseDir) {
+  if (!args || typeof args !== 'object') return null;
+  let extractedPath = null;
+  for (const k of FILE_ARG_KEYS) {
+    const val = args[k];
+    if (typeof val !== 'string' || !val.trim()) continue;
+    if (val.startsWith('file://')) {
+      try {
+        const p = fileURLToPath(val);
+        if (existsSync(p)) extractedPath = p;
+      } catch { /* */ }
+    } else {
+      const resolved = resolve(baseDir, val);
+      if (existsSync(resolved)) {
+        extractedPath = resolved;
+        args[k] = k === 'uri' ? pathToFileURL(resolved).href : resolved;
+      }
+    }
+  }
+  return extractedPath;
+}
+
+// ---- прокси JSON-RPC (по строке на сообщение) с таймаутами и авто-регистрацией узких папок ----
+export function createProxy({ toChild, toClient, timeoutMs, roots, baseDir = process.cwd(), log = () => {} }) {
   const pending = new Map();   // id запроса клиента → { timer, method, tool }
   const dropped = new Set();   // id, по которым клиент уже получил ошибку таймаута
+  const activeRoots = Array.isArray(roots) ? [...roots] : null;
+  const activeRootPaths = new Set((activeRoots || []).map((r) => {
+    try { return resolve(fileURLToPath(r.uri)); } catch { return ''; }
+  }).filter(Boolean));
 
   const key = (id) => JSON.stringify(id);
+
+  function ensureWorkspaceForFile(absFilePath) {
+    if (activeRoots === null || !absFilePath) return false;
+    const normFile = resolve(absFilePath);
+    for (const rootPath of activeRootPaths) {
+      if (normFile === rootPath || normFile.startsWith(rootPath + sep)) return false;
+    }
+    const wsDir = resolve(findNarrowWorkspaceDir(normFile));
+    if (activeRootPaths.has(wsDir)) return false;
+    activeRootPaths.add(wsDir);
+    const entry = { uri: pathToFileURL(wsDir).href, name: basename(wsDir) };
+    activeRoots.push(entry);
+    log(`авто-регистрация рабочей папки: ${wsDir}`);
+    toChild(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'workspace/didChangeWorkspaceFolders',
+      params: { event: { added: [entry], removed: [] } },
+    }));
+    toChild(JSON.stringify({
+      jsonrpc: '2.0',
+      method: 'notifications/roots/list_changed',
+    }));
+    return true;
+  }
 
   function fromClient(line) {
     let msg;
     try { msg = JSON.parse(line); } catch { toChild(line); return; }
+    let outLine = line;
+    if (msg && msg.method === 'tools/call' && msg.params?.arguments) {
+      const targetFile = normalizeAndExtractFileArg(msg.params.arguments, baseDir);
+      if (targetFile) {
+        ensureWorkspaceForFile(targetFile);
+        outLine = JSON.stringify(msg);
+      }
+    }
     if (msg && msg.id !== undefined && msg.method) {
       const tool = msg.method === 'tools/call' ? msg.params?.name : undefined;
       const t = setTimeout(() => {
@@ -125,16 +245,16 @@ export function createProxy({ toChild, toClient, timeoutMs, roots, log = () => {
       t.unref?.();
       pending.set(key(msg.id), { timer: t, method: msg.method });
     }
-    toChild(line);
+    toChild(outLine);
   }
 
   function fromChild(line) {
     let msg;
     try { msg = JSON.parse(line); } catch { toClient(line); return; }
     // запрос сервера к клиенту за корнями — отвечаем сами, если область задана не auto
-    if (msg && msg.method === 'roots/list' && msg.id !== undefined && roots !== null) {
-      log(`roots/list → ${roots.length ? roots.map((r) => r.uri).join(', ') : 'пусто'}`);
-      toChild(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { roots } }));
+    if (msg && msg.method === 'roots/list' && msg.id !== undefined && activeRoots !== null) {
+      log(`roots/list → ${activeRoots.length ? activeRoots.map((r) => r.uri).join(', ') : 'пусто'}`);
+      toChild(JSON.stringify({ jsonrpc: '2.0', id: msg.id, result: { roots: activeRoots } }));
       return;
     }
     if (msg && msg.id !== undefined && !msg.method) {
@@ -154,7 +274,7 @@ export function createProxy({ toChild, toClient, timeoutMs, roots, log = () => {
     toClient(line);
   }
 
-  return { fromClient, fromChild, pending, dropped };
+  return { fromClient, fromChild, pending, dropped, activeRoots };
 }
 
 async function main() {

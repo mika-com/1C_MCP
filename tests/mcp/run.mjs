@@ -3,11 +3,12 @@
 // SIGTERM, смерти родителя и при запуске второго экземпляра; таймаут вызова; roots/list не отдаёт корень проекта.
 //   node tests/mcp/run.mjs
 import { spawn } from 'node:child_process';
-import { mkdtempSync, readFileSync, writeFileSync, chmodSync, existsSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, chmodSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { createInterface } from 'node:readline';
+import { createProxy, findNarrowWorkspaceDir } from '../../mcp/bsl-ls.mjs';
 
 const here = dirname(fileURLToPath(import.meta.url));
 const proxyPath = resolve(here, '..', '..', 'mcp', 'bsl-ls.mjs');
@@ -150,6 +151,45 @@ console.log('1c-bsl proxy:');
   const tree = readPids(pids);
   p.stdin.end();
   ok(await waitFor(() => !tree.some(alive)), 'run-supervised: EOF stdin → дерево завершено');
+}
+
+// 8. Авто-регистрация узкой рабочей папки и нормализация относительного пути при вызове файлового инструмента
+{
+  const dir = mkdtempSync(join(tmpdir(), 'bsl-autows-'));
+  const extDir = join(dir, 'src', 'doc-ext', 'ИнтеграцияSD');
+  const modDir = join(extDir, 'CommonModules', 'SD_Уведомление', 'Ext');
+  mkdirSync(modDir, { recursive: true });
+  writeFileSync(join(extDir, 'Configuration.xml'), '<MetaDataObject><Configuration><Properties><Name>ИнтеграцияSD</Name><ObjectPrefix>SD_</ObjectPrefix></Properties></Configuration></MetaDataObject>');
+  const bslFile = join(modDir, 'Module.bsl');
+  writeFileSync(bslFile, 'Процедура Тест() Экспорт\nКонецПроцедуры\n');
+
+  ok(findNarrowWorkspaceDir(bslFile) === extDir, 'findNarrowWorkspaceDir: находит корень расширения CFE (где Configuration.xml)');
+
+  const toChildMsgs = [];
+  const toClientMsgs = [];
+  const proxy = createProxy({
+    toChild: (l) => toChildMsgs.push(JSON.parse(l)),
+    toClient: (l) => toClientMsgs.push(JSON.parse(l)),
+    timeoutMs: 5000,
+    roots: [],
+    baseDir: dir,
+  });
+
+  proxy.fromClient(JSON.stringify({
+    jsonrpc: '2.0',
+    id: 10,
+    method: 'tools/call',
+    params: { name: 'analyze_file', arguments: { file: 'src/doc-ext/ИнтеграцияSD/CommonModules/SD_Уведомление/Ext/Module.bsl' } },
+  }));
+
+  const wsChange = toChildMsgs.find((m) => m.method === 'workspace/didChangeWorkspaceFolders');
+  const rootsChanged = toChildMsgs.find((m) => m.method === 'notifications/roots/list_changed');
+  const forwardedCall = toChildMsgs.find((m) => m.id === 10 && m.method === 'tools/call');
+
+  ok(Boolean(wsChange && rootsChanged) && wsChange.params.event.added[0].uri === pathToFileURL(extDir).href,
+     'createProxy: автоматически регистрирует узкую папку расширения при вызове analyze_file');
+  ok(forwardedCall?.params?.arguments?.file === bslFile,
+     'createProxy: автоматически преобразует относительный путь файла в абсолютный');
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);

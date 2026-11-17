@@ -158,12 +158,17 @@ export function queryStringCompares(source) {
   return hits;
 }
 
+const EXTENSION_FALSE_POSITIVES = new Set([
+  'QueryToMissingMetadata',
+  'CommonModuleInvalidType',
+]);
+
 export function adjustForExtension(file, diags, { source = '', lookup = null } = {}) {
   const ext = isExtensionFile(file);
   let hiddenMissing = 0;
   const rows = [];
   for (const d of diags || []) {
-    if (ext && d.code === 'QueryToMissingMetadata') { hiddenMissing++; continue; }
+    if (ext && EXTENSION_FALSE_POSITIVES.has(d.code)) { hiddenMissing++; continue; }
     rows.push(d);
   }
   if (source) {

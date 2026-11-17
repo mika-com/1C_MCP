@@ -148,12 +148,14 @@ function suggestSimilar(target, candidates, max = 3) {
 }
 
 // Собирает объединённое описание объекта метаданных из основной конфигурации и расширений
-function buildSchemaIndex(idx) {
+function buildSchemaIndex(idx, { isAllowedPath = null } = {}) {
   const byTypeAndName = new Map(); // `${dir}|${norm(name)}` → merged object
   const definedTypes = new Map();  // norm(name) → string[] of types
   const commonAttrs = [];          // { name, types, autoUse, content: Map<norm('Dir.Name'), bool> }
 
-  for (const o of idx.objects) {
+  const filteredObjects = isAllowedPath ? idx.objects.filter((o) => isAllowedPath(o.file)) : idx.objects;
+
+  for (const o of filteredObjects) {
     if (o.type === 'DefinedTypes') {
       const prev = definedTypes.get(norm(o.name)) || [];
       definedTypes.set(norm(o.name), [...new Set([...prev, ...(o.types || [])])]);
@@ -201,7 +203,7 @@ function buildSchemaIndex(idx) {
     }
   }
 
-  return { byTypeAndName, definedTypes, commonAttrs, allObjects: idx.objects };
+  return { byTypeAndName, definedTypes, commonAttrs, allObjects: filteredObjects };
 }
 
 // Раскрывает список типов реквизита (включая ОпределяемыйТип.Х) до конечных типов
@@ -499,7 +501,7 @@ function getObjectFields(obj, schema, { tsName = null, virtualTable = null } = {
   }
 
   const title = `${DIR_TO_RU[obj.type] || obj.type}.${obj.name}${virtualTable ? `.${virtualTable}` : ''}`;
-  return { fields, title, obj };
+  return { fields, title, obj, virtualTable: virtualTable || null };
 }
 
 // Проверяет корректность имени виртуальной таблицы для конкретного регистра
@@ -540,6 +542,7 @@ function validateVirtualTable(obj, vtName) {
 // Проверяет цепочку полей A.B.C относительно источника sourceInfo
 function validateFieldChain(chainParts, sourceInfo, schema, issues) {
   let curInfo = sourceInfo;
+  let refDerefDepth = 0;
   for (let i = 0; i < chainParts.length; i++) {
     const part = chainParts[i];
     const pn = norm(part);
@@ -558,6 +561,7 @@ function validateFieldChain(chainParts, sourceInfo, schema, issues) {
         return;
       }
       if (i + 1 < chainParts.length) {
+        refDerefDepth++;
         curInfo = stepIntoFieldTypes(tsField.types, `${curInfo.tsFields.title}.${tsField.name}`, schema, issues);
       }
       continue;
@@ -598,9 +602,22 @@ function validateFieldChain(chainParts, sourceInfo, schema, issues) {
     }
 
     if (i + 1 < chainParts.length) {
+      refDerefDepth++;
       const combinedTypes = [...new Set(matchedFields.flatMap((m) => m.f.types || []))];
       const fieldLabel = `${candidateInfos[0].title}.${matchedFields[0].f.name}`;
       curInfo = stepIntoFieldTypes(combinedTypes, fieldLabel, schema, issues);
+      // Антипаттерн ИТС: разыменование составного типа через точку или глубокое разыменование (>= 3 точек по ссылкам)
+      if (curInfo && curInfo.multiInfos && curInfo.multiInfos.length > 1) {
+        issues.push({
+          severity: 'warning',
+          message: `[Производительность ИТС] Обращение через точку от поля составного типа «${fieldLabel}» (${curInfo.multiInfos.length} таблиц: ${curInfo.title}) в «${chainParts.join('.')}» порождает множественные неявные соединения LEFT JOIN. Используйте ВЫРАЗИТЬ(${chainParts.slice(0, i + 1).join('.')} КАК Тип).${chainParts.slice(i + 1).join('.')} или явное соединение.`,
+        });
+      } else if (refDerefDepth >= 3 && i + 1 === chainParts.length - 1) {
+        issues.push({
+          severity: 'warning',
+          message: `[Производительность ИТС] Многоуровневое разыменование ссылочного поля через точку «${chainParts.join('.')}» (глубина ${refDerefDepth}) порождает каскад неявных соединений. При больших объёмах данных рекомендуется явное СОЕДИНЕНИЕ.`,
+        });
+      }
     }
   }
 }
@@ -758,7 +775,7 @@ function parseSelectColumns(selectClause, aliasMap, schema) {
 }
 
 // Заменяет круглые скобки параметров виртуальных таблиц в секции ИЗ на пробелы, но предварительно проверяет условия внутри них
-function stripAndValidateVtParams(fromSection, schema, issues, outerAliases) {
+function stripAndValidateVtParams(fromSection, schema, issues, outerAliases, vtFilteredDims = new Map()) {
   let out = '';
   let i = 0;
   while (i < fromSection.length) {
@@ -775,14 +792,16 @@ function stripAndValidateVtParams(fromSection, schema, issues, outerAliases) {
       }
       const inside = fromSection.slice(i + 1, j - 1);
       if (tblMatch) {
-        const parts = tblMatch[1].split('.');
+        const rawTbl = tblMatch[1];
+        const parts = rawTbl.split('.');
         if (parts.length === 3) {
           const dir = QUERY_TABLE_TYPES.get(norm(parts[0]));
           const obj = dir ? schema.byTypeAndName.get(`${dir}|${norm(parts[1])}`) : null;
           if (obj) {
             const regInfo = getObjectFields(obj, schema, { virtualTable: parts[2] });
             if (regInfo) {
-              validateVirtualTableParamsExpr(inside, regInfo, outerAliases, schema, issues);
+              const filteredSet = validateVirtualTableParamsExpr(inside, regInfo, outerAliases, schema, issues);
+              vtFilteredDims.set(norm(rawTbl), filteredSet);
             }
           }
         }
@@ -799,6 +818,7 @@ function stripAndValidateVtParams(fromSection, schema, issues, outerAliases) {
 
 // Валидирует поля в параметрах виртуальной таблицы регистра (например СрезПоследних(&Период, Валюта = &Валюта))
 function validateVirtualTableParamsExpr(paramsText, regInfo, outerAliases, schema, issues) {
+  const filteredDims = new Set();
   // Разбиваем параметры ВТ по запятым верхнего уровня; условие отбора всегда последний параметр (начиная со 2-го)
   const args = [];
   let depth = 0;
@@ -811,7 +831,7 @@ function validateVirtualTableParamsExpr(paramsText, regInfo, outerAliases, schem
     else cur += ch;
   }
   if (cur.trim()) args.push(cur.trim());
-  if (args.length < 2) return;
+  if (args.length < 2) return filteredDims;
   const filterExpr = args[args.length - 1];
   const cleaned = filterExpr.replace(/"[^"]*"/g, '""').replace(/(?<![\wА-Яа-яЁё])(?:ЗНАЧЕНИЕ|VALUE|ТИП|TYPE)\s*\([^)]*\)/gi, ' ');
   const chainRx = /(?<![&\wА-Яа-яЁё])([A-Za-zА-Яа-яЁё_][\wА-Яа-яЁё]*(?:\.[A-Za-zА-Яа-яЁё_][\wА-Яа-яЁё]*)*)/g;
@@ -824,8 +844,10 @@ function validateVirtualTableParamsExpr(paramsText, regInfo, outerAliases, schem
       validateFieldChain(parts.slice(1), outerAliases.get(first), schema, issues);
       continue;
     }
+    filteredDims.add(first);
     validateFieldChain(parts, regInfo, schema, issues);
   }
+  return filteredDims;
 }
 
 // Разбор одной выборки (без UNION и без вложенных (ВЫБРАТЬ ...))
@@ -853,13 +875,16 @@ function validateSingleSelect(stmt, schema, tempTables, outerAliases, issues, st
     for (const [k, v] of outerAliases.entries()) aliasMap.set(k, v);
   }
   const localAliases = new Map();
+  const vtFilteredDims = new Map();
+  const hasIndexClause = /(?<![\wА-Яа-яЁё.])(?:ИНДЕКСИРОВАТЬ\s+ПО|INDEX\s+BY)(?![\wА-Яа-яЁё])/i.test(afterFrom);
 
   if (rawFromSection.trim()) {
-    const cleanFrom = stripAndValidateVtParams(rawFromSection, schema, issues, aliasMap);
+    const cleanFrom = stripAndValidateVtParams(rawFromSection, schema, issues, aliasMap, vtFilteredDims);
     // Разбиваем по СОЕДИНЕНИЕ / JOIN или запятым, извлекая источники таблиц до ключевого слова ПО / ON
     // Шаблон источника: <Таблица> [КАК|AS] [Алиас]
     const sourceSegments = cleanFrom.split(/(?<![\wА-Яа-яЁё])(?:(?:ЛЕВОЕ|ПРАВОЕ|ПОЛНОЕ|ВНУТРЕННЕЕ|ВНЕШНЕЕ|LEFT|RIGHT|FULL|INNER|OUTER)\s+)*(?:СОЕДИНЕНИЕ|JOIN)(?![\wА-Яа-яЁё])|,/i);
-    for (const seg of sourceSegments) {
+    for (let segIdx = 0; segIdx < sourceSegments.length; segIdx++) {
+      const seg = sourceSegments[segIdx];
       // Отсекаем условие соединения ПО / ON ...
       const onSplit = seg.split(/(?<![\wА-Яа-яЁё.])(?:ПО|ON)(?![\wА-Яа-яЁё])/i);
       const tableSpec = onSplit[0].trim();
@@ -871,9 +896,27 @@ function validateSingleSelect(stmt, schema, tempTables, outerAliases, issues, st
       let alias = tm[2];
       if (alias && QUERY_KEYWORDS.has(norm(alias))) alias = null;
 
+      // Антипаттерн ИТС 1: СОЕДИНЕНИЕ с вложенным подзапросом вместо временной таблицы
+      if (segIdx > 0 && /^__subq_\d+__$/i.test(rawTableName)) {
+        issues.push({
+          severity: 'warning',
+          message: `[Производительность ИТС] СОЕДИНЕНИЕ с вложенным подзапросом (${alias || rawTableName}). По стандартам 1С соединение с подзапросами ухудшает план запроса СУБД — вынесите подзапрос во временную таблицу (ПОМЕСТИТЬ ВтИмя + ИНДЕКСИРОВАТЬ ПО).`,
+        });
+      }
+
       const resolved = resolveTableSource(rawTableName, schema, tempTables, issues);
       stats.tablesChecked++;
       if (resolved) {
+        if (vtFilteredDims.has(norm(rawTableName))) {
+          resolved.vtFilteredDims = vtFilteredDims.get(norm(rawTableName));
+        }
+        // Антипаттерн ИТС 2: СОЕДИНЕНИЕ с временной таблицей, созданной без ИНДЕКСИРОВАТЬ ПО
+        if (segIdx > 0 && resolved.isTempTable && !resolved.indexed && onSplit.length > 1) {
+          issues.push({
+            severity: 'warning',
+            message: `[Производительность ИТС] Соединение с временной таблицей «${rawTableName}», у которой отсутствует секция ИНДЕКСИРОВАТЬ ПО. Добавьте ИНДЕКСИРОВАТЬ ПО для полей соединения при создании ВТ.`,
+          });
+        }
         const defaultAlias = rawTableName.replace(/\./g, '');
         const finalAlias = alias || partsDefaultAlias(rawTableName) || defaultAlias;
         localAliases.set(norm(finalAlias), resolved);
@@ -902,6 +945,8 @@ function validateSingleSelect(stmt, schema, tempTables, outerAliases, issues, st
       fields: selectCols.fields,
       anyDynamic: selectCols.anyDynamic,
       title: `ВТ «${intoTable}»`,
+      isTempTable: true,
+      indexed: hasIndexClause,
     });
   }
 
@@ -1000,7 +1045,39 @@ function validateSingleSelect(stmt, schema, tempTables, outerAliases, issues, st
               message: `Поле «${ident}» в условии ГДЕ не найдено в «${onlySource.title}»` +
                 (similar.length ? `. Похожие поля: ${similar.join(', ')}` : ''),
             });
+          } else {
+            const fObj = onlySource.fields.get(fn);
+            if (onlySource.virtualTable && fObj && fObj.kind === 'dimension' && (!onlySource.vtFilteredDims || !onlySource.vtFilteredDims.has(fn))) {
+              issues.push({
+                severity: 'warning',
+                message: `[Производительность ИТС] Отбор по измерению «${fObj.name}» виртуальной таблицы «${onlySource.title}» задан в секции ГДЕ вместо параметров виртуальной таблицы. Перенесите условие в параметры ВТ, чтобы СУБД фильтровала данные до расчёта среза/остатков.`,
+              });
+            }
           }
+        }
+      }
+    }
+  }
+
+  // 3) Проверка отборов по измерениям виртуальных таблиц в ГДЕ при квалифицированном обращении (АлиасВТ.Измерение = ...)
+  const whereMatchAll = afterFrom.match(/(?<![\wА-Яа-яЁё.])(?:ГДЕ|WHERE)(?![\wА-Яа-яЁё])([\s\S]*?)(?:(?<![\wА-Яа-яЁё.])(?:СГРУППИРОВАТЬ|GROUP|УПОРЯДОЧИТЬ|ORDER|ИМЕЮЩИЕ|HAVING|ИТОГИ|TOTALS|АВТОУПОРЯДОЧИВАНИЕ|AUTOORDER|ИНДЕКСИРОВАТЬ|INDEX)(?![\wА-Яа-яЁё])|$)/i);
+  if (whereMatchAll) {
+    const whereBodyAll = maskStrings(whereMatchAll[1]).replace(/(?<![\wА-Яа-яЁё])(?:ЗНАЧЕНИЕ|VALUE|ТИП|TYPE)\s*\([^)]*\)/gi, ' ');
+    const qualCondRx = /(?<![&\wА-Яа-яЁё.])([A-Za-zА-Яа-яЁё_][\wА-Яа-яЁё]*)\.([A-Za-zА-Яа-яЁё_][\wА-Яа-яЁё]*)\s*(?:=|<>|<=|>=|<|>|(?<![\wА-Яа-яЁё])(?:В|IN|МЕЖДУ|BETWEEN|ПОДОБНО|LIKE)(?![\wА-Яа-яЁё]))/gi;
+    const warnedVtDims = new Set();
+    for (const qm of whereBodyAll.matchAll(qualCondRx)) {
+      const al = norm(qm[1]);
+      const fld = norm(qm[2]);
+      const src = localAliases.get(al);
+      if (src && src.virtualTable && src.fields && src.fields.has(fld)) {
+        const fObj = src.fields.get(fld);
+        const wKey = `${src.title}|${fld}`;
+        if (fObj.kind === 'dimension' && (!src.vtFilteredDims || !src.vtFilteredDims.has(fld)) && !warnedVtDims.has(wKey)) {
+          warnedVtDims.add(wKey);
+          issues.push({
+            severity: 'warning',
+            message: `[Производительность ИТС] Отбор по измерению «${qm[1]}.${fObj.name}» виртуальной таблицы «${src.title}» задан в секции ГДЕ вместо параметров виртуальной таблицы. Перенесите условие в параметры ВТ.`,
+          });
         }
       }
     }
@@ -1147,11 +1224,11 @@ function validateUnionQuery(queryText, schema, tempTables, outerAliases, issues,
   return firstCols;
 }
 
-export function validateQuery(idx, { query }) {
+export function validateQuery(idx, { query, isAllowedPath = null }) {
   const cleaned = cleanQueryText(query);
   if (!cleaned.trim()) return 'Пустой текст запроса.';
 
-  const schema = buildSchemaIndex(idx);
+  const schema = buildSchemaIndex(idx, { isAllowedPath });
   const tempTables = new Map();
   const issues = [];
   const stats = { statements: 0, tablesChecked: 0, fieldsChecked: 0 };

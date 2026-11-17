@@ -18,7 +18,7 @@ import * as sem from './lib/semantic.mjs';
 import { validateQuery } from './lib/query-validator.mjs';
 import { readEventLog } from './lib/event-log.mjs';
 
-const INDEX_VERSION = 4;
+const INDEX_VERSION = 5;
 const SKIP_DIRS = new Set(['.git', 'node_modules', '.agents', '.opencode', 'build', 'base', 'tools', 'test-tmp', '.v8-xsd']);
 
 // Каталог выгрузки → вид объекта (рус.) и англ. синоним вида для поиска
@@ -356,7 +356,12 @@ export function parseObjectXml(text) {
     const ts = { name: tname, syn: unescapeXml(synonymOf(tsHead)), attrs: [] };
     for (const a of m[1].matchAll(/<Attribute\b[^>]*>([\s\S]*?)<\/Attribute>/g)) {
       const an = (a[1].match(RX_NAME) || [])[1];
-      if (an) ts.attrs.push([an, unescapeXml(synonymOf(a[1])), parseTypesXml(a[1], 'Type')]);
+      if (an) {
+        const req = /<FillChecking>ShowError<\/FillChecking>/.test(a[1]);
+        ts.attrs.push(req
+          ? [an, unescapeXml(synonymOf(a[1])), parseTypesXml(a[1], 'Type'), true]
+          : [an, unescapeXml(synonymOf(a[1])), parseTypesXml(a[1], 'Type')]);
+      }
     }
     obj.ts.push(ts);
     rest = rest.replace(m[0], '');
@@ -365,7 +370,12 @@ export function parseObjectXml(text) {
     const rx = new RegExp(`<${tag}\\b[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'g');
     for (const a of rest.matchAll(rx)) {
       const an = (a[1].match(RX_NAME) || [])[1];
-      if (an) obj.attrs.push([an, unescapeXml(synonymOf(a[1])), tag, tag === 'EnumValue' ? [] : parseTypesXml(a[1], 'Type')]);
+      if (an) {
+        const req = /<FillChecking>ShowError<\/FillChecking>/.test(a[1]);
+        obj.attrs.push(req
+          ? [an, unescapeXml(synonymOf(a[1])), tag, tag === 'EnumValue' ? [] : parseTypesXml(a[1], 'Type'), true]
+          : [an, unescapeXml(synonymOf(a[1])), tag, tag === 'EnumValue' ? [] : parseTypesXml(a[1], 'Type')]);
+      }
     }
   }
   return obj;
@@ -405,21 +415,39 @@ const INTERCEPT_NORM = {
   изменениеиконтроль: 'ИзменениеИКонтроль', changeandvalidate: 'ИзменениеИКонтроль',
 };
 
-// Методы модуля: имя, строки начала/конца, экспорт, директива компиляции, аннотация перехвата CFE
-export function parseMethods(text) {
+// Методы модуля: имя, строки начала/конца, экспорт, директива компиляции, аннотация перехвата CFE,
+// плюс список вызываемых в модуле имён процедур/функций (calls) для мгновенного find_usages без полного сканирования диска.
+const RX_CALL_TOKEN = /([A-Za-zА-Яа-яЁё_][\wА-Яа-яЁё]*)\s*\(/g;
+const CALL_STOP = new Set([
+  'процедура', 'функция', 'procedure', 'function', 'если', 'if', 'пока', 'while', 'для', 'for',
+  'вызватьисключение', 'raise', 'возврат', 'return', 'новый', 'new', 'тип', 'type', 'типзнч', 'typeof',
+  'формат', 'format', 'нстр', 'nstr', 'стрдлина', 'strlen', 'сокрлп', 'trimall', 'сокрл', 'triml', 'сокрп', 'trimr',
+  'лев', 'left', 'прав', 'right', 'сред', 'mid', 'стрнайти', 'strfind', 'врегистр', 'upper', 'нрегистр', 'lower',
+  'стрзаменить', 'strreplace', 'стршаблон', 'strtemplate', 'число', 'number', 'строка', 'string', 'дата', 'date',
+  'булево', 'boolean', 'значениезаполнено', 'valueisfilled', 'объединитьстроки', 'strconcat', 'стрразделить', 'strsplit',
+]);
+
+export function parseModuleInfo(text) {
   const lines = text.split(/\r?\n/);
   const methods = [];
+  const callSet = new Set();
   let cur = null;
   let directives = [];
   for (let i = 0; i < lines.length; i++) {
     const line = lines[i];
+    const t = line.trim();
+    if (!t.startsWith('//')) {
+      for (const cm of line.matchAll(RX_CALL_TOKEN)) {
+        const cn = norm(cm[1]);
+        if (cn.length > 2 && !CALL_STOP.has(cn)) callSet.add(cn);
+      }
+    }
     if (!cur) {
-      const t = line.trim();
       if (t.startsWith('&')) { directives.push(t); continue; }
       const m = line.match(RX_METHOD_START);
       if (m) {
         // сигнатура может занимать несколько строк — до закрывающей скобки
-        let sig = line.trim();
+        let sig = t;
         let j = i;
         while (!sig.includes(')') && j < i + 30 && j + 1 < lines.length) { j++; sig += ' ' + lines[j].trim(); }
         let intercept = null;
@@ -444,7 +472,11 @@ export function parseMethods(text) {
     }
   }
   if (cur) { cur.end = lines.length; methods.push(cur); }
-  return methods;
+  return { methods, calls: [...callSet] };
+}
+
+export function parseMethods(text) {
+  return parseModuleInfo(text).methods;
 }
 
 // Модуль по пути относительно корня конфигурации: «Документ.Задача.МодульОбъекта», «ОбщийМодуль.Х»
@@ -518,6 +550,36 @@ function cacheFile(root) {
 
 const indexes = new Map();   // root → { built, configs, objects, modules, forms }
 
+function readDatabasesMap(root) {
+  const v8ProjPath = join(root, '.v8-project.json');
+  if (!existsSync(v8ProjPath)) return [];
+  try {
+    const proj = JSON.parse(readFileSync(v8ProjPath, 'utf8').replace(/^\uFEFF/, ''));
+    const dbs = Array.isArray(proj.databases) ? proj.databases : [];
+    return dbs.map((db) => {
+      const prefixes = [];
+      const addP = (p) => {
+        if (!p) return;
+        const r = relative(root, resolve(root, p)).split(sep).join('/');
+        if (r && !r.startsWith('..')) prefixes.push(norm(r));
+      };
+      addP(db.configSrc);
+      for (const ext of Array.isArray(db.extensions) ? db.extensions : []) {
+        addP(ext.src || ext.path);
+      }
+      return {
+        id: db.id || '',
+        name: db.name || '',
+        ref: db.ref || '',
+        aliases: Array.isArray(db.aliases) ? db.aliases : [],
+        prefixes: [...new Set(prefixes)],
+      };
+    });
+  } catch {
+    return [];
+  }
+}
+
 export function buildIndex(root, { force = false } = {}) {
   root = resolve(root);
   const mem = indexes.get(root);
@@ -570,8 +632,10 @@ export function buildIndex(root, { force = false } = {}) {
     }
     const { bslAcc, formXmlAcc } = listFilesByExt(c.dir);
     for (const f of bslAcc) {
-      const methods = take(f, parseMethods) || [];
-      modules.push({ file: f, cfg: c.rel, isExt: c.isExt, id: moduleId(relative(c.dir, f)), methods });
+      const modInfo = take(f, parseModuleInfo) || { methods: [], calls: [] };
+      const methods = Array.isArray(modInfo) ? modInfo : (modInfo.methods || []);
+      const calls = Array.isArray(modInfo) ? null : new Set(modInfo.calls || []);
+      modules.push({ file: f, cfg: c.rel, isExt: c.isExt, id: moduleId(relative(c.dir, f)), methods, calls });
     }
     for (const f of formXmlAcc) {
       const fm = take(f, parseFormXml);
@@ -580,7 +644,8 @@ export function buildIndex(root, { force = false } = {}) {
       }
     }
   }
-  const idx = { built: Date.now(), root, configs, objects, modules, forms, parsed, ms: Date.now() - started };
+  const databases = readDatabasesMap(root);
+  const idx = { built: Date.now(), root, configs, objects, modules, forms, databases, parsed, ms: Date.now() - started };
   indexes.set(root, idx);
   if (parsed) {
     try {
@@ -598,6 +663,57 @@ const rel = (idx, file) => relative(idx.root, file).split(sep).join('/');
 const objTitle = (o) => `${TYPES[o.type][0]}.${o.name}`;
 const cfgMark = (idx, cfg) => (idx.configs.length > 1 ? ` [${cfg}]` : '');
 
+// Преобразует 32-символьный hex из навигационной ссылки 1С (e1cib/data/Вид.Имя?ref=...) в стандартный UUID 1С
+export function refHexToUuid(hex) {
+  const h = String(hex || '').trim().toLowerCase();
+  if (!/^[0-9a-f]{32}$/.test(h)) return null;
+  // В навигационной ссылке 1С первые 16 символов (8 байт) — это вторая половина UUID (data4),
+  // а последние 16 символов — это первые 8 байт UUID (time_low, time_mid, time_hi_and_version).
+  const p2 = h.slice(0, 16);
+  const p1 = h.slice(16, 32);
+  return `${p1.slice(0, 8)}-${p1.slice(8, 12)}-${p1.slice(12, 16)}-${p2.slice(0, 4)}-${p2.slice(4, 16)}`;
+}
+
+export function parseE1cibUrl(str) {
+  const s = String(str || '').trim();
+  const m = s.match(/(?:e1cib\/data\/)?([A-Za-zА-Яа-яЁё]+\.[A-Za-zА-Яа-яЁё0-9_]+)\?ref=([0-9a-fA-F]{32})/i);
+  if (!m) return null;
+  const objSpec = m[1];
+  const refHex = m[2].toLowerCase();
+  const uuid = refHexToUuid(refHex);
+  return { objSpec, refHex, uuid };
+}
+
+// Строит фильтр путей по параметрам path_filter и/или database (из .v8-project.json)
+export function makePathFilter(idx, { path_filter, database } = {}) {
+  const pf = path_filter ? norm(String(path_filter).trim()).replace(/\\/g, '/') : '';
+  const dbQ = database ? norm(String(database).trim()) : '';
+  if (!pf && !dbQ) return () => true;
+
+  let dbPrefixes = null;
+  if (dbQ) {
+    const dbs = idx.databases || [];
+    const matched = dbs.find((d) => norm(d.id) === dbQ) ||
+      dbs.find((d) => norm(d.ref) === dbQ) ||
+      dbs.find((d) => d.aliases.some((a) => norm(a) === dbQ)) ||
+      dbs.find((d) => norm(d.name).includes(dbQ)) ||
+      dbs.find((d) => d.prefixes.some((p) => p.includes(dbQ)));
+    if (matched && matched.prefixes.length) {
+      dbPrefixes = matched.prefixes;
+    } else {
+      // Fallback: если база не описана в .v8-project.json, ищем по вхождению имени в путь (например src/DOC_20072026)
+      dbPrefixes = [dbQ];
+    }
+  }
+
+  return (fileOrRel) => {
+    const r = norm(fileOrRel.includes(sep) || fileOrRel.startsWith('/') ? rel(idx, fileOrRel) : fileOrRel).replace(/\\/g, '/');
+    if (pf && !r.includes(pf)) return false;
+    if (dbPrefixes && !dbPrefixes.some((p) => r === p || r.startsWith(p + '/') || r.includes(p))) return false;
+    return true;
+  };
+}
+
 function scoreText(qStems, qFull, name, syn, weight) {
   const ws = new Set([...words(name), ...words(syn)].map(stem));
   let hit = 0;
@@ -607,8 +723,15 @@ function scoreText(qStems, qFull, name, syn, weight) {
   return s;
 }
 
-export function findObject(idx, { query, type, limit = 10 }) {
-  const qn = norm(query).trim();
+export function findObject(idx, { query, type, path_filter, database, limit = 10 }) {
+  const e1cib = parseE1cibUrl(query);
+  const effectiveQuery = e1cib ? e1cib.objSpec : query;
+  const e1cibBanner = e1cib
+    ? `[Навигационная ссылка 1С] Объект: ${e1cib.objSpec} · ref=${e1cib.refHex} → УникальныйИдентификатор: ${e1cib.uuid}\n` +
+      `В BSL: ${e1cib.objSpec.replace(/^Справочник\./i, 'Справочники.').replace(/^Документ\./i, 'Документы.')}.ПолучитьСсылку(Новый УникальныйИдентификатор("${e1cib.uuid}"))\n\n`
+    : '';
+  const allowPath = makePathFilter(idx, { path_filter, database });
+  const qn = norm(effectiveQuery).trim();
   // «Документ.Задача» / «Справочник Номенклатура» — тип в запросе
   let typeFilter = type ? TYPE_ALIASES.get(norm(type).replace(/\s+/g, '')) : null;
   let q = qn;
@@ -618,6 +741,7 @@ export function findObject(idx, { query, type, limit = 10 }) {
   const qFull = norm(q).replace(/\s+/g, '');
   const res = [];
   for (const o of idx.objects) {
+    if (!allowPath(o.file)) continue;
     if (typeFilter && o.type !== typeFilter) continue;
     let s = scoreText(qStems, qFull, o.name, o.syn, 10);
     let why = '';
@@ -625,16 +749,16 @@ export function findObject(idx, { query, type, limit = 10 }) {
     if (s < 10) {
       // совпадение по реквизиту или табличной части
       let best = 0;
-      for (const [an, as] of o.attrs) {
+      for (const [an, as, , , req] of o.attrs) {
         const sa = scoreText(qStems, qFull, an, as, 6);
-        if (sa > best) { best = sa; why = `реквизит ${an}${as && as !== an ? ` «${as}»` : ''}`; }
+        if (sa > best) { best = sa; why = `реквизит ${an}${as && as !== an ? ` «${as}»` : ''}${req ? ' [обяз.]' : ''}`; }
       }
       for (const t of o.ts) {
         const st = scoreText(qStems, qFull, t.name, t.syn, 6);
         if (st > best) { best = st; why = `табличная часть ${t.name}`; }
-        for (const [an, as] of t.attrs) {
+        for (const [an, as, , req] of t.attrs) {
           const sa = scoreText(qStems, qFull, an, as, 5);
-          if (sa > best) { best = sa; why = `реквизит ТЧ ${t.name}.${an}${as && as !== an ? ` «${as}»` : ''}`; }
+          if (sa > best) { best = sa; why = `реквизит ТЧ ${t.name}.${an}${as && as !== an ? ` «${as}»` : ''}${req ? ' [обяз.]' : ''}`; }
         }
       }
       if (best > s) s = best; else why = '';
@@ -642,13 +766,15 @@ export function findObject(idx, { query, type, limit = 10 }) {
     if (s >= 3) res.push({ o, s, why });
   }
   res.sort((a, b) => b.s - a.s || a.o.name.length - b.o.name.length);
-  if (!res.length) return `Ничего не найдено по «${query}». Объектов в индексе: ${idx.objects.length}.`;
+  if (!res.length) return `${e1cibBanner}Ничего не найдено по «${query}». Объектов в индексе: ${idx.objects.length}.`;
   const out = res.slice(0, limit).map(({ o, why }) => {
     const regNote = o.registerRecords?.length ? `, движений ${o.registerRecords.length}` : '';
+    const reqCount = (o.attrs || []).filter((a) => a[4]).length;
+    const reqNote = reqCount ? ` (обяз. ${reqCount})` : '';
     return `- ${objTitle(o)}${o.syn && o.syn !== o.name ? ` — «${o.syn}»` : ''}${o.adopted ? ' (заимствован)' : ''}` +
-      `${cfgMark(idx, o.cfg)}${why ? `; совпало: ${why}` : ''}\n  ${rel(idx, o.file)}; реквизитов ${o.attrs.length}, ТЧ ${o.ts.length}${regNote}`;
+      `${cfgMark(idx, o.cfg)}${why ? `; совпало: ${why}` : ''}\n  ${rel(idx, o.file)}; реквизитов ${o.attrs.length}${reqNote}, ТЧ ${o.ts.length}${regNote}`;
   });
-  return `Найдено ${res.length}${res.length > limit ? `, показаны первые ${limit}` : ''}:\n${out.join('\n')}\n` +
+  return `${e1cibBanner}Найдено ${res.length}${res.length > limit ? `, показаны первые ${limit}` : ''}:\n${out.join('\n')}\n` +
     'Подробная структура объекта — навык meta-info; граф связей (подписки, движения, перехваты CFE, где используется как тип) — object_refs.';
 }
 
@@ -674,10 +800,12 @@ function isExactModule(mod, spec) {
   return id === target || id.startsWith(target + '.');
 }
 
-function selectModules(idx, spec) {
-  if (!spec) return idx.modules;
-  const exact = idx.modules.filter((m) => isExactModule(m, spec));
-  return exact.length ? exact : idx.modules.filter((m) => moduleMatches(m, spec));
+function selectModules(idx, spec, { path_filter, database } = {}) {
+  const allowPath = makePathFilter(idx, { path_filter, database });
+  const base = (path_filter || database) ? idx.modules.filter((m) => allowPath(m.file)) : idx.modules;
+  if (!spec) return base;
+  const exact = base.filter((m) => isExactModule(m, spec));
+  return exact.length ? exact : base.filter((m) => moduleMatches(m, spec));
 }
 
 function methodCode(file, m, maxLines) {
@@ -689,11 +817,12 @@ function methodCode(file, m, maxLines) {
   return to < m.end ? `${body}\n// … ещё ${m.end - to} строк (до ${m.end})` : body;
 }
 
-export function findMethod(idx, { name, object, with_code = true, limit = 5, max_lines = 150 }) {
+export function findMethod(idx, { name, object, path_filter, database, with_code = true, limit = 5, max_lines = 150 }) {
+  const allowPath = makePathFilter(idx, { path_filter, database });
   const qn = norm(name);
   const exact = [];
   const partial = [];
-  for (const mod of selectModules(idx, object)) {
+  for (const mod of selectModules(idx, object, { path_filter, database })) {
     for (const m of mod.methods) {
       const n = norm(m.name);
       const t = m.intercept ? norm(m.intercept.target) : '';
@@ -709,7 +838,7 @@ export function findMethod(idx, { name, object, with_code = true, limit = 5, max
   for (const { mod, m } of [...found]) {
     if (mod.isExt) continue;
     for (const extMod of idx.modules) {
-      if (!extMod.isExt || norm(extMod.id) !== norm(mod.id)) continue;
+      if (!extMod.isExt || !allowPath(extMod.file) || norm(extMod.id) !== norm(mod.id)) continue;
       for (const em of extMod.methods) {
         if (em.intercept && norm(em.intercept.target) === norm(m.name)) {
           const k = `${extMod.file}:${em.line}`;
@@ -730,12 +859,13 @@ export function findMethod(idx, { name, object, with_code = true, limit = 5, max
     if (showCode) out.push('```bsl\n' + methodCode(mod.file, m, max_lines) + '\n```');
   }
   const more = found.length > (showCode ? 3 : Math.max(limit, 20)) ? `\n… ещё ${found.length - out.length}` : '';
-  const hint = !showCode && with_code ? '\nСовпадений много — уточните object (например «ОбщийМодуль.Имя»), чтобы получить код.' : '';
+  const hint = !showCode && with_code ? '\nСовпадений много — уточните object, path_filter или database, чтобы получить код.' : '';
   return `${exact.length ? 'Найдено' : 'Точного совпадения нет, похожие'}: ${found.length}\n${out.join('\n')}${more}${hint}`;
 }
 
-export function moduleMethods(idx, { module, exported_only = false }) {
-  let mods = idx.modules.filter((m) => moduleMatches(m, module) || norm(rel(idx, m.file)).includes(norm(module)));
+export function moduleMethods(idx, { module, path_filter, database, exported_only = false }) {
+  const allowPath = makePathFilter(idx, { path_filter, database });
+  let mods = idx.modules.filter((m) => allowPath(m.file) && (moduleMatches(m, module) || norm(rel(idx, m.file)).includes(norm(module))));
   const exact = mods.filter((m) => isExactModule(m, module));
   if (exact.length) mods = exact;
   if (!mods.length) return `Модули «${module}» не найдены. Пример: «Документ.Задача», «ОбщийМодуль.ОбщегоНазначения».`;
@@ -754,17 +884,23 @@ export function moduleMethods(idx, { module, exported_only = false }) {
 
 function escapeRx(s) { return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'); }
 
-export function findUsages(idx, { name, object, limit = 40, budgetBytes } = {}) {
+export function findUsages(idx, { name, object, path_filter, database, limit = 40, budgetBytes } = {}) {
+  const allowPath = makePathFilter(idx, { path_filter, database });
   const rx = new RegExp(`(^|[^\\wА-Яа-яЁё])${escapeRx(name)}\\s*\\(`, 'i');
   const defRx = new RegExp(`^\\s*(?:Асинх\\s+|Async\\s+)?(Процедура|Функция|Procedure|Function)\\s+${escapeRx(name)}\\s*\\(`, 'i');
   const hits = [];
   const perModule = new Map();
   let total = 0;
-  const scan = scanFiles(selectModules(idx, object).map((mod) => ({ file: mod.file, mod })), { budgetBytes });
+  const qn = norm(name);
+  // Благодаря индексу вызовов mod.calls сканируем только те модули, где реально встречается вызов `name(`,
+  // что ускоряет поиск на 60 000+ модулях в сотни раз и не упирается в лимит 128 МБ!
+  const candidateMods = selectModules(idx, object, { path_filter, database })
+    .filter((mod) => !mod.calls || CALL_STOP.has(qn) || qn.length <= 2 || mod.calls.has(qn));
+  const scan = scanFiles(candidateMods.map((mod) => ({ file: mod.file, mod })), { budgetBytes });
   for (const { file, mod } of scan.files) {
     forEachLine(file, (line, lineNo) => {
       const l = line.length > 500 ? line.slice(0, 500) : line;
-      if (!norm(l).includes(norm(name)) || !rx.test(l) || defRx.test(l) || /^\s*\/\//.test(l)) return;
+      if (!norm(l).includes(qn) || !rx.test(l) || defRx.test(l) || /^\s*\/\//.test(l)) return;
       total++;
       perModule.set(mod.id, (perModule.get(mod.id) || 0) + 1);
       if (hits.length < limit) {
@@ -775,8 +911,8 @@ export function findUsages(idx, { name, object, limit = 40, budgetBytes } = {}) 
   }
   // Привязки в метаданных (подписки на события, регламентные задания, HTTP/Web-сервисы), формах (Form.xml) и перехватах CFE
   const metaUsages = [];
-  const qn = norm(name);
   for (const o of idx.objects) {
+    if (!allowPath(o.file)) continue;
     if (object && !norm(objTitle(o)).includes(norm(object))) continue;
     if (o.subscription && o.subscription.handler) {
       const hParts = o.subscription.handler.split('.');
@@ -802,6 +938,7 @@ export function findUsages(idx, { name, object, limit = 40, budgetBytes } = {}) 
     }
   }
   for (const fm of idx.forms || []) {
+    if (!allowPath(fm.file)) continue;
     if (object && !moduleMatches({ id: fm.id }, object)) continue;
     for (const [evtName, handler] of fm.events) {
       if (norm(handler) === qn) {
@@ -814,7 +951,7 @@ export function findUsages(idx, { name, object, limit = 40, budgetBytes } = {}) 
       }
     }
   }
-  for (const mod of selectModules(idx, object)) {
+  for (const mod of selectModules(idx, object, { path_filter, database })) {
     for (const m of mod.methods) {
       if (m.intercept && norm(m.intercept.target) === qn) {
         metaUsages.push(`- [Перехват CFE в ${mod.id}${cfgMark(idx, mod.cfg)}] &${m.intercept.kind}("${m.intercept.target}") → ${m.name} (${rel(idx, mod.file)}:${m.line})`);
@@ -843,8 +980,9 @@ function short(s, n) { return s.length > n ? s.slice(0, n - 1) + '…' : s; }
 // ---------------------------------------------------------------------------
 // Граф связей и зависимостей объекта метаданных (object_refs)
 // ---------------------------------------------------------------------------
-function resolveTargetObject(idx, query) {
-  const qn = norm(query).trim();
+function resolveTargetObject(idx, query, allowPath = () => true) {
+  const e1cib = parseE1cibUrl(query);
+  const qn = norm(e1cib ? e1cib.objSpec : query).trim();
   let typeFilter = null;
   let objName = qn;
   const m = qn.match(/^([a-zа-я]+)[.\s]+(.+)$/);
@@ -852,30 +990,36 @@ function resolveTargetObject(idx, query) {
     typeFilter = TYPE_ALIASES.get(m[1]);
     objName = m[2].trim();
   }
-  const exact = idx.objects.filter((o) => (!typeFilter || o.type === typeFilter) && norm(o.name) === objName);
+  const pool = idx.objects.filter((o) => allowPath(o.file));
+  const exact = pool.filter((o) => (!typeFilter || o.type === typeFilter) && norm(o.name) === objName);
   if (exact.length) {
     // Предпочитаем объект основной конфигурации как базовый, но собираем и все экземпляры из расширений
     const base = exact.find((o) => !o.isExt) || exact[0];
-    return { base, all: exact };
+    return { base, all: exact, e1cib };
   }
-  const partial = idx.objects.filter((o) => (!typeFilter || o.type === typeFilter) && (norm(o.name).includes(objName) || norm(o.syn).includes(objName)));
+  const partial = pool.filter((o) => (!typeFilter || o.type === typeFilter) && (norm(o.name).includes(objName) || norm(o.syn).includes(objName)));
   if (partial.length) {
     const first = partial.find((o) => !o.isExt) || partial[0];
-    const allSame = idx.objects.filter((o) => o.type === first.type && norm(o.name) === norm(first.name));
-    return { base: first, all: allSame };
+    const allSame = pool.filter((o) => o.type === first.type && norm(o.name) === norm(first.name));
+    return { base: first, all: allSame, e1cib };
   }
   return null;
 }
 
-export function objectRefs(idx, { object, limit = 40 }) {
-  const resolved = resolveTargetObject(idx, object);
+export function objectRefs(idx, { object, path_filter, database, limit = 40 }) {
+  const allowPath = makePathFilter(idx, { path_filter, database });
+  const resolved = resolveTargetObject(idx, object, allowPath);
   if (!resolved) {
     return `Объект «${object}» не найден в индексе (всего объектов: ${idx.objects.length}). Используйте find_object для поиска.`;
   }
-  const { base, all } = resolved;
+  const { base, all, e1cib } = resolved;
   const title = objTitle(base);
   const titleNorm = norm(title);
   const out = [];
+
+  if (e1cib) {
+    out.push(`[Навигационная ссылка 1С] Объект: ${e1cib.objSpec} · ref=${e1cib.refHex} → УникальныйИдентификатор: ${e1cib.uuid}`);
+  }
 
   // 1. Заголовок и сводка по файлам (база + расширения)
   const filesLine = all.map((o) => `${rel(idx, o.file)}${o.adopted ? ' (заимствован в расширении)' : ''}${cfgMark(idx, o.cfg)}`).join(', ');
@@ -910,7 +1054,8 @@ export function objectRefs(idx, { object, limit = 40 }) {
   if (objPrefix) matchTypeTargets.add(norm(`${objPrefix}.${base.name}`));
   if (mgrPrefix) matchTypeTargets.add(norm(`${mgrPrefix}.${base.name}`));
 
-  for (const dt of idx.objects) {
+  const scopedObjects = idx.objects.filter((o) => allowPath(o.file));
+  for (const dt of scopedObjects) {
     if (dt.type !== 'DefinedTypes') continue;
     if ((dt.types || []).some((t) => matchTypeTargets.has(norm(t)))) {
       definedTypesContainingObj.add(norm(`ОпределяемыйТип.${dt.name}`));
@@ -923,6 +1068,30 @@ export function objectRefs(idx, { object, limit = 40 }) {
     out.push(`Тип / Состав типов (${mergedTypes.length}): ${mergedTypes.join(' | ')}`);
   }
 
+  // 1.5. Обязательные реквизиты (FillChecking = ShowError) и состав реквизитов/ТЧ
+  const reqAttrs = [];
+  const seenReq = new Set();
+  for (const o of all) {
+    for (const [an, , , atypes, req] of o.attrs || []) {
+      if (req && !seenReq.has(norm(an))) {
+        seenReq.add(norm(an));
+        reqAttrs.push(`${an}${atypes?.length ? ` (${atypes.join('|')})` : ''}`);
+      }
+    }
+    for (const t of o.ts || []) {
+      for (const [an, , atypes, req] of t.attrs || []) {
+        const key = `${norm(t.name)}.${norm(an)}`;
+        if (req && !seenReq.has(key)) {
+          seenReq.add(key);
+          reqAttrs.push(`ТЧ ${t.name}.${an}${atypes?.length ? ` (${atypes.join('|')})` : ''}`);
+        }
+      }
+    }
+  }
+  if (reqAttrs.length) {
+    out.push(`Обязательные реквизиты (FillChecking=ShowError, ${reqAttrs.length}): ${reqAttrs.slice(0, limit).join(', ')}`);
+  }
+
   // 2. Движения по регистрам (для документа — какие регистры двигает; для регистра — какие документы его двигают)
   const regRecords = [...new Set(all.flatMap((o) => o.registerRecords || []))];
   if (regRecords.length) {
@@ -931,7 +1100,7 @@ export function objectRefs(idx, { object, limit = 40 }) {
   }
   if (base.type.endsWith('Registers')) {
     const recorders = [];
-    for (const o of idx.objects) {
+    for (const o of scopedObjects) {
       if ((o.registerRecords || []).some((r) => norm(r) === titleNorm)) {
         recorders.push(`${objTitle(o)}${cfgMark(idx, o.cfg)}`);
       }
@@ -947,7 +1116,7 @@ export function objectRefs(idx, { object, limit = 40 }) {
 
   // 3. Ввод на основании (BasedOn) и Владельцы справочников (Owners)
   const basedOn = [...new Set(all.flatMap((o) => o.basedOn || []))];
-  const basedOnReverse = idx.objects
+  const basedOnReverse = scopedObjects
     .filter((o) => (o.basedOn || []).some((b) => norm(b) === titleNorm))
     .map((o) => objTitle(o));
   if (basedOn.length || basedOnReverse.length) {
@@ -956,7 +1125,7 @@ export function objectRefs(idx, { object, limit = 40 }) {
   }
 
   const owners = [...new Set(all.flatMap((o) => o.owners || []))];
-  const subordinates = idx.objects
+  const subordinates = scopedObjects
     .filter((o) => (o.owners || []).some((ow) => norm(ow) === titleNorm))
     .map((o) => objTitle(o));
   if (owners.length || subordinates.length) {
@@ -970,7 +1139,7 @@ export function objectRefs(idx, { object, limit = 40 }) {
   if (mgrPrefix) classWildcards.add(norm(`${mgrPrefix} (все)`));
 
   const subscriptions = [];
-  for (const o of idx.objects) {
+  for (const o of scopedObjects) {
     if (o.type !== 'EventSubscriptions' || !o.subscription) continue;
     const sub = o.subscription;
     let via = null;
@@ -1002,7 +1171,7 @@ export function objectRefs(idx, { object, limit = 40 }) {
       (ownTs.length ? `; ТЧ в расширении: ${ownTs.join(', ')}` : ''));
   }
   for (const mod of idx.modules) {
-    if (!mod.isExt || !isExactModule(mod, title)) continue;
+    if (!allowPath(mod.file) || !mod.isExt || !isExactModule(mod, title)) continue;
     for (const m of mod.methods) {
       if (m.intercept) {
         cfeLines.push(`  - Перехват метода в [${mod.cfg}] ${mod.id}: &${m.intercept.kind}("${m.intercept.target}") → ${m.kind} ${m.name} (${rel(idx, mod.file)}:${m.line})`);
@@ -1027,7 +1196,7 @@ export function objectRefs(idx, { object, limit = 40 }) {
     return null;
   };
 
-  for (const o of idx.objects) {
+  for (const o of scopedObjects) {
     if (o.type === base.type && norm(o.name) === norm(base.name)) continue;
     const objHit = checkTypeMatch(o.types);
     if (objHit) {
@@ -1060,7 +1229,7 @@ export function objectRefs(idx, { object, limit = 40 }) {
   // 7. Общие реквизиты и Функциональные опции
   const commonAttrs = [];
   const funcOptions = [];
-  for (const o of idx.objects) {
+  for (const o of scopedObjects) {
     if (o.type === 'CommonAttributes') {
       const explicit = o.contentUse?.[titleNorm];
       if (explicit === true || (explicit === undefined && o.autoUse)) {
@@ -1074,6 +1243,35 @@ export function objectRefs(idx, { object, limit = 40 }) {
   }
   if (commonAttrs.length) out.push(`\nОбщие реквизиты объекта: ${[...new Set(commonAttrs)].join(', ')}`);
   if (funcOptions.length) out.push(`Функциональные опции: ${[...new Set(funcOptions)].join(', ')}`);
+
+  // 8. Механизм БСП «Дополнительные реквизиты и сведения»
+  const bspNotes = [];
+  const allTs = all.flatMap((o) => o.ts || []);
+  const dopTs = allTs.find((t) => norm(t.name) === 'дополнительныереквизиты');
+  if (dopTs) {
+    const tsCols = (dopTs.attrs || []).map((a) => `${a[0]}${a[2]?.length ? ` (${a[2].join('|')})` : ''}`).join(', ');
+    bspNotes.push(`  - ТЧ «ДополнительныеРеквизиты» присутствует (${tsCols || 'стандартная структура БСП: Свойство, Значение, ТекстоваяСтрока'})`);
+  }
+  const bspDefTypes = [];
+  for (const dt of scopedObjects) {
+    if (dt.type !== 'DefinedTypes') continue;
+    const dn = norm(dt.name);
+    if ((dn.includes('дополнительныхреквизитов') || dn.includes('дополнительныхсведений')) &&
+        (dt.types || []).some((t) => matchTypeTargets.has(norm(t)))) {
+      bspDefTypes.push(`ОпределяемыйТип.${dt.name}`);
+    }
+  }
+  if (bspDefTypes.length) {
+    bspNotes.push(`  - Входит в определяемые типы БСП: ${[...new Set(bspDefTypes)].join(', ')}`);
+  }
+  const hasDopSvedReg = scopedObjects.some((o) => o.type === 'InformationRegisters' && norm(o.name) === 'дополнительныесведения');
+  if (bspDefTypes.some((d) => norm(d).includes('сведений')) && hasDopSvedReg) {
+    bspNotes.push('  - Хранение доп. сведений: РегистрСведений.ДополнительныеСведения (измерения: Объект, Свойство; ресурс: Значение)');
+  }
+  if (dopTs || bspDefTypes.length) {
+    bspNotes.push('  - Работа в запросах и коде БСП: соединение через `.ДополнительныеРеквизиты КАК ДопРеквизиты ПО ДопРеквизиты.Свойство = &Свойство` (`ПланВидовХарактеристик.ДополнительныеРеквизитыИСведения`), модуль `УправлениеСвойствами` / `УправлениеСвойствамиСлужебный`');
+    out.push(`\nДополнительные реквизиты и сведения БСП:\n${bspNotes.join('\n')}`);
+  }
 
   return out.join('\n');
 }
@@ -1136,15 +1334,15 @@ function scanFiles(items, { budgetBytes = SEARCH_BUDGET_BYTES } = {}) {
   return { files, stopped, note };
 }
 
-export function searchCode(idx, { pattern, regex = false, path_filter, include_xml = false, limit = 40, budgetBytes } = {}) {
+export function searchCode(idx, { pattern, regex = false, path_filter, database, include_xml = false, limit = 40, budgetBytes } = {}) {
   if (regex && String(pattern).length > 180) return 'Регулярное выражение длиннее 180 символов — сузь pattern, иначе поиск может зависнуть.';
   let rx;
   try { rx = new RegExp(regex ? pattern : escapeRx(pattern), 'i'); } catch (e) { return `Неверное регулярное выражение: ${e.message}`; }
-  const filter = path_filter ? norm(path_filter) : null;
+  const allowPath = makePathFilter(idx, { path_filter, database });
   const items = [];
   for (const m of idx.modules) items.push({ file: m.file });
   if (include_xml) for (const o of idx.objects) items.push({ file: o.file });
-  const selected = items.filter((it) => !filter || norm(rel(idx, it.file)).includes(filter));
+  const selected = items.filter((it) => allowPath(it.file));
   const scan = scanFiles(selected, { budgetBytes });
   const hits = [];
   let total = 0;
@@ -1164,13 +1362,16 @@ export function searchCode(idx, { pattern, regex = false, path_filter, include_x
   if (!total && !scan.stopped) return 'Совпадений нет.';
   const head = total ? `Совпадений: ${total} в ${perFile.size} файлах.` : 'В просмотренной части совпадений нет.';
   return head + (hits.length ? `\n${hits.join('\n')}` : '') +
-    (total > hits.length ? `\n… показаны первые ${hits.length}; сузьте path_filter` : '') + scan.note;
+    (total > hits.length ? `\n… показаны первые ${hits.length}; сузьте path_filter или database` : '') + scan.note;
 }
 
 export function indexStatus(idx) {
   const methods = idx.modules.reduce((n, m) => n + m.methods.length, 0);
   const cfgs = idx.configs.map((c) => `${c.rel} (${c.isExt ? 'расширение' : 'конфигурация'} ${c.name})`).join('; ') || 'не найдены';
-  return `Корень: ${idx.root}\nВыгрузки: ${cfgs}\nОбъектов: ${idx.objects.length}, модулей: ${idx.modules.length}, методов: ${methods}\n` +
+  const dbLine = idx.databases?.length
+    ? `\nБазы в .v8-project.json: ${idx.databases.map((d) => `${d.id} (${d.prefixes.join(', ') || 'без путей'})`).join('; ')}`
+    : '';
+  return `Корень: ${idx.root}\nВыгрузки: ${cfgs}${dbLine}\nОбъектов: ${idx.objects.length}, модулей: ${idx.modules.length}, методов: ${methods}\n` +
     `Индекс: ${idx.ms} мс, разобрано файлов заново: ${idx.parsed}`;
 }
 
@@ -1205,12 +1406,13 @@ export function semanticSources(idx, cfg) {
 }
 
 // Ключевые слова: имя метода и модуля, имя/синоним объекта, идентификаторы из запроса в теле кода
-export function keywordRank(idx, query, { object, timeBudgetMs = 3000 } = {}) {
+export function keywordRank(idx, query, { object, path_filter, database, timeBudgetMs = 3000 } = {}) {
+  const allowPath = makePathFilter(idx, { path_filter, database });
   const qStems = words(query).filter((w) => !STOP.has(w)).map(stem);
   const qFull = norm(query).replace(/\s+/g, '');
   const res = new Map();
   const add = (key, s, item) => { const cur = res.get(key); if (cur) cur.s += s; else res.set(key, { key, s, ...item }); };
-  const mods = selectModules(idx, object);
+  const mods = selectModules(idx, object, { path_filter, database });
   if (qStems.length) {
     for (const mod of mods) {
       const modStems = [...new Set(words(mod.id).map(stem))];
@@ -1222,6 +1424,7 @@ export function keywordRank(idx, query, { object, timeBudgetMs = 3000 } = {}) {
     }
     if (!object) {
       for (const o of idx.objects) {
+        if (!allowPath(o.file)) continue;
         const s = scoreText(qStems, qFull, o.name, o.syn, 10);
         if (s >= 5) add(objectKey(idx, o), s, { o });
       }
@@ -1303,6 +1506,8 @@ function firstComment(text, m) {
 export async function semanticSearch(idx, a, { env = process.env } = {}) {
   const query = String(a.query || '').trim();
   if (!query) return 'Пустой запрос.';
+  const allowPath = makePathFilter(idx, { path_filter: a.path_filter, database: a.database });
+  const hasPathScope = Boolean(a.path_filter || a.database);
   const cfg = sem.loadConfig(idx.root, env);
   const limit = Math.min(50, Math.max(1, Math.round(Number(a.limit) || cfg.topK)));
   let mode = ['hybrid', 'semantic', 'keyword'].includes(a.mode) ? a.mode : 'hybrid';
@@ -1320,7 +1525,9 @@ export async function semanticSearch(idx, a, { env = process.env } = {}) {
       mode = 'keyword';
     } else if (mode !== 'keyword') {
       const st = maybeAutoBuild(idx, cfg);
-      const filter = a.object ? (relPath, id) => moduleMatches({ id }, a.object) : null;
+      const filter = (a.object || hasPathScope)
+        ? (relPath, id) => (!hasPathScope || allowPath(relPath)) && (!a.object || moduleMatches({ id }, a.object))
+        : null;
       try {
         vec = await sem.vectorSearch(cfg, idx.root, query, { limit: 200, filter });
       } catch (e) {
@@ -1337,7 +1544,7 @@ export async function semanticSearch(idx, a, { env = process.env } = {}) {
     }
   }
 
-  const kw = mode === 'semantic' ? [] : keywordRank(idx, query, { object: a.object });
+  const kw = mode === 'semantic' ? [] : keywordRank(idx, query, { object: a.object, path_filter: a.path_filter, database: a.database });
   // ключ → кандидат (из актуального индекса: строки методов могли сдвинуться)
   const byRel = new Map(idx.modules.map((m) => [rel(idx, m.file), m]));
   const objByRel = new Map(idx.objects.map((o) => [rel(idx, o.file), o]));
@@ -1519,6 +1726,8 @@ export function normalizeArgs(tool, a = {}) {
 }
 
 const ROOT_ARG = { type: 'string', description: 'Корень проекта (по умолчанию — рабочая папка OpenCode)' };
+const PATH_FILTER_ARG = { type: 'string', description: 'Сузить поиск по подстроке пути (например «src/doc», «src/ERP_02112026_R», «ИнтеграцияSD»)' };
+const DATABASE_ARG = { type: 'string', description: 'Сузить поиск по базе из .v8-project.json — автоматически включает configSrc и все расширения этой базы (например «HotDoc», «ERP_02112026_R»)' };
 const TOOLS = [
   { name: 'semantic_search', description: 'Поиск кода и объектов 1С ПО СМЫСЛУ: «где реализовано/проверяется/рассчитывается X», ' +
       '«как устроено Y», когда точного имени метода не знаешь. Гибрид: векторы (эмбеддинги LM Studio) + ключевые слова, ' +
@@ -1528,6 +1737,7 @@ const TOOLS = [
       query: { type: 'string', description: 'Описание на естественном языке, например «где проверяется кредитный лимит контрагента»' },
       mode: { type: 'string', enum: ['hybrid', 'semantic', 'keyword'], description: 'hybrid (по умолчанию), semantic — только векторы, keyword — только слова' },
       object: { type: 'string', description: 'Сузить: «ОбщийМодуль.Продажи», «Документ.ЗаказКлиента»' },
+      path_filter: PATH_FILTER_ARG, database: DATABASE_ARG,
       limit: { type: 'number', description: 'Сколько результатов (по умолчанию 10)' },
       rerank: { type: 'boolean', description: 'Переранжировать реранкером (по умолчанию да)' },
       with_code: { type: 'boolean' }, root: ROOT_ARG }, required: ['query'] } },
@@ -1535,18 +1745,20 @@ const TOOLS = [
       'rebuild — заново разобрать все файлы; уже посчитанные векторы переиспользуются). Индекс обновляется и сам при semantic_search.',
     inputSchema: { type: 'object', properties: { action: { type: 'string', enum: ['status', 'build', 'rebuild'] },
       wait_seconds: { type: 'number', description: 'Подождать завершения до N секунд (не больше 50)' }, root: ROOT_ARG } } },
-  { name: 'find_object', description: 'Найти объект метаданных 1С по смыслу: по имени, синониму, реквизиту или табличной части. ' +
+  { name: 'find_object', description: 'Найти объект метаданных 1С по смыслу: по имени, синониму, реквизиту, табличной части или навигационной ссылке e1cib/data/Вид.Имя?ref=HEX (раскодирует ref в УникальныйИдентификатор). ' +
       'Аргумент — query (строка): {"query": "ЗадачиМне"}. Пример query: «история задач», «Документ.Задача», «номенклатура вес». ' +
       'Используй вместо grep по XML.',
     inputSchema: { type: 'object', properties: {
-      query: { type: 'string', description: 'Обязательно. Имя, синоним, реквизит или «Вид.Имя», например «ЗадачиМне» или «Документ.Задача»' },
-      type: { type: 'string', description: 'Вид объекта: Справочник, Документ, РегистрСведений…' }, limit: { type: 'number' }, root: ROOT_ARG,
+      query: { type: 'string', description: 'Обязательно. Имя, синоним, реквизит, «Вид.Имя» или ссылка e1cib/data/...?ref=...' },
+      type: { type: 'string', description: 'Вид объекта: Справочник, Документ, РегистрСведений…' },
+      path_filter: PATH_FILTER_ARG, database: DATABASE_ARG, limit: { type: 'number' }, root: ROOT_ARG,
       ...aliasProps('query', ['name', 'object']) } } },
-  { name: 'object_refs', description: 'Граф связей и зависимостей объекта метаданных 1С: подписки на события (EventSubscriptions), ' +
+  { name: 'object_refs', description: 'Граф связей и зависимостей объекта метаданных 1С: обязательные реквизиты (FillChecking=ShowError), подписки на события (EventSubscriptions), ' +
       'движения документа по регистрам (RegisterRecords) или регистраторы регистра, перехваты методов и заимствования в расширениях (CFE), ' +
-      'ввод на основании (BasedOn), где объект используется как тип реквизита/измерения/ресурса (where used), общие реквизиты и функциональные опции.',
+      'ввод на основании (BasedOn), где объект используется как тип реквизита/измерения/ресурса (where used), общие реквизиты и функциональные опции. Понимает ссылки e1cib/data/...?ref=...',
     inputSchema: { type: 'object', properties: {
-      object: { type: 'string', description: 'Обязательно. «Вид.Имя» или имя объекта, например «Документ.ЗаказКлиента» или «Справочник.Номенклатура»' },
+      object: { type: 'string', description: 'Обязательно. «Вид.Имя», имя объекта или навигационная ссылка e1cib/data/...?ref=...' },
+      path_filter: PATH_FILTER_ARG, database: DATABASE_ARG,
       limit: { type: 'number', description: 'Максимум элементов в каждой секции (по умолчанию 40)' }, root: ROOT_ARG,
       ...aliasProps('object', ['query', 'name', 'target']) } } },
   { name: 'find_method', description: 'Найти процедуру/функцию по имени и сразу получить её код (если совпадений до 3). ' +
@@ -1555,45 +1767,49 @@ const TOOLS = [
     inputSchema: { type: 'object', properties: {
       name: { type: 'string', description: 'Обязательно. Имя процедуры/функции или его часть' },
       object: { type: 'string', description: 'Сузить поиск: «ОбщийМодуль.Имя», «Документ.Задача»' },
+      path_filter: PATH_FILTER_ARG, database: DATABASE_ARG,
       with_code: { type: 'boolean' }, max_lines: { type: 'number' }, root: ROOT_ARG, ...aliasProps('name', ['method']) } } },
   { name: 'module_methods', description: 'Список процедур и функций модулей объекта или общего модуля со строками, экспортом, директивами и перехватами CFE. ' +
       'Аргумент — module: {"module": "Документ.Задача"}.',
     inputSchema: { type: 'object', properties: {
       module: { type: 'string', description: 'Обязательно. «Документ.Задача», «ОбщийМодуль.ОбщегоНазначения» или часть пути' },
+      path_filter: PATH_FILTER_ARG, database: DATABASE_ARG,
       exported_only: { type: 'boolean' }, root: ROOT_ARG, ...aliasProps('module', ['object', 'name']) } } },
-  { name: 'find_usages', description: 'Где вызывается или привязан метод: вызовы в .bsl, обработчики событий и команд в Form.xml, ' +
+  { name: 'find_usages', description: 'Где вызывается или привязан метод: вызовы в .bsl (по индексу вызовов без остановки по объёму), обработчики событий и команд в Form.xml, ' +
       'подписки на события, регламентные задания, HTTP/Web-сервисы и перехваты в расширениях CFE. ' +
-      'Аргументы: name — имя метода (обязательно), object — сузить по модулю.',
+      'Аргументы: name — имя метода (обязательно), object — сузить по модулю, path_filter / database — сузить по каталогу или базе.',
     inputSchema: { type: 'object', properties: {
       name: { type: 'string', description: 'Обязательно. Точное имя вызываемой процедуры/функции' },
       object: { type: 'string', description: 'Искать вызовы только в модулях этого объекта' },
+      path_filter: PATH_FILTER_ARG, database: DATABASE_ARG,
       limit: { type: 'number' }, root: ROOT_ARG, ...aliasProps('name', ['method']) } } },
-  { name: 'validate_query', description: 'Статическая проверка текста запроса 1С по схеме метаданных конфигурации (без запуска 1С): ' +
+  { name: 'validate_query', description: 'Статическая проверка текста запроса 1С по схеме метаданных конфигурации и стандартам производительности ИТС (без запуска 1С): ' +
       'проверяет существование таблиц, табличных частей, виртуальных таблиц регистров (СрезПоследних, Остатки, Обороты и др.), ' +
       'реквизитов, измерений, ресурсов, стандартных и общих реквизитов, цепочек через точку (Т.Договор.Валюта), ' +
-      'литералов ЗНАЧЕНИЕ(Перечисление.Х.У) и временных таблиц пакета (ПОМЕСТИТЬ). При опечатках подсказывает похожие имена.',
+      'литералов ЗНАЧЕНИЕ(Перечисление.Х.У), временных таблиц пакета (ПОМЕСТИТЬ), а также антипаттерны ИТС (отбор по измерению ВТ в ГДЕ, соединения с подзапросами, ВТ без ИНДЕКСИРОВАТЬ ПО, точки от составных типов).',
     inputSchema: { type: 'object', properties: {
       query: { type: 'string', description: 'Обязательно. Текст запроса 1С («ВЫБРАТЬ ... ИЗ ...», допускается с символами «|» из модуля .bsl)' },
+      path_filter: PATH_FILTER_ARG, database: DATABASE_ARG,
       root: ROOT_ARG, ...aliasProps('query', ['text', 'sql', 'q']) } } },
-  { name: 'event_log', description: 'Чтение Журнала регистрации 1С (SQLite 1Cv8.lgd и текстовый *.lgp + 1Cv8.lgf) без запуска конфигуратора. ' +
-      'Возвращает последние ошибки выполнения, проблемы проведения и фоновых заданий с полным комментарием 1С и автоматически ' +
-      'привязывает серверный стек-трейс BSL ({Модуль(Строка)}) к файлам и строкам проекта.',
+  { name: 'event_log', description: 'Чтение Журнала регистрации 1С (SQLite 1Cv8.lgd, текстовый *.lgp + 1Cv8.lgf) и Технологического журнала 1С (ТЖ *.log: EXCP, TDEADLOCK, TTIMEOUT, TLOCK, SDBL) без запуска конфигуратора. ' +
+      'Возвращает последние ошибки выполнения, взаимоблокировки, таймауты, медленные запросы и автоматически ' +
+      'привязывает серверный стек-трейс BSL ({Модуль(Строка)} и Context ТЖ Модуль : Строка) к файлам и строкам проекта.',
     inputSchema: { type: 'object', properties: {
       database: { type: 'string', description: 'ID, имя или алиас базы из .v8-project.json (по умолчанию берётся default)' },
-      log_path: { type: 'string', description: 'Явный путь к файлу 1Cv8.lgd, папке 1Cv8Log или каталогу файловой базы' },
+      log_path: { type: 'string', description: 'Явный путь к файлу 1Cv8.lgd, папке 1Cv8Log, файлу/папке ТЖ (*.log) или каталогу базы' },
       errors_only: { type: 'boolean', description: 'Только ошибки (по умолчанию true; передайте false для всех событий)' },
       search: { type: 'string', description: 'Фильтр по тексту ошибки/комментария, объекту метаданных или пользователю' },
-      event: { type: 'string', description: 'Фильтр по виду события (например «Проведение», «PerformError», «Job»)' },
+      event: { type: 'string', description: 'Фильтр по виду события (например «Проведение», «PerformError», «TDEADLOCK», «TTIMEOUT», «SDBL», «EXCP»)' },
       since_minutes: { type: 'number', description: 'Только записи за последние N минут' },
       limit: { type: 'number', description: 'Количество записей (по умолчанию 20, максимум 100)' },
       with_code: { type: 'boolean', description: 'Показывать фрагмент кода .bsl вокруг строки ошибки из стек-трейса (по умолчанию true)' },
       root: ROOT_ARG } } },
   { name: 'search_code', description: 'Поиск строки (или регулярного выражения) по BSL-модулям выгрузки с ограниченным выводом. ' +
-      'Аргумент — pattern: {"pattern": "ЗаписатьИзменения("}. На большой выгрузке без path_filter чтение обрывается ' +
-      '(ответ начинается с «[!] поиск остановлен») — повтори один раз с path_filter, не сканируй файлы через shell.',
+      'Аргумент — pattern: {"pattern": "ЗаписатьИзменения("}. На большой выгрузке без path_filter/database чтение обрывается ' +
+      '(ответ начинается с «[!] поиск остановлен») — повтори один раз с path_filter или database, не сканируй файлы через shell.',
     inputSchema: { type: 'object', properties: {
       pattern: { type: 'string', description: 'Обязательно. Подстрока (или регулярное выражение при regex=true)' },
-      regex: { type: 'boolean' }, path_filter: { type: 'string' }, include_xml: { type: 'boolean' }, limit: { type: 'number' }, root: ROOT_ARG,
+      regex: { type: 'boolean' }, path_filter: PATH_FILTER_ARG, database: DATABASE_ARG, include_xml: { type: 'boolean' }, limit: { type: 'number' }, root: ROOT_ARG,
       ...aliasProps('pattern', ['query', 'text']) } } },
   { name: 'index_status', description: 'Какие выгрузки найдены в проекте и сколько объектов/методов в индексе. refresh=true — пересобрать.',
     inputSchema: { type: 'object', properties: { refresh: { type: 'boolean' }, root: ROOT_ARG } } },
@@ -1636,7 +1852,10 @@ async function handleCall(name, a, root) {
     case 'find_method': return findMethod(idx, a);
     case 'module_methods': return moduleMethods(idx, a);
     case 'find_usages': return findUsages(idx, a);
-    case 'validate_query': return validateQuery(idx, a);
+    case 'validate_query': return validateQuery(idx, {
+      ...a,
+      isAllowedPath: (a.path_filter || a.database) ? makePathFilter(idx, { path_filter: a.path_filter, database: a.database }) : null,
+    });
     case 'search_code': return searchCode(idx, a);
     case 'index_status': return `${agentBanner()}\n${indexStatus(idx)}\n${semanticStatusLine(idx)}\n${autocheckStatusText()}`;
     default: throw new Error(`неизвестный инструмент ${name}`);

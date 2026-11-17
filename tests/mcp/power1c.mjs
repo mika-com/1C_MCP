@@ -68,8 +68,27 @@ function makeRichProject() {
     <ChildObjects>
       <Attribute><Properties><Name>ИНН</Name><Type><v8:Type>xs:string</v8:Type><v8:StringQualifiers><v8:Length>12</v8:Length></v8:StringQualifiers></Type></Properties></Attribute>
       <Attribute><Properties><Name>ОсновнойДоговор</Name><Type><v8:Type>cfg:CatalogRef.ДоговорыКонтрагентов</v8:Type></Type></Properties></Attribute>
+      <TabularSection>
+        <Properties><Name>ДополнительныеРеквизиты</Name></Properties>
+        <ChildObjects>
+          <Attribute><Properties><Name>Свойство</Name><Type><v8:Type>xs:string</v8:Type></Type></Properties></Attribute>
+          <Attribute><Properties><Name>Значение</Name><Type><v8:Type>xs:string</v8:Type></Type></Properties></Attribute>
+        </ChildObjects>
+      </TabularSection>
     </ChildObjects>
   </Catalog>
+</MetaDataObject>`);
+
+  writeFileSync(join(cf, 'DefinedTypes', 'ВладелецДополнительныхСведений.xml'), `<?xml version="1.0" encoding="UTF-8"?>
+<MetaDataObject xmlns:v8="http://v8.1c.ru/8.1/data/core">
+  <DefinedType>
+    <Properties>
+      <Name>ВладелецДополнительныхСведений</Name>
+      <Type>
+        <v8:Type>cfg:CatalogRef.Контрагенты</v8:Type>
+      </Type>
+    </Properties>
+  </DefinedType>
 </MetaDataObject>`);
 
   // Справочник.ДоговорыКонтрагентов (подчинён Контрагенты)
@@ -154,7 +173,7 @@ function makeRichProject() {
       </RegisterRecords>
     </Properties>
     <ChildObjects>
-      <Attribute><Properties><Name>Контрагент</Name><Type><v8:Type>cfg:CatalogRef.Контрагенты</v8:Type></Type></Properties></Attribute>
+      <Attribute><Properties><Name>Контрагент</Name><FillChecking>ShowError</FillChecking><Type><v8:Type>cfg:CatalogRef.Контрагенты</v8:Type></Type></Properties></Attribute>
       <Attribute><Properties><Name>Договор</Name><Type><v8:Type>cfg:CatalogRef.ДоговорыКонтрагентов</v8:Type></Type></Properties></Attribute>
       <Attribute><Properties><Name>Статус</Name><Type><v8:Type>cfg:EnumRef.СтатусыЗаказа</v8:Type></Type></Properties></Attribute>
       <Attribute><Properties><Name>СуммаДокумента</Name><Type><v8:TypeSet>cfg:DefinedType.ДенежнаяСумма</v8:TypeSet></Type></Properties></Attribute>
@@ -443,10 +462,12 @@ console.log('1. Граф метаданных и неявных связей (ob
   ok(/Регистраторы \(документы, двигающие регистр\) \(1\):[\s\S]*Документ\.ЗаказКлиента/.test(refsReg),
      'object_refs(РегистрНакопления.ТоварыНаСкладах): видит документы-регистраторы', refsReg);
 
-  // Подчинённость справочников
+  // Подчинённость справочников и детектор Доп. реквизитов и сведений БСП
   const refsPartner = objectRefs(idx, { object: 'Справочник.Контрагенты' });
   ok(/Подчинённые справочники: Справочник\.ДоговорыКонтрагентов/.test(refsPartner),
      'object_refs(Справочник.Контрагенты): видит подчинённые справочники', refsPartner);
+  ok(/Дополнительные реквизиты и сведения БСП:[\s\S]*ТЧ «ДополнительныеРеквизиты» присутствует[\s\S]*ОпределяемыйТип\.ВладелецДополнительныхСведений/.test(refsPartner),
+     'object_refs(Справочник.Контрагенты): автоматически детектирует подключение объекта к подсистеме Доп. реквизитов и сведений БСП', refsPartner);
 
   // find_method показывает и базовый метод, и перехватчик в CFE
   const fm = findMethod(idx, { name: 'ОбработкаПроведения', object: 'Документ.ЗаказКлиента' });
@@ -478,6 +499,16 @@ console.log('1. Граф метаданных и неявных связей (ob
   const uIntercept = findUsages(idx, { name: 'ОбработкаПроведения', object: 'Документ.ЗаказКлиента' });
   ok(/\[Перехват CFE в Документ\.ЗаказКлиента\.МодульОбъекта.*&После\("ОбработкаПроведения"\) → МР_ОбработкаПроведения/.test(uIntercept),
      'find_usages: находит перехват метода в расширении CFE', uIntercept);
+
+  // Навигационная ссылка e1cib/data/...?ref=HEX и обязательные реквизиты FillChecking=ShowError
+  const e1cibOut = findObject(idx, { query: 'e1cib/data/Документ.ЗаказКлиента?ref=941f000c29443feb11f1e20c492d2835' });
+  ok(/УникальныйИдентификатор: 11f1e20c-492d-2835-941f-000c29443feb/.test(e1cibOut) &&
+     /Документ\.ЗаказКлиента[\s\S]*реквизитов 4 \(обяз\. 1\)/.test(e1cibOut),
+     'find_object: раскодирует навигационную ссылку e1cib/data/...?ref= в UUID и показывает число обязательных реквизитов', e1cibOut);
+
+  const refsWithReq = objectRefs(idx, { object: 'e1cib/data/Документ.ЗаказКлиента?ref=941f000c29443feb11f1e20c492d2835' });
+  ok(/Обязательные реквизиты \(FillChecking=ShowError, 1\): Контрагент/.test(refsWithReq),
+     'object_refs: выводит список обязательных реквизитов (FillChecking=ShowError) и принимает навигационную ссылку', refsWithReq);
 }
 
 console.log('2. Статический валидатор запросов 1С (validate_query):');
@@ -561,6 +592,25 @@ console.log('2. Статический валидатор запросов 1С (
   });
   ok(/Поле «СуммаЗаказа» не найдено в «ВТ «ВТ»».*Похожие поля: Сумма/.test(rBadTempCol),
      'validate_query: отслеживает схему временной таблицы ПОМЕСТИТЬ ВТ между запросами пакета', rBadTempCol);
+
+  // Предупреждения производительности ИТС: отбор по измерению ВТ в ГДЕ, соединение с подзапросом, ВТ без ИНДЕКСИРОВАТЬ ПО
+  const rPerfWarn = validateQuery(idx, {
+    query: `
+      ВЫБРАТЬ Ссылка КАК Товар ПОМЕСТИТЬ ВТ_Товары ИЗ Справочник.Номенклатура;
+      ВЫБРАТЬ
+        Ост.ВНаличииОстаток
+      ИЗ
+        РегистрНакопления.ТоварыНаСкладах.Остатки(&Дата) КАК Ост
+          ЛЕВОЕ СОЕДИНЕНИЕ ВТ_Товары КАК ВТ ПО Ост.Номенклатура = ВТ.Товар
+          ЛЕВОЕ СОЕДИНЕНИЕ (ВЫБРАТЬ Ссылка КАК Ном ИЗ Справочник.Номенклатура) КАК Подз ПО Ост.Номенклатура = Подз.Ном
+      ГДЕ
+        Ост.Номенклатура = &Номенклатура
+    `,
+  });
+  ok(/\[Производительность ИТС\] Отбор по измерению «Ост\.Номенклатура» виртуальной таблицы/.test(rPerfWarn) &&
+     /\[Производительность ИТС\] Соединение с временной таблицей «ВТ_Товары», у которой отсутствует секция ИНДЕКСИРОВАТЬ ПО/.test(rPerfWarn) &&
+     /\[Производительность ИТС\] СОЕДИНЕНИЕ с вложенным подзапросом/.test(rPerfWarn),
+     'validate_query: выдаёт предупреждения производительности ИТС (фильтр ВТ в ГДЕ, ВТ без индекса, соединение с подзапросом)', rPerfWarn);
 }
 
 console.log('3. Чтение Журнала регистрации 1С (event_log: SQLite .lgd и текстовый .lgp + .lgf):');
@@ -631,6 +681,35 @@ console.log('3. Чтение Журнала регистрации 1С (event_lo
      /Иванов/.test(lgpOut) &&
      /Файл в проекте: src\/cf\/CommonModules\/ПродажиСервер\/Ext\/Module\.bsl:3 \(Процедура КонтрольЛимитаПередЗаписью\)/.test(lgpOut),
      'event_log (текстовый .lgp + .lgf): разбирает словарь .lgf, запись .lgp и находит строку в общем модуле', lgpOut);
+
+  // 3.3 Проверка явной ошибки при запросе несуществующей базы (без ложного отката на чужую базу)
+  const missingDbOut = await readEventLog(idx, { database: 'DOC_20072026' });
+  ok(/База «DOC_20072026» не найдена в \.v8-project\.json.*доступны: dev/.test(missingDbOut),
+     'event_log: возвращает явную ошибку со списком доступных баз при передаче неизвестного database', missingDbOut);
+
+  // 3.4 Проверка чтения Технологического журнала 1С (ТЖ *.log: TDEADLOCK, EXCP, SDBL и стек Context)
+  const tjDir = join(root, 'build', 'tech_log', 'rphost_1234');
+  mkdirSync(tjDir, { recursive: true });
+  writeFileSync(join(tjDir, '26111719.log'),
+    `\uFEFF15:02.120000-450000,SDBL,2,process=rphost,t:applicationName=1CV8C,Usr=Петров,Sql='SELECT * FROM _Document123',Context='ОбщийМодуль.ПродажиСервер.Модуль : 11 : ПродажиСервер.РассчитатьСуммуЗаказа()'\n` +
+    `15:04.500000-2500000,TDEADLOCK,3,process=rphost,t:connectID=42,Usr=Иванов,WaitConnections=18,Regions='AccumulationRegister.ТоварыНаСкладах',Locks='AccumulationRegister.ТоварыНаСкладах Exclusive',Context='\n` +
+    `\tДокумент.ЗаказКлиента.МодульОбъекта : 8 : ОбработкаПроведения(Отказ, РежимПроведения)\n` +
+    `\tОбщийМодуль.ПродажиСервер.Модуль : 3 : КонтрольЛимитаПередЗаписью(Источник, Отказ)'\n`
+  );
+
+  const tjErrOut = await readEventLog(idx, { log_path: join(root, 'build', 'tech_log') });
+  ok(/Технологический журнал 1С \(ТЖ\)/.test(tjErrOut) &&
+     /2026-11-17 19:15:04 — Взаимоблокировка ТЖ \(TDEADLOCK\)/.test(tjErrOut) &&
+     /WaitConnections\): 18/.test(tjErrOut) &&
+     /Файл в проекте: src\/cf\/Documents\/ЗаказКлиента\/Ext\/ObjectModule\.bsl:8 \(Процедура ОбработкаПроведения\)/.test(tjErrOut) &&
+     /Файл в проекте: src\/cf\/CommonModules\/ПродажиСервер\/Ext\/Module\.bsl:3 \(Процедура КонтрольЛимитаПередЗаписью\)/.test(tjErrOut),
+     'event_log (ТЖ *.log): разбирает TDEADLOCK, длительность, блокировки и привязывает стек Context ТЖ (Модуль : Строка) к .bsl', tjErrOut);
+
+  const tjSdblOut = await readEventLog(idx, { log_path: join(root, 'build', 'tech_log'), event: 'SDBL' });
+  ok(/Запрос 1С ТЖ \(SDBL\)/.test(tjSdblOut) &&
+     /\[Длительность: 450 мс\]/.test(tjSdblOut) &&
+     /Файл в проекте: src\/cf\/CommonModules\/ПродажиСервер\/Ext\/Module\.bsl:11 \(Процедура ЗакрытьПросроченныеЗаказыРегламентное\)/.test(tjSdblOut),
+     'event_log (ТЖ *.log + event=SDBL): находит медленный запрос SDBL и привязывает его Context к методу .bsl', tjSdblOut);
 }
 
 console.log(`\n${passed} passed, ${failed} failed`);
