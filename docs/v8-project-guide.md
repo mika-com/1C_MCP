@@ -29,6 +29,7 @@
       "branches": ["dev", "feature/*"],     // привязка к Git-веткам
       "configSrc": "src\\cf",                // каталог XML-выгрузки конфигурации (см. структуру ниже)
       "webUrl": "http://localhost:8081/dev", // URL веб-клиента (для /web-test)
+      "queryUrl": "http://localhost:8081/dev/hs/agentquery/query", // query_db; пусто — webUrl + /hs/agentquery/query
 
       // Хранилище конфигурации (для /db-repo). Без него навыки группы db-* не смогут
       // работать с базой, подключённой к хранилищу: платформа не примет от них ни одной
@@ -60,6 +61,7 @@
     }
   ],
   "default": "dev",
+  "shellGuard": { "enabled": true }, // false — снять запрет COM, GUI 1cv8 и загрузки вне db-*
 
   // === Инструменты ===
   "webPath": "C:\\tools\\apache24",                  // каталог Apache
@@ -88,6 +90,7 @@
 | `ffmpegPath` | string | нет | `tools/ffmpeg/bin/ffmpeg.exe` | Путь к ffmpeg | Руками |
 | `tts` | object | нет | Edge TTS, DmitryNeural | Настройки озвучки видео | Руками |
 | `xsdPath` | string | нет | `.v8-xsd` | Каталог XSD-схем платформы по версиям формата (см. ниже) | Руками |
+| `shellGuard` | object / `false` | нет | включено | Запрет COM, интерактивного `1cv8` и загрузки конфигурации вне навыков `db-*`. `false` или `{ "enabled": false }` снимает запрет. Переменная `V8_SHELL_GUARD=0` важнее файла | Руками |
 
 ## Базы данных (`databases[]`)
 
@@ -107,7 +110,8 @@
 | `configSrc` | string | нет | Каталог XML-выгрузки конфигурации (рекомендуется `src/cf`, см. структуру ниже). Путь относительный — от корня проекта | Руками |
 | `editingAllowedCheck` | `"deny"`/`"warn"`/`"off"` | нет | Override реакции support-guard для этой базы (см. ниже) | Руками |
 | `newObjectPosition` | `"end"`/`"byName"` | нет | Override места вставки в `<ChildObjects>` для этой базы (см. ниже) | Руками |
-| `webUrl` | string | нет | URL веб-клиента для `/web-test` | Руками |
+| `webUrl` | string | нет | URL веб-клиента для `/web-test`. Если `queryUrl` пуст, `query_db` вызывает `<webUrl>/hs/agentquery/query` | Руками |
+| `queryUrl` | string | нет | Полный URL HTTP-сервиса чтения `query_db`. Пусто — берётся `webUrl` + `/hs/agentquery/query`. Пароль в URL не пишут: инструмент вырезает userinfo и шлёт Basic-заголовок | Руками |
 | `repository` | object | нет | Хранилище конфигурации: `path`, `user`, `password` (см. ниже) | Руками |
 | `extensions` | array | нет | Расширения конфигурации: `name`, `src`, необязательное `repository` (см. ниже) | Руками |
 

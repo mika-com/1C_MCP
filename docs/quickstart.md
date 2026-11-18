@@ -60,7 +60,10 @@ python scripts/opencode_port.py install --global
 - ставит плагин `bsl-autocheck` (`<opencode>/plugins/bsl-autocheck.js`): после каждой правки `.bsl`/`.os` агент
   получает ошибки и предупреждения BSL LS прямо в результате правки (`--no-autocheck` — не ставить,
   `BSL_AUTOCHECK=0` — выключить; настройки — в [README](../README.md#mcp-серверы)). Перед загрузкой в базу
-  каталог всё равно проверяется навыком `bsl-check`.
+  каталог всё равно проверяется навыком `bsl-check`;
+- ставит плагин `shell-guard` (`plugins/shell-guard.js`): до запуска блокирует COM любой версии, интерактивный
+  `1cv8` и загрузку конфигурации или расширений в базу вне навыков `db-*`. Снять — `"shellGuard": { "enabled": false }`
+  в `.v8-project.json` или `V8_SHELL_GUARD=0`. `--no-autocheck` этот плагин не отключает.
 
 ## Шаг 3. MCP-серверы
 

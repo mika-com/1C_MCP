@@ -20,6 +20,7 @@
       ],
       "configSrc": "src\\cf",
       "webUrl": "http://localhost:8081/dev",
+      "queryUrl": "http://localhost:8081/dev/hs/agentquery/query",
       "repository": {
         "path": "\\\\srv01\\repo\\MyApp",
         "user": "",
@@ -57,6 +58,7 @@
     }
   ],
   "default": "dev",
+  "shellGuard": { "enabled": true },
   "webPath": "C:\\tools\\apache24",
   "ffmpegPath": "C:\\tools\\ffmpeg\\bin\\ffmpeg.exe",
   "tts": {
