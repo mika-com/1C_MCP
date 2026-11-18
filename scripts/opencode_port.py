@@ -5,8 +5,9 @@
 Команды:
   build     — пересобрать skills/ из upstream cc-1c-skills (сохраняя собственные навыки в skills/)
   install   — установить навыки, агентов и команды в проект (.opencode/) или глобально (~/.config/opencode/)
-              и зарегистрировать MCP-серверы (~/.config/opencode/opencode.json) и плагин bsl-autocheck
-              (проверка BSL после каждой правки: <opencode>/plugins/bsl-autocheck.js)
+              и зарегистрировать MCP-серверы (~/.config/opencode/opencode.json), плагин bsl-autocheck
+              (проверка BSL после каждой правки) и плагин shell-guard
+              (запрет COM, интерактивного 1cv8 и загрузки конфигурации вне db-*)
   runtime   — переключить рантайм (powershell/python) у установленных навыков
   uninstall — удалить установленное командой install
 
@@ -84,19 +85,35 @@ def copy_md_dir(kind, oc_dir):
 
 
 PLUGIN_FILE = 'bsl-autocheck.js'
+SHELL_GUARD_FILE = 'shell-guard.js'
+# (файл в plugins/ репозитория, имя переходника, комментарий в установленном файле)
+_PLUGIN_SHIMS = (
+    ('bsl-autocheck.mjs', PLUGIN_FILE,
+     'Создано scripts/opencode_port.py install — проверка BSL после каждой правки (1C-Agent).'),
+    ('shell-guard.mjs', SHELL_GUARD_FILE,
+     'Создано scripts/opencode_port.py install — запрет COM, интерактивного 1cv8 и загрузки конфигурации вне db-* (1C-Agent).'),
+)
 
 
-def install_plugin(oc_dir):
-    """Плагин bsl-autocheck: OpenCode v2 сам загружает .js из <opencode>/plugins/. Кладём туда
-    короткий файл-переходник на plugins/bsl-autocheck.mjs репозитория (как MCP — код остаётся в репозитории)."""
-    src = pathlib.Path(repo_root(), 'plugins', 'bsl-autocheck.mjs').resolve()
+def install_plugin(oc_dir, *, autocheck=True):
+    """Плагины OpenCode v2: переходники в <opencode>/plugins/ на код в репозитории.
+    shell-guard ставится всегда, bsl-autocheck — если autocheck (его гасит --no-autocheck)."""
     dst_dir = os.path.join(oc_dir, 'plugins')
     os.makedirs(dst_dir, exist_ok=True)
-    core.write(os.path.join(dst_dir, PLUGIN_FILE),
-               '// Создано scripts/opencode_port.py install — проверка BSL после каждой правки (1C-Agent).\n'
-               '// Код плагина: ' + str(src) + '\n'
-               f'export {{ default }} from {json.dumps(src.as_uri())};\n')
-    return [f'plugins/{PLUGIN_FILE}']
+    copied = []
+    for src_name, dest_name, note in _PLUGIN_SHIMS:
+        dest = os.path.join(dst_dir, dest_name)
+        if dest_name == PLUGIN_FILE and not autocheck:
+            if os.path.isfile(dest):
+                os.remove(dest)
+            continue
+        src = pathlib.Path(repo_root(), 'plugins', src_name).resolve()
+        core.write(dest,
+                   f'// {note}\n'
+                   '// Код плагина: ' + str(src) + '\n'
+                   f'export {{ default }} from {json.dumps(src.as_uri())};\n')
+        copied.append(f'plugins/{dest_name}')
+    return copied
 
 
 def register_mcp(remove=False, vrunner=False):
@@ -132,12 +149,7 @@ def cmd_install(args):
         core.apply_runtime(dst, args.runtime)
     adjust_web_test_prefix(dst, args.is_global)
     files = copy_md_dir('agents', oc) + copy_md_dir('commands', oc)
-    if args.no_autocheck:
-        stale = os.path.join(oc, 'plugins', PLUGIN_FILE)
-        if os.path.isfile(stale):
-            os.remove(stale)
-    else:
-        files += install_plugin(oc)
+    files += install_plugin(oc, autocheck=not args.no_autocheck)
     core.write(os.path.join(oc, MARKER), '\n'.join(files) + '\n')
     if not args.is_global:
         agents_md = os.path.join(base, 'AGENTS.md')

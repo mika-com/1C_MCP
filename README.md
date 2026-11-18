@@ -132,7 +132,7 @@ python3 skills/print-form/scripts/mxl-render.py <...>/Templates/<Макет>/Ext
 
 | Сервер | Что даёт | По умолчанию |
 |--------|----------|--------------|
-| `1c-search` | `semantic_search` (по смыслу, гибрид с ключевыми словами и реранкером; без LM Studio — ключевые слова), `semantic_index`, `find_object(query)`, `object_refs(object)` (граф связей объекта: типы, движения по регистрам, ввод на основании, подписки, ФО, расширения CFE, where-used), `find_method(name, object)` (с перехватчиками CFE), `module_methods(module)`, `find_usages(name, object)` (вызовы + подписки, регл. задания, сервисы, `Form.xml`, CFE), `search_code(pattern)`, `validate_query(query)` (статический валидатор запросов 1С по метаданным), `event_log(database)` (чтение ЖР `.lgd`/`.lgp` с маппингом стека на `.bsl`), `index_status` | включён |
+| `1c-search` | `semantic_search` (по смыслу, гибрид с ключевыми словами и реранкером; без LM Studio — ключевые слова), `semantic_index`, `find_object(query)`, `object_refs(object)` (граф связей объекта: типы, движения по регистрам, ввод на основании, подписки, ФО, расширения CFE, where-used), `find_method(name, object)` (с перехватчиками CFE), `module_methods(module)`, `find_usages(name, object)` (вызовы + подписки, регл. задания, сервисы, `Form.xml`, CFE), `search_code(pattern)`, `validate_query(query)` (статический валидатор запросов 1С по метаданным), `query_db(database, query)` (чтение базы, только `ВЫБРАТЬ`, лимит и таймаут обязательны, `readOnlyHint`), `event_log(database)` (чтение ЖР `.lgd`/`.lgp` с маппингом стека на `.bsl`), `index_status` | включён |
 | `1c-bsl` | BSL LS в режиме MCP (`analyze_file`, `document_symbols`, …); без BSL LS — заглушка с подсказкой | включён |
 | `1c-help` | синтакс-помощник: `help_search`, `help_get` (синтаксис, параметры, возврат, доступность, версия, примеры), `help_members`, `help_status` — по справке **установленной** платформы | включён |
 | `vrunner` | команды vanessa-runner 3.x (`vrunner-mcp`) | `disabled: true`, включить: `node mcp/register-opencode-mcp.mjs --vrunner` |
@@ -158,6 +158,26 @@ python3 skills/print-form/scripts/mxl-render.py <...>/Templates/<Макет>/Ext
 (Linux/macOS: `~/.cache/1c-opencode/help-cache`). Агенты `1c` и `1c-developer` проверяют через него незнакомые
 методы и свойства платформы, а не придумывают их. Парсер `.hbk` свой, без зависимостей
 ([`mcp/lib/hbk.mjs`](mcp/lib/hbk.mjs)).
+
+**Чтение базы — `query_db`.** Инструмент MCP `1c-search`. В аргументе `database` — `id` из `.v8-project.json`,
+в `query` — только `ВЫБРАТЬ`. Текст сначала проходит `validate_query`. Лимит строк (по умолчанию 100, потолок 500)
+и таймаут (по умолчанию 30 с, потолок 120 с) не отключаются. Запрос уходит HTTP-сервису `AgentQuery`
+опубликованной базы (`queryUrl` или `webUrl` + `/hs/agentquery/query`, модуль
+[`mcp/query-db/AgentQuery.bsl`](mcp/query-db/AgentQuery.bsl)). Пароль берётся из записи базы и передаётся
+заголовком `Authorization` внутри процесса MCP: в ответе и в командной строке его нет, дочерний процесс не
+запускается. COM, интерактивный `1cv8` и `ibcmd --password` для выборки не используются. Пока сервис не
+опубликован навыком `db-*`, инструмент отказывается и обход не предлагает. Как проверить на живой базе —
+[docs/db-guide.md](docs/db-guide.md#чтение-данных-query_db). У инструмента в каталоге MCP стоит `readOnlyHint`.
+
+**Запрет опасных команд — плагин [`shell-guard`](plugins/shell-guard.mjs).** OpenCode v2 вызывает его на
+`tool.execute.before` (вызов прерывается) и на `shell.create.before` (команда подменяется отказом, потому что
+хук оболочки сам запуск не отменяет). Блокируется COM-коннектор и COM-приложение любой версии (`V82`…`V85` и
+дальше), регистрация `comcntr`, интерактивный `1cv8` (в том числе `ENTERPRISE` и свой `/Execute`) и загрузка или
+обновление конфигурации и расширений в базу вне скриптов навыков `db-*` (`/LoadConfigFromFiles`, `/UpdateDBCfg`,
+`ibcmd config load|import|apply`). Свой `.ps1`/`.py` и `powershell -EncodedCommand` проверяются так же. Навыки
+`skills/<имя>/scripts/` остаются пакетным путём. Снять запрет: `"shellGuard": { "enabled": false }` в
+`.v8-project.json` или `V8_SHELL_GUARD=0` (переменная важнее файла). Установщик кладёт переходник рядом с
+`bsl-autocheck`; `--no-autocheck` его не убирает.
 
 **Проверка BSL после каждой правки — плагин [`bsl-autocheck`](plugins/bsl-autocheck.mjs).** OpenCode v2 языковые
 серверы (секция `lsp`) не запускает, поэтому LSP из проекта убран (установщик удаляет старую запись `lsp.bsl` из
@@ -194,13 +214,15 @@ UTF-8 для PowerShell и `cmd` и `PYTHONIOENCODING`/`PYTHONUTF8` для Pytho
 | `.opencode/commands/` | команды `/1c-*` |
 | `skills/` | 85 навыков: 81 из `cc-1c-skills` + собственные (`bsl-check`, `vrunner`, `1c-test`, `print-form`) |
 | `mcp/` | MCP-серверы и `register-opencode-mcp.mjs` (пишет `mcp.servers`, удаляет старую запись `lsp.bsl`) |
-| `plugins/` | плагин OpenCode v2 `bsl-autocheck.mjs` — проверка BSL после каждой правки (`.opencode/plugins/bsl-autocheck.js` — переходник для работы в репозитории) |
+| `plugins/` | плагины OpenCode v2: `bsl-autocheck.mjs` (проверка BSL после правки) и `shell-guard.mjs` (запрет COM, интерактивного `1cv8` и загрузки в базу вне `db-*`). Переходники — `.opencode/plugins/*.js` |
 | `opencode.json` | конфиг v2 для работы в самом репозитории (`skills`, `mcp.servers`, `default_agent`) |
 | `templates/AGENTS.md` | шаблон инструкций для 1С-проекта |
 | `install.ps1`, `install.cmd` | установка на Windows одной командой из папки проекта |
 | `scripts/kill-bsl-ls.mjs`, `scripts/kill-bsl-ls.ps1` | завершить зависшие процессы BSL LS ([зависания на больших проектах](docs/quickstart.md#зависания-и-процессы-bsl-ls-на-больших-конфигурациях)) |
 | `tests/mcp/run.mjs`, `tests/mcp/multiuser.mjs` | тесты прокси `1c-bsl` (дерево процессов, таймаут, область индексации) и многопользовательской безопасности |
 | `tests/plugins/bsl-autocheck.mjs` | тесты плагина на поддельном BSL LS (пачки, таймаут, вывод, нет BSL LS) и миграции `lsp.bsl` |
+| `tests/plugins/shell-guard.mjs` | тесты запрета COM, интерактивного `1cv8` и загрузки конфигурации, включая отключение в `.v8-project.json` |
+| `tests/mcp/query-db.mjs` | тесты `query_db` на подставном HTTP (лимит, таймаут, `validate_query`, пароль не в ответе и не в URL) |
 | `tests/mcp/help.mjs` | тесты `1c-help` на синтетических `.hbk` (`tests/mcp/lib/make-hbk.mjs`, без содержимого справки 1С) |
 | `tests/mcp/power1c.mjs` | тесты графа метаданных (`object_refs`, `find_method`, `find_usages`), статического валидатора запросов (`validate_query`) и чтения ЖР (`event_log`) |
 | `tests/web-test/session.mjs` | тесты сеанса `web-test` на поддельном браузере: `open` → много `exec` в одном браузере, сеанс переживает конец вызова shell, токен, простой, смена адреса |
