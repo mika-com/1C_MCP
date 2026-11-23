@@ -1,4 +1,4 @@
-// web-test browser v1.19 — engine facade: re-exports the public API from engine/*
+// web-test browser v1.23 — engine facade: re-exports the public API from engine/*
 // Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 /**
  * Public API of the web-test engine. Pure re-export facade — no logic here.
@@ -21,7 +21,7 @@ export { clickElement } from './engine/core/click.mjs';
 // ── session ───────────────────────────────────────────────────────────────
 export {
   connect, disconnect, attach, detach, getSession,
-  createContext, setActiveContext, listContexts, getActiveContext,
+  createContext, setActiveContext, listContexts, listWebContexts, getActiveContext,
   hasContext, closeContext,
   // Unresponsive-context handling (test runner). abortContext is the sanctioned way to
   // mutate the registry from outside — the `contexts` Map itself stays private.
@@ -38,6 +38,7 @@ export {
 export { selectValue } from './engine/forms/select-value.mjs';
 export { fillFields, fillField } from './engine/forms/fill.mjs';
 export { closeForm } from './engine/forms/close.mjs';
+export { getHtmlFrame } from './engine/forms/html-field.mjs';
 
 // ── tables ────────────────────────────────────────────────────────────────
 export { readTable, deleteTableRow } from './engine/table/grid.mjs';
@@ -50,11 +51,18 @@ export {
   screenshot, wait, isRecording, startRecording, stopRecording,
 } from './engine/recording/capture.mjs';
 export {
-  showCaption, hideCaption, getCaptions,
+  showCaption, hideCaption, getCaptions, speak,
   showTitleSlide, hideTitleSlide,
   showImage, hideImage,
 } from './engine/recording/captions.mjs';
 export {
+  showSlide, hideSlide, prepareSlides, setSlideTheme, loadSlides,
+} from './engine/recording/slides/index.mjs';
+export {
   highlight, unhighlight, setHighlight, isHighlightMode,
 } from './engine/recording/highlight.mjs';
 export { addNarration } from './engine/recording/narration.mjs';
+export { withMusic } from './engine/recording/music.mjs';
+
+// ── other web pages (an adjacent system, a video without 1C) — web-pages.md ─
+export { web } from './engine/web/pages.mjs';

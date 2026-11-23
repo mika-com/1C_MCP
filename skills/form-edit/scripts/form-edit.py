@@ -1,6 +1,7 @@
-# form-edit v1.29 — Edit 1C managed form elements (Python port)
+# form-edit v1.60 — Edit 1C managed form elements (Python port)
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 import argparse
+import bisect
 import contextlib
 import copy
 import io
@@ -8,11 +9,48 @@ import json
 import os
 import re
 import sys
+import uuid
 
 from lxml import etree
 
 sys.stdout.reconfigure(encoding="utf-8")
 sys.stderr.reconfigure(encoding="utf-8")
+
+# --- Булевы флаги DSL: прощающий ввод ---
+# Флаг строкой или числом — однозначная ошибка автора JSON: true|да|истина|1 / false|нет|ложь|0 (без
+# регистра; 1/0 — и числом) приводим к bool молча. Иное — ошибка без записи: молчаливое «false» из «yes»
+# хуже отказа. Без общего читателя порты расходились: PS (-eq) принимал "false", py (is) — нет.
+def to_dsl_bool(value, key, default):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        t = value.strip().lower()
+        if t in ('true', 'да', 'истина', '1'):
+            return True
+        if t in ('false', 'нет', 'ложь', '0'):
+            return False
+    elif isinstance(value, (int, float)):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+    shown = f'"{value}"' if isinstance(value, str) else f"{value}"
+    print(f"[ERROR] {key} = {shown}: expected true or false", file=sys.stderr)
+    sys.exit(1)
+
+
+def get_dsl_bool(obj, keys, default):
+    """Первый найденный ключ из keys (синонимы, без регистра) → to_dsl_bool; не dict / нет ключа → default."""
+    if not isinstance(obj, dict):
+        return default
+    for k in keys:
+        for actual in obj:
+            if isinstance(actual, str) and actual.lower() == k.lower():
+                return to_dsl_bool(obj[actual], k, default)
+    return default
+
 
 # Регистронезависимый ввод — паритет с PS1: в PowerShell имена параметров и [ValidateSet]
 # регистр не различают, в argparse совпадение точное.
@@ -184,15 +222,19 @@ def _sg_find_v8project(start_dir):
 
 def _sg_get_edit_mode(cfg_dir):
     try:
-        pj = _sg_find_v8project(os.getcwd()) or _sg_find_v8project(cfg_dir)
+        pj = _sg_find_v8project(os.getcwd()) or _sg_find_v8project(os.path.abspath(cfg_dir))
         if not pj:
             return "deny"
         proj = json.loads(open(pj, encoding="utf-8-sig").read())
-        cfg_full = os.path.normcase(os.path.abspath(cfg_dir)).rstrip("\\/")
+        # configSrc — от каталога .v8-project.json, а не от рабочего каталога: иначе из подкаталога
+        # проекта база не сопоставляется и берётся правило проекта. Пути — настоящие (realpath):
+        # на macOS /var — ссылка на /private/var, и getcwd с путём аргумента иначе не совпадут.
+        proj_dir = os.path.dirname(pj)
+        cfg_full = os.path.normcase(os.path.realpath(cfg_dir)).rstrip("\\/")
         for db in proj.get("databases", []):
             src = db.get("configSrc")
             if src:
-                src_full = os.path.normcase(os.path.abspath(src)).rstrip("\\/")
+                src_full = os.path.normcase(os.path.realpath(os.path.join(proj_dir, src))).rstrip("\\/")
                 if cfg_full == src_full or cfg_full.startswith(src_full + os.sep):
                     if db.get("editingAllowedCheck"):
                         return db["editingAllowedCheck"]
@@ -381,6 +423,24 @@ root = tree.getroot()
 
 defn = ci_json(parse_json_input(read_json_file(json_path), json_path))
 
+
+# Флаг main строкой или числом ("true", 1) — как булево: иначе порты расходятся (PS `-eq $true` принимает
+# строку и 1, Python `is True` — нет)
+def normalize_main_flag(attrs):
+    for a in (attrs if isinstance(attrs, list) else []):
+        if not isinstance(a, dict) or 'main' not in a:
+            continue
+        v = a['main']
+        if isinstance(v, str):
+            s = v.strip().lower()
+            if s in ('true', 'false'):
+                a['main'] = s == 'true'
+        elif isinstance(v, int) and not isinstance(v, bool) and v in (0, 1):
+            a['main'] = v == 1
+
+
+normalize_main_flag(defn.get('attributes'))
+
 # ── 3. Form name + header ───────────────────────────────────
 
 form_name = os.path.splitext(os.path.basename(form_path))[0]
@@ -448,11 +508,28 @@ next_elem_id += 1
 next_attr_id += 1
 next_cmd_id += 1
 
+# Префикс имён расширения — <NamePrefix> ближайшего вверх Configuration.xml; "" — не расширение или не задан.
+def get_extension_name_prefix(d):
+    while d:
+        cfg = os.path.join(d, 'Configuration.xml')
+        if os.path.isfile(cfg):
+            with open(cfg, encoding='utf-8-sig', errors='replace') as f:
+                m = re.search(r'<NamePrefix>([^<]*)</NamePrefix>', f.read())
+            return m.group(1) if m else ''
+        parent = os.path.dirname(d)
+        if not parent or parent == d:
+            break
+        d = parent
+    return ''
+
+
 # --- 4b. Auto-detect extension mode (BaseForm present) ---
 is_extension = False
+_ext_name_prefix = ''
 base_form = root.find("f:BaseForm", NS)
 if base_form is not None:
     is_extension = True
+    _ext_name_prefix = get_extension_name_prefix(os.path.dirname(resolved_form_path))
     if next_attr_id < 1000000:
         next_attr_id = 1000000
     if next_cmd_id < 1000000:
@@ -496,29 +573,6 @@ def X(text):
 
 
 # --- Type emitter ---
-
-_FORM_TYPE_SYNONYMS = {
-    "строка": "string", "число": "decimal", "булево": "boolean",
-    "дата": "date", "датавремя": "dateTime",
-    "number": "decimal", "bool": "boolean",
-    "справочникссылка": "CatalogRef", "справочникобъект": "CatalogObject",
-    "документссылка": "DocumentRef", "документобъект": "DocumentObject",
-    "перечислениессылка": "EnumRef",
-    "плансчетовссылка": "ChartOfAccountsRef",
-    "планвидовхарактеристикссылка": "ChartOfCharacteristicTypesRef",
-    "планвидоврасчётассылка": "ChartOfCalculationTypesRef",
-    "планвидоврасчетассылка": "ChartOfCalculationTypesRef",
-    "планобменассылка": "ExchangePlanRef",
-    "бизнеспроцессссылка": "BusinessProcessRef",
-    "задачассылка": "TaskRef",
-    "определяемыйтип": "DefinedType",
-}
-
-
-# Алиас на локальный словарь: тело resolve_type_str ниже — общая реализация,
-# одинаковая во всех навыках (реестр в tests/skills/check-inline-drift.mjs).
-TYPE_SYNONYMS = _FORM_TYPE_SYNONYMS
-
 
 def _assert_edit_unique(name, seen, ctx):
     # Уникальность имён внутри JSON-определения (1С: своя коллекция — свой неймспейс).
@@ -569,56 +623,764 @@ _DCS_COMMON_NS = 'http://v8.1c.ru/8.1/data-composition-system/common'
 
 _seen_element_names = set()  # пул имён элементов (глобально по всей форме)
 
-EVENT_SUFFIX_MAP = {
-    "OnChange": "\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438",
-    "StartChoice": "\u041d\u0430\u0447\u0430\u043b\u043e\u0412\u044b\u0431\u043e\u0440\u0430",
-    "ChoiceProcessing": "\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0412\u044b\u0431\u043e\u0440\u0430",
-    "AutoComplete": "\u0410\u0432\u0442\u043e\u041f\u043e\u0434\u0431\u043e\u0440",
-    "Clearing": "\u041e\u0447\u0438\u0441\u0442\u043a\u0430",
-    "Opening": "\u041e\u0442\u043a\u0440\u044b\u0442\u0438\u0435",
-    "Click": "\u041d\u0430\u0436\u0430\u0442\u0438\u0435",
-    "OnActivateRow": "\u041f\u0440\u0438\u0410\u043a\u0442\u0438\u0432\u0438\u0437\u0430\u0446\u0438\u0438\u0421\u0442\u0440\u043e\u043a\u0438",
-    "BeforeAddRow": "\u041f\u0435\u0440\u0435\u0434\u041d\u0430\u0447\u0430\u043b\u043e\u043c\u0414\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u0438\u044f",
-    "BeforeDeleteRow": "\u041f\u0435\u0440\u0435\u0434\u0423\u0434\u0430\u043b\u0435\u043d\u0438\u0435\u043c",
-    "BeforeRowChange": "\u041f\u0435\u0440\u0435\u0434\u041d\u0430\u0447\u0430\u043b\u043e\u043c\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f",
-    "OnStartEdit": "\u041f\u0440\u0438\u041d\u0430\u0447\u0430\u043b\u0435\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f",
-    "OnEditEnd": "\u041f\u0440\u0438\u041e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u0438\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f",
-    "Selection": "\u0412\u044b\u0431\u043e\u0440\u0421\u0442\u0440\u043e\u043a\u0438",
-    "OnCurrentPageChange": "\u041f\u0440\u0438\u0421\u043c\u0435\u043d\u0435\u0421\u0442\u0440\u0430\u043d\u0438\u0446\u044b",
-    "TextEditEnd": "\u041e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u0435\u0412\u0432\u043e\u0434\u0430\u0422\u0435\u043a\u0441\u0442\u0430",
-    "URLProcessing": "\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u043e\u0439\u0421\u0441\u044b\u043b\u043a\u0438",
-    "DragStart": "\u041d\u0430\u0447\u0430\u043b\u043e\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f",
-    "Drag": "\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u0435",
-    "DragCheck": "\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f",
-    "Drop": "\u041f\u043e\u043c\u0435\u0449\u0435\u043d\u0438\u0435",
-    "AfterDeleteRow": "\u041f\u043e\u0441\u043b\u0435\u0423\u0434\u0430\u043b\u0435\u043d\u0438\u044f",
+# --- Каталог событий формы (генерируется) ---
+# Tag ("Form" for the form itself) -> event -> (handler suffix, compile directive, params,
+# platform the event exists since ("" = 8.3.20), restriction). Params: a string or a tuple
+# ("platform", "params", ...) — the signature from that platform on. Restriction: a table data source
+# (DynamicList) or, for the form, the owners whose forms have the event (by the main attribute). Last —
+# the event position in <Events>: the platform writes events in this order whatever the input order.
+# Sources: Syntax Assistant 8.3.20-8.5, standard configurations (28.5k forms), load test on 7 platforms.
+# Regenerate: python debug/form-handlers/gen_event_catalog.py
+def get_form_event_catalog():
+    return {
+        "CalendarField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "DragCheck": ("\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430, \u0412\u044b\u0431\u0440\u0430\u043d\u043d\u0430\u044f\u0414\u0430\u0442\u0430", "", "", 1),
+            "OnPeriodOutput": ("\u041f\u0440\u0438\u0412\u044b\u0432\u043e\u0434\u0435\u041f\u0435\u0440\u0438\u043e\u0434\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041e\u0444\u043e\u0440\u043c\u043b\u0435\u043d\u0438\u0435\u041f\u0435\u0440\u0438\u043e\u0434\u0430", "", "", 2),
+            "Selection": ("\u0412\u044b\u0431\u043e\u0440", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0412\u044b\u0431\u0440\u0430\u043d\u043d\u0430\u044f\u0414\u0430\u0442\u0430", "", "", 3),
+            "OnActivateDate": ("\u041f\u0440\u0438\u0410\u043a\u0442\u0438\u0432\u0438\u0437\u0430\u0446\u0438\u0438\u0414\u0430\u0442\u044b", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 4),
+            "DragStart": ("\u041d\u0430\u0447\u0430\u043b\u043e\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0412\u044b\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u0435", "", "", 5),
+            "Drag": ("\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430, \u0412\u044b\u0431\u0440\u0430\u043d\u043d\u0430\u044f\u0414\u0430\u0442\u0430", "", "", 6),
+            "DragEnd": ("\u041e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u0435\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 7),
+        },
+        "ChartField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "Selection": ("\u0412\u044b\u0431\u043e\u0440", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0417\u043d\u0430\u0447\u0435\u043d\u0438\u0435\u0414\u0438\u0430\u0433\u0440\u0430\u043c\u043c\u044b, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 1),
+            "DetailProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0430, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 2),
+            "OnActivate": ("\u041f\u0440\u0438\u0410\u043a\u0442\u0438\u0432\u0438\u0437\u0430\u0446\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 3),
+        },
+        "CheckBoxField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+        },
+        "DendrogramField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "DetailProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0430, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 1),
+            "Selection": ("\u0412\u044b\u0431\u043e\u0440", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0417\u043d\u0430\u0447\u0435\u043d\u0438\u0435\u0414\u0435\u043d\u0434\u0440\u043e\u0433\u0440\u0430\u043c\u043c\u044b, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 2),
+        },
+        "ExtendedTooltip": {
+            "Click": ("\u041d\u0430\u0436\u0430\u0442\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "URLProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u043e\u0439\u0421\u0441\u044b\u043b\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u0430\u044f\u0421\u0441\u044b\u043b\u043a\u0430\u0424\u043e\u0440\u043c\u0430\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u043e\u0439\u0421\u0442\u0440\u043e\u043a\u0438, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 1),
+        },
+        "Form": {
+            "AfterWrite": ("\u041f\u043e\u0441\u043b\u0435\u0417\u0430\u043f\u0438\u0441\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u0417\u0430\u043f\u0438\u0441\u0438", "", "Document, Catalog, ChartOfCharacteristicTypes, BusinessProcess, Task, InformationRegisterRecord, InformationRegisterRecordSet, Constants, ExchangePlan, ChartOfAccounts, ChartOfCalculationTypes", 0),
+            "BeforeReopenFromOtherServer": ("\u041f\u0435\u0440\u0435\u0434\u041f\u0435\u0440\u0435\u043e\u0442\u043a\u0440\u044b\u0442\u0438\u0435\u043c\u0421\u0414\u0440\u0443\u0433\u043e\u0433\u043e\u0421\u0435\u0440\u0432\u0435\u0440\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b, \u041e\u0442\u043a\u0430\u0437", "", "", 1),
+            "ValueChoice": ("\u0412\u044b\u0431\u043e\u0440\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "Document, Catalog, ChartOfCharacteristicTypes, BusinessProcess, Task, ExchangePlan, ChartOfAccounts, ChartOfCalculationTypes", 2),
+            "OnReopenFromOtherServer": ("\u041f\u0440\u0438\u041f\u0435\u0440\u0435\u043e\u0442\u043a\u0440\u044b\u0442\u0438\u0438\u0421\u0414\u0440\u0443\u0433\u043e\u0433\u043e\u0421\u0435\u0440\u0432\u0435\u0440\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u0417\u0430\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 3),
+            "OnSaveDataInSettingsAtServer": ("\u041f\u0440\u0438\u0421\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u0438\u0414\u0430\u043d\u043d\u044b\u0445\u0412\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0430\u0445\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438", "", "", 4),
+            "ChoiceProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0412\u044b\u0431\u043e\u0440\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0412\u044b\u0431\u0440\u0430\u043d\u043d\u043e\u0435\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u0435, \u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a\u0412\u044b\u0431\u043e\u0440\u0430", "", "", 5),
+            "BeforeLoadVariantAtServer": ("\u041f\u0435\u0440\u0435\u0434\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u043e\u0439\u0412\u0430\u0440\u0438\u0430\u043d\u0442\u0430\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438", "", "Report", 6),
+            "AfterWriteAtServer": ("\u041f\u043e\u0441\u043b\u0435\u0417\u0430\u043f\u0438\u0441\u0438\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u0422\u0435\u043a\u0443\u0449\u0438\u0439\u041e\u0431\u044a\u0435\u043a\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u0417\u0430\u043f\u0438\u0441\u0438", "", "Document, Catalog, ChartOfCharacteristicTypes, BusinessProcess, Task, InformationRegisterRecord, InformationRegisterRecordSet, Constants, ExchangePlan, ChartOfAccounts, ChartOfCalculationTypes", 7),
+            "OnPasteFromClipboard": ("\u041f\u0440\u0438\u0412\u0441\u0442\u0430\u0432\u043a\u0435\u0418\u0437\u0411\u0443\u0444\u0435\u0440\u0430\u041e\u0431\u043c\u0435\u043d\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u0435, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "8.3.24", "", 8),
+            "BeforeStart": ("\u041f\u0435\u0440\u0435\u0434\u0421\u0442\u0430\u0440\u0442\u043e\u043c", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u041e\u0442\u043a\u0430\u0437", "", "BusinessProcess", 9),
+            "NotificationProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041e\u043f\u043e\u0432\u0435\u0449\u0435\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0418\u043c\u044f\u0421\u043e\u0431\u044b\u0442\u0438\u044f, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440, \u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a", "", "", 10),
+            "OnReadAtServer": ("\u041f\u0440\u0438\u0427\u0442\u0435\u043d\u0438\u0438\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u0422\u0435\u043a\u0443\u0449\u0438\u0439\u041e\u0431\u044a\u0435\u043a\u0442", "", "Document, Catalog, ChartOfCharacteristicTypes, BusinessProcess, Task, InformationRegisterRecord, InformationRegisterRecordSet, Constants, ExchangePlan, ChartOfAccounts, ChartOfCalculationTypes", 11),
+            "NewWriteProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0417\u0430\u043f\u0438\u0441\u0438\u041d\u043e\u0432\u043e\u0433\u043e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u041d\u043e\u0432\u044b\u0439\u041e\u0431\u044a\u0435\u043a\u0442, \u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 12),
+            "OnOpen": ("\u041f\u0440\u0438\u041e\u0442\u043a\u0440\u044b\u0442\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u041e\u0442\u043a\u0430\u0437", "", "", 13),
+            "BeforeLoadUserSettingsAtServer": ("\u041f\u0435\u0440\u0435\u0434\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u043e\u0439\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c\u0441\u043a\u0438\u0445\u041d\u0430\u0441\u0442\u0440\u043e\u0435\u043a\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438, \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u044e\u0442\u0441\u044f\u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u044b\u0435\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438", "", "Report", 14),
+            "URLListGetProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041f\u043e\u043b\u0443\u0447\u0435\u043d\u0438\u044f\u0421\u043f\u0438\u0441\u043a\u0430\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u044b\u0445\u0421\u0441\u044b\u043b\u043e\u043a", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0421\u043f\u0438\u0441\u043e\u043a\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u044b\u0445\u0421\u0441\u044b\u043b\u043e\u043a, \u041a\u043b\u044e\u0447\u041f\u043e\u0423\u043c\u043e\u043b\u0447\u0430\u043d\u0438\u044e", "", "", 15),
+            "OnSaveVariantAtServer": ("\u041f\u0440\u0438\u0421\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u0438\u0412\u0430\u0440\u0438\u0430\u043d\u0442\u0430\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438", "", "Report", 16),
+            "BeforeClose": ("\u041f\u0435\u0440\u0435\u0434\u0417\u0430\u043a\u0440\u044b\u0442\u0438\u0435\u043c", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u041e\u0442\u043a\u0430\u0437, \u0417\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u0438\u0435\u0420\u0430\u0431\u043e\u0442\u044b, \u0422\u0435\u043a\u0441\u0442\u041f\u0440\u0435\u0434\u0443\u043f\u0440\u0435\u0436\u0434\u0435\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 17),
+            "ExternalEvent": ("\u0412\u043d\u0435\u0448\u043d\u0435\u0435\u0421\u043e\u0431\u044b\u0442\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a, \u0421\u043e\u0431\u044b\u0442\u0438\u0435, \u0414\u0430\u043d\u043d\u044b\u0435", "", "", 18),
+            "CollaborationSystemUsersAutoComplete": ("\u0410\u0432\u0442\u043e\u041f\u043e\u0434\u0431\u043e\u0440\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u0435\u0439\u0421\u0438\u0441\u0442\u0435\u043c\u044b\u0412\u0437\u0430\u0438\u043c\u043e\u0434\u0435\u0439\u0441\u0442\u0432\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0422\u0435\u043a\u0441\u0442, \u0414\u0430\u043d\u043d\u044b\u0435\u0412\u044b\u0431\u043e\u0440\u0430, \u041d\u0430\u0437\u043d\u0430\u0447\u0435\u043d\u0438\u0435\u0412\u044b\u0431\u043e\u0440\u0430, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 19),
+            "OnSettingsChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438\u041d\u0430\u0441\u0442\u0440\u043e\u0435\u043a", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "8.5", "Report", 20),
+            "URLGetProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041f\u043e\u043b\u0443\u0447\u0435\u043d\u0438\u044f\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u043e\u0439\u0421\u0441\u044b\u043b\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u041a\u043b\u044e\u0447, \u041f\u0440\u0435\u0434\u0441\u0442\u0430\u0432\u043b\u0435\u043d\u0438\u0435, \u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u0430\u044f\u0421\u0441\u044b\u043b\u043a\u0430, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 21),
+            "OnReopen": ("\u041f\u0440\u0438\u041f\u043e\u0432\u0442\u043e\u0440\u043d\u043e\u043c\u041e\u0442\u043a\u0440\u044b\u0442\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "", "", "", 22),
+            "OnLoadDataFromSettingsAtServer": ("\u041f\u0440\u0438\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0435\u0414\u0430\u043d\u043d\u044b\u0445\u0418\u0437\u041d\u0430\u0441\u0442\u0440\u043e\u0435\u043a\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438", "", "", 23),
+            "OnLoadUserSettingsAtServer": ("\u041f\u0440\u0438\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0435\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c\u0441\u043a\u0438\u0445\u041d\u0430\u0441\u0442\u0440\u043e\u0435\u043a\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438, \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u044e\u0442\u0441\u044f\u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u044b\u0435\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438", "", "Report", 24),
+            "OnLoadVariantAtServer": ("\u041f\u0440\u0438\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0435\u0412\u0430\u0440\u0438\u0430\u043d\u0442\u0430\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438", "", "Report", 25),
+            "NavigationProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041f\u0435\u0440\u0435\u0445\u043e\u0434\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u041e\u0431\u044a\u0435\u043a\u0442\u041f\u0435\u0440\u0435\u0445\u043e\u0434\u0430, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 26),
+            "OnSaveUserSettingsAtServer": ("\u041f\u0440\u0438\u0421\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u0438\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c\u0441\u043a\u0438\u0445\u041d\u0430\u0441\u0442\u0440\u043e\u0435\u043a\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438", "", "Report", 27),
+            "BeforeWrite": ("\u041f\u0435\u0440\u0435\u0434\u0417\u0430\u043f\u0438\u0441\u044c\u044e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u041e\u0442\u043a\u0430\u0437, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u0417\u0430\u043f\u0438\u0441\u0438", "", "Document, Catalog, ChartOfCharacteristicTypes, BusinessProcess, Task, InformationRegisterRecord, InformationRegisterRecordSet, Constants, ExchangePlan, ChartOfAccounts, ChartOfCalculationTypes", 28),
+            "OnCreateAtServer": ("\u041f\u0440\u0438\u0421\u043e\u0437\u0434\u0430\u043d\u0438\u0438\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041e\u0442\u043a\u0430\u0437, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 29),
+            "CollaborationSystemUsersChoiceFormGetProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041f\u043e\u043b\u0443\u0447\u0435\u043d\u0438\u044f\u0424\u043e\u0440\u043c\u044b\u0412\u044b\u0431\u043e\u0440\u0430\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u0435\u0439\u0421\u0438\u0441\u0442\u0435\u043c\u044b\u0412\u0437\u0430\u0438\u043c\u043e\u0434\u0435\u0439\u0441\u0442\u0432\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u041d\u0430\u0437\u043d\u0430\u0447\u0435\u043d\u0438\u0435\u0412\u044b\u0431\u043e\u0440\u0430, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b, \u0412\u044b\u0431\u0440\u0430\u043d\u043d\u0430\u044f\u0424\u043e\u0440\u043c\u0430, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 30),
+            "OnComposeResult": ("\u041f\u0440\u0438\u041a\u043e\u043c\u043f\u043e\u043d\u043e\u0432\u043a\u0435\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "8.5", "Report", 31),
+            "ActivationProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0410\u043a\u0442\u0438\u0432\u0438\u0437\u0430\u0446\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0410\u043a\u0442\u0438\u0432\u043d\u044b\u0439\u041e\u0431\u044a\u0435\u043a\u0442, \u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a", "", "", 32),
+            "AfterComposeResult": ("\u041f\u043e\u0441\u043b\u0435\u041a\u043e\u043c\u043f\u043e\u043d\u043e\u0432\u043a\u0438\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0420\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "8.5", "Report", 33),
+            "OnChangeDisplaySettings": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u043e\u0432\u042d\u043a\u0440\u0430\u043d\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "", "", "", 34),
+            "BeforeWriteAtServer": ("\u041f\u0435\u0440\u0435\u0434\u0417\u0430\u043f\u0438\u0441\u044c\u044e\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041e\u0442\u043a\u0430\u0437, \u0422\u0435\u043a\u0443\u0449\u0438\u0439\u041e\u0431\u044a\u0435\u043a\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u0417\u0430\u043f\u0438\u0441\u0438", "", "Document, Catalog, ChartOfCharacteristicTypes, BusinessProcess, Task, InformationRegisterRecord, InformationRegisterRecordSet, Constants, ExchangePlan, ChartOfAccounts, ChartOfCalculationTypes", 35),
+            "OnWriteAtServer": ("\u041f\u0440\u0438\u0417\u0430\u043f\u0438\u0441\u0438\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041e\u0442\u043a\u0430\u0437, \u0422\u0435\u043a\u0443\u0449\u0438\u0439\u041e\u0431\u044a\u0435\u043a\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u0417\u0430\u043f\u0438\u0441\u0438", "", "Document, Catalog, ChartOfCharacteristicTypes, BusinessProcess, Task, InformationRegisterRecord, InformationRegisterRecordSet, Constants, ExchangePlan, ChartOfAccounts, ChartOfCalculationTypes", 36),
+            "OnClose": ("\u041f\u0440\u0438\u0417\u0430\u043a\u0440\u044b\u0442\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0417\u0430\u0432\u0435\u0440\u0448\u0435\u043d\u0438\u0435\u0420\u0430\u0431\u043e\u0442\u044b", "", "", 37),
+            "OnMainServerAvailabilityChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438\u0414\u043e\u0441\u0442\u0443\u043f\u043d\u043e\u0441\u0442\u0438\u041e\u0441\u043d\u043e\u0432\u043d\u043e\u0433\u043e\u0421\u0435\u0440\u0432\u0435\u0440\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 38),
+            "OnUpdateUserSettingSetAtServer": ("\u041f\u0440\u0438\u041e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u0438\u0421\u043e\u0441\u0442\u0430\u0432\u0430\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c\u0441\u043a\u0438\u0445\u041d\u0430\u0441\u0442\u0440\u043e\u0435\u043a\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "Report, SettingsComposer", 39),
+            "URLProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u043e\u0439\u0421\u0441\u044b\u043b\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u0430\u044f\u0421\u0441\u044b\u043b\u043a\u0430\u0424\u043e\u0440\u043c\u0430\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u043e\u0439\u0421\u0442\u0440\u043e\u043a\u0438, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 40),
+            "FillCheckProcessingAtServer": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0438\u0417\u0430\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u044f\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041e\u0442\u043a\u0430\u0437, \u041f\u0440\u043e\u0432\u0435\u0440\u044f\u0435\u043c\u044b\u0435\u0420\u0435\u043a\u0432\u0438\u0437\u0438\u0442\u044b", "", "", 41),
+            "BeforeLoadDataFromSettingsAtServer": ("\u041f\u0435\u0440\u0435\u0434\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u043e\u0439\u0414\u0430\u043d\u043d\u044b\u0445\u0418\u0437\u041d\u0430\u0441\u0442\u0440\u043e\u0435\u043a\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438", "", "", 42),
+            "BeforeExecute": ("\u041f\u0435\u0440\u0435\u0434\u0412\u044b\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u0435\u043c", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u041e\u0442\u043a\u0430\u0437", "", "Task", 43),
+            "AddInDetachmentOnError": ("\u041e\u0442\u043a\u043b\u044e\u0447\u0435\u043d\u0438\u0435\u0412\u043d\u0435\u0448\u043d\u0435\u0439\u041a\u043e\u043c\u043f\u043e\u043d\u0435\u043d\u0442\u044b\u041f\u0440\u0438\u041e\u0448\u0438\u0431\u043a\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u0418\u043c\u044f, \u041c\u0435\u0441\u0442\u043e\u043f\u043e\u043b\u043e\u0436\u0435\u043d\u0438\u0435", "8.3.23", "", 44),
+        },
+        "FormattedDocumentField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "BeforePrint": ("\u041f\u0435\u0440\u0435\u0434\u041f\u0435\u0447\u0430\u0442\u044c\u044e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0414\u0438\u0430\u043b\u043e\u0433\u041f\u0435\u0447\u0430\u0442\u0438, \u041e\u0442\u043a\u0430\u0437", "", "", 1),
+            "AfterWrite": ("\u041f\u043e\u0441\u043b\u0435\u0417\u0430\u043f\u0438\u0441\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 2),
+            "BeforeWrite": ("\u041f\u0435\u0440\u0435\u0434\u0417\u0430\u043f\u0438\u0441\u044c\u044e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435, \u041e\u0442\u043a\u0430\u0437", "", "", 3),
+        },
+        "GanttChartField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "Selection": ("\u0412\u044b\u0431\u043e\u0440", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430, \u0414\u0430\u0442\u0430", "", "", 1),
+            "DetailProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0430, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430, \u0414\u0430\u0442\u0430", "", "", 2),
+            "BeforeCollapse": ("\u041f\u0435\u0440\u0435\u0434\u0421\u0432\u043e\u0440\u0430\u0447\u0438\u0432\u0430\u043d\u0438\u0435\u043c", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0418\u0434\u0435\u043d\u0442\u0438\u0444\u0438\u043a\u0430\u0442\u043e\u0440\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f, \u041e\u0442\u043a\u0430\u0437", "8.3.23", "", 3),
+            "OnActivateInterval": ("\u041f\u0440\u0438\u0410\u043a\u0442\u0438\u0432\u0438\u0437\u0430\u0446\u0438\u0438\u0418\u043d\u0442\u0435\u0440\u0432\u0430\u043b\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "8.3.23", "", 4),
+            "OnActivateValue": ("\u041f\u0440\u0438\u0410\u043a\u0442\u0438\u0432\u0438\u0437\u0430\u0446\u0438\u0438\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "8.3.23", "", 5),
+            "BeforeExpand": ("\u041f\u0435\u0440\u0435\u0434\u0420\u0430\u0437\u0432\u043e\u0440\u0430\u0447\u0438\u0432\u0430\u043d\u0438\u0435\u043c", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0418\u0434\u0435\u043d\u0442\u0438\u0444\u0438\u043a\u0430\u0442\u043e\u0440\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f, \u041e\u0442\u043a\u0430\u0437", "8.3.23", "", 6),
+            "OnIntervalEditEnd": ("\u041f\u0440\u0438\u041e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u0438\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f\u0418\u043d\u0442\u0435\u0440\u0432\u0430\u043b\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0418\u043d\u0442\u0435\u0440\u0432\u0430\u043b, \u041e\u0442\u043c\u0435\u043d\u0430\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f", "", "", 7),
+        },
+        "GeographicalSchemaField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "DetailProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0430, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 1),
+            "BeforePrint": ("\u041f\u0435\u0440\u0435\u0434\u041f\u0435\u0447\u0430\u0442\u044c\u044e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0414\u0438\u0430\u043b\u043e\u0433\u041f\u0435\u0447\u0430\u0442\u0438, \u041e\u0442\u043a\u0430\u0437", "", "", 2),
+        },
+        "GraphicalSchemaField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "Selection": ("\u0412\u044b\u0431\u043e\u0440", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 1),
+            "AfterWrite": ("\u041f\u043e\u0441\u043b\u0435\u0417\u0430\u043f\u0438\u0441\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 2),
+            "OnActivate": ("\u041f\u0440\u0438\u0410\u043a\u0442\u0438\u0432\u0438\u0437\u0430\u0446\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 3),
+            "BeforeWrite": ("\u041f\u0435\u0440\u0435\u0434\u0417\u0430\u043f\u0438\u0441\u044c\u044e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435, \u041e\u0442\u043a\u0430\u0437", "", "", 4),
+            "BeforePrint": ("\u041f\u0435\u0440\u0435\u0434\u041f\u0435\u0447\u0430\u0442\u044c\u044e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0414\u0438\u0430\u043b\u043e\u0433\u041f\u0435\u0447\u0430\u0442\u0438, \u041e\u0442\u043a\u0430\u0437", "", "", 5),
+        },
+        "HTMLDocumentField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "DocumentComplete": ("\u0414\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u0421\u0444\u043e\u0440\u043c\u0438\u0440\u043e\u0432\u0430\u043d", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 1),
+            "BeforeWrite": ("\u041f\u0435\u0440\u0435\u0434\u0417\u0430\u043f\u0438\u0441\u044c\u044e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435, \u041e\u0442\u043a\u0430\u0437", "", "", 2),
+            "BeforePrint": ("\u041f\u0435\u0440\u0435\u0434\u041f\u0435\u0447\u0430\u0442\u044c\u044e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0414\u0438\u0430\u043b\u043e\u0433\u041f\u0435\u0447\u0430\u0442\u0438, \u041e\u0442\u043a\u0430\u0437", "", "", 3),
+            "AfterWrite": ("\u041f\u043e\u0441\u043b\u0435\u0417\u0430\u043f\u0438\u0441\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 4),
+            "OnClick": ("\u041f\u0440\u0438\u041d\u0430\u0436\u0430\u0442\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0414\u0430\u043d\u043d\u044b\u0435\u0421\u043e\u0431\u044b\u0442\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 5),
+        },
+        "InputField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "EditTextChange": ("\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0435\u0422\u0435\u043a\u0441\u0442\u0430\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0422\u0435\u043a\u0441\u0442, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 1),
+            "AutoComplete": ("\u0410\u0432\u0442\u043e\u041f\u043e\u0434\u0431\u043e\u0440", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0422\u0435\u043a\u0441\u0442, \u0414\u0430\u043d\u043d\u044b\u0435\u0412\u044b\u0431\u043e\u0440\u0430, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u043e\u043b\u0443\u0447\u0435\u043d\u0438\u044f\u0414\u0430\u043d\u043d\u044b\u0445, \u041e\u0436\u0438\u0434\u0430\u043d\u0438\u0435, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 2),
+            "StartChoice": ("\u041d\u0430\u0447\u0430\u043b\u043e\u0412\u044b\u0431\u043e\u0440\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", ("8.3.20", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0414\u0430\u043d\u043d\u044b\u0435\u0412\u044b\u0431\u043e\u0440\u0430, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "8.3.23", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0414\u0430\u043d\u043d\u044b\u0435\u0412\u044b\u0431\u043e\u0440\u0430, \u0412\u044b\u0431\u043e\u0440\u0414\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u0438\u0435\u043c, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430"), "", "", 3),
+            "MultipleValueURLProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u043e\u0439\u0421\u0441\u044b\u043b\u043a\u0438\u041c\u043d\u043e\u0436\u0435\u0441\u0442\u0432\u0435\u043d\u043d\u043e\u0433\u043e\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0418\u0434\u0435\u043d\u0442\u0438\u0444\u0438\u043a\u0430\u0442\u043e\u0440, \u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u0430\u044f\u0421\u0441\u044b\u043b\u043a\u0430\u0424\u043e\u0440\u043c\u0430\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u043e\u0439\u0421\u0442\u0440\u043e\u043a\u0438, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "8.3.23", "", 4),
+            "MultipleValuesDelete": ("\u0423\u0434\u0430\u043b\u0435\u043d\u0438\u0435\u041c\u043d\u043e\u0436\u0435\u0441\u0442\u0432\u0435\u043d\u043d\u044b\u0445\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u0439", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0418\u0434\u0435\u043d\u0442\u0438\u0444\u0438\u043a\u0430\u0442\u043e\u0440\u044b, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "8.3.23", "", 5),
+            "Tuning": ("\u0420\u0435\u0433\u0443\u043b\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u0430\u043f\u0440\u0430\u0432\u043b\u0435\u043d\u0438\u0435, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 6),
+            "MultipleValuesAdd": ("\u0414\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u0438\u0435\u041c\u043d\u043e\u0436\u0435\u0441\u0442\u0432\u0435\u043d\u043d\u044b\u0445\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u0439", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "8.3.23", "", 7),
+            "Opening": ("\u041e\u0442\u043a\u0440\u044b\u0442\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 8),
+            "Creating": ("\u0421\u043e\u0437\u0434\u0430\u043d\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 9),
+            "StartListChoice": ("\u041d\u0430\u0447\u0430\u043b\u043e\u0412\u044b\u0431\u043e\u0440\u0430\u0418\u0437\u0421\u043f\u0438\u0441\u043a\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 10),
+            "Clearing": ("\u041e\u0447\u0438\u0441\u0442\u043a\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 11),
+            "TextEditEnd": ("\u041e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u0435\u0412\u0432\u043e\u0434\u0430\u0422\u0435\u043a\u0441\u0442\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0422\u0435\u043a\u0441\u0442, \u0414\u0430\u043d\u043d\u044b\u0435\u0412\u044b\u0431\u043e\u0440\u0430, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u043e\u043b\u0443\u0447\u0435\u043d\u0438\u044f\u0414\u0430\u043d\u043d\u044b\u0445, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 12),
+            "MultipleValueOpening": ("\u041e\u0442\u043a\u0440\u044b\u0442\u0438\u0435\u041c\u043d\u043e\u0436\u0435\u0441\u0442\u0432\u0435\u043d\u043d\u043e\u0433\u043e\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0418\u0434\u0435\u043d\u0442\u0438\u0444\u0438\u043a\u0430\u0442\u043e\u0440, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "8.3.23", "", 13),
+            "ChoiceProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0412\u044b\u0431\u043e\u0440\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", ("8.3.20", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0412\u044b\u0431\u0440\u0430\u043d\u043d\u043e\u0435\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u0435, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "8.3.23", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0412\u044b\u0431\u0440\u0430\u043d\u043d\u043e\u0435\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u0435, \u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435\u0414\u0430\u043d\u043d\u044b\u0435, \u0412\u044b\u0431\u043e\u0440\u0414\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u0438\u0435\u043c, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430"), "", "", 14),
+            "CommandGenerateProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0424\u043e\u0440\u043c\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f\u041a\u043e\u043c\u0430\u043d\u0434", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041a\u043e\u043c\u0430\u043d\u0434, \u041a\u043e\u043c\u0430\u043d\u0434\u044b", "8.3.23", "", 15),
+        },
+        "LabelDecoration": {
+            "Click": ("\u041d\u0430\u0436\u0430\u0442\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "URLProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u043e\u0439\u0421\u0441\u044b\u043b\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u0430\u044f\u0421\u0441\u044b\u043b\u043a\u0430\u0424\u043e\u0440\u043c\u0430\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u043e\u0439\u0421\u0442\u0440\u043e\u043a\u0438, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 1),
+        },
+        "LabelField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "URLProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u043e\u0439\u0421\u0441\u044b\u043b\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u0430\u044f\u0421\u0441\u044b\u043b\u043a\u0430\u0424\u043e\u0440\u043c\u0430\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u043e\u0439\u0421\u0442\u0440\u043e\u043a\u0438, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 1),
+            "Click": ("\u041d\u0430\u0436\u0430\u0442\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 2),
+        },
+        "PDFDocumentField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "8.3.23", "", 0),
+            "URLClick": ("\u041d\u0430\u0436\u0430\u0442\u0438\u0435\u041d\u0430\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u043e\u0439\u0421\u0441\u044b\u043b\u043a\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u0430\u044f\u0421\u0441\u044b\u043b\u043a\u0430, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "8.3.23", "", 1),
+        },
+        "Pages": {
+            "OnCurrentPageChange": ("\u041f\u0440\u0438\u0421\u043c\u0435\u043d\u0435\u0421\u0442\u0440\u0430\u043d\u0438\u0446\u044b", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0422\u0435\u043a\u0443\u0449\u0430\u044f\u0421\u0442\u0440\u0430\u043d\u0438\u0446\u0430", "", "", 0),
+        },
+        "PeriodField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "Selection": ("\u0412\u044b\u0431\u043e\u0440", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0412\u044b\u0431\u0440\u0430\u043d\u043d\u0430\u044f\u0414\u0430\u0442\u0430", "", "", 1),
+        },
+        "PictureDecoration": {
+            "DragCheck": ("\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 0),
+            "DragStart": ("\u041d\u0430\u0447\u0430\u043b\u043e\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0412\u044b\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u0435", "", "", 1),
+            "Drag": ("\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 2),
+            "Click": ("\u041d\u0430\u0436\u0430\u0442\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 3),
+            "DragEnd": ("\u041e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u0435\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 4),
+        },
+        "PictureField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "DragCheck": ("\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 1),
+            "DragStart": ("\u041d\u0430\u0447\u0430\u043b\u043e\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0412\u044b\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u0435", "", "", 2),
+            "Drag": ("\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 3),
+            "Click": ("\u041d\u0430\u0436\u0430\u0442\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 4),
+            "DragEnd": ("\u041e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u0435\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 5),
+        },
+        "PlannerField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "DragCheck": ("\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430, \u0414\u0430\u0442\u0430, \u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f\u0418\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0439", "", "", 1),
+            "BeforeCollapseDimensionItem": ("\u041f\u0435\u0440\u0435\u0434\u0421\u0432\u043e\u0440\u0430\u0447\u0438\u0432\u0430\u043d\u0438\u0435\u043c\u042d\u043b\u0435\u043c\u0435\u043d\u0442\u0430\u0418\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u042d\u043b\u0435\u043c\u0435\u043d\u0442\u0418\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u044f, \u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f\u0418\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0439, \u041e\u0442\u043a\u0430\u0437", "", "", 2),
+            "TimeScaleItemClick": ("\u041d\u0430\u0436\u0430\u0442\u0438\u0435\u041d\u0430\u042d\u043b\u0435\u043c\u0435\u043d\u0442\u0435\u0428\u043a\u0430\u043b\u044b\u0412\u0440\u0435\u043c\u0435\u043d\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u042d\u043b\u0435\u043c\u0435\u043d\u0442\u0428\u043a\u0430\u043b\u044b\u0412\u0440\u0435\u043c\u0435\u043d\u0438, \u0414\u0430\u0442\u0430", "", "", 3),
+            "BeforeCreate": ("\u041f\u0435\u0440\u0435\u0434\u0421\u043e\u0437\u0434\u0430\u043d\u0438\u0435\u043c", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u0430\u0447\u0430\u043b\u043e, \u041a\u043e\u043d\u0435\u0446, \u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f\u0418\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0439, \u0422\u0435\u043a\u0441\u0442, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 4),
+            "InsideDragCheck": ("\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f\u0412\u043d\u0443\u0442\u0440\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0412\u0430\u0440\u0438\u0430\u043d\u0442\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f\u0413\u0440\u0430\u043d\u0438\u0446, \u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u041e\u0442\u043a\u0430\u0437", "", "", 5),
+            "BeforePrint": ("\u041f\u0435\u0440\u0435\u0434\u041f\u0435\u0447\u0430\u0442\u044c\u044e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0414\u0438\u0430\u043b\u043e\u0433\u041f\u0435\u0447\u0430\u0442\u0438, \u041e\u0442\u043a\u0430\u0437", "", "", 6),
+            "DimensionItemClick": ("\u041d\u0430\u0436\u0430\u0442\u0438\u0435\u041d\u0430\u042d\u043b\u0435\u043c\u0435\u043d\u0442\u0435\u0418\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u042d\u043b\u0435\u043c\u0435\u043d\u0442\u0418\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u044f, \u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f\u0418\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0439, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 7),
+            "OnCurrentRepresentationPeriodChange": ("\u041f\u0440\u0438\u0421\u043c\u0435\u043d\u0435\u0422\u0435\u043a\u0443\u0449\u0435\u0433\u043e\u041f\u0435\u0440\u0438\u043e\u0434\u0430\u041e\u0442\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0422\u0435\u043a\u0443\u0449\u0438\u0435\u041f\u0435\u0440\u0438\u043e\u0434\u044b\u041e\u0442\u043e\u0431\u0440\u0430\u0436\u0435\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 8),
+            "OnEditEnd": ("\u041f\u0440\u0438\u041e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u0438\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u043e\u0432\u044b\u0439\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041e\u0442\u043c\u0435\u043d\u0430\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f", "", "", 9),
+            "WrappedTimeScaleHeaderClick": ("\u041d\u0430\u0436\u0430\u0442\u0438\u0435\u041d\u0430\u041f\u0435\u0440\u0435\u043d\u0435\u0441\u0435\u043d\u043d\u043e\u043c\u0417\u0430\u0433\u043e\u043b\u043e\u0432\u043a\u0435\u0428\u043a\u0430\u043b\u044b\u0412\u0440\u0435\u043c\u0435\u043d\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0414\u0430\u0442\u0430", "", "", 10),
+            "DragStart": ("\u041d\u0430\u0447\u0430\u043b\u043e\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0412\u044b\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u0435", "", "", 11),
+            "BeforeDelete": ("\u041f\u0435\u0440\u0435\u0434\u0423\u0434\u0430\u043b\u0435\u043d\u0438\u0435\u043c", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041e\u0442\u043a\u0430\u0437", "", "", 12),
+            "BeforeExpandDimensionItem": ("\u041f\u0435\u0440\u0435\u0434\u0420\u0430\u0437\u0432\u043e\u0440\u0430\u0447\u0438\u0432\u0430\u043d\u0438\u0435\u043c\u042d\u043b\u0435\u043c\u0435\u043d\u0442\u0430\u0418\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u042d\u043b\u0435\u043c\u0435\u043d\u0442\u0418\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u044f, \u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f\u0418\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0439, \u041e\u0442\u043a\u0430\u0437", "", "", 13),
+            "BeforeStartEdit": ("\u041f\u0435\u0440\u0435\u0434\u041d\u0430\u0447\u0430\u043b\u043e\u043c\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u043e\u0432\u044b\u0439\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 14),
+            "Drag": ("\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430, \u0414\u0430\u0442\u0430, \u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f\u0418\u0437\u043c\u0435\u0440\u0435\u043d\u0438\u0439", "", "", 15),
+            "CommandGenerateProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0424\u043e\u0440\u043c\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f\u041a\u043e\u043c\u0430\u043d\u0434", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", ("8.3.20", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b, \u041a\u043e\u043c\u0430\u043d\u0434\u044b, \u041a\u043e\u043c\u0430\u043d\u0434\u0430\u041f\u043e\u0423\u043c\u043e\u043b\u0447\u0430\u043d\u0438\u044e", "8.3.23", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041a\u043e\u043c\u0430\u043d\u0434, \u041a\u043e\u043c\u0430\u043d\u0434\u044b, \u041a\u043e\u043c\u0430\u043d\u0434\u0430\u041f\u043e\u0423\u043c\u043e\u043b\u0447\u0430\u043d\u0438\u044e"), "", "", 16),
+            "BeforeStartQuickEdit": ("\u041f\u0435\u0440\u0435\u0434\u041d\u0430\u0447\u0430\u043b\u043e\u043c\u0411\u044b\u0441\u0442\u0440\u043e\u0433\u043e\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 17),
+            "Selection": ("\u0412\u044b\u0431\u043e\u0440", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 18),
+            "OnActivate": ("\u041f\u0440\u0438\u0410\u043a\u0442\u0438\u0432\u0438\u0437\u0430\u0446\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 19),
+            "URLClick": ("\u041d\u0430\u0436\u0430\u0442\u0438\u0435\u041d\u0430\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u043e\u0439\u0421\u0441\u044b\u043b\u043a\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a, \u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u0430\u044f\u0421\u0441\u044b\u043b\u043a\u0430\u0424\u043e\u0440\u043c\u0430\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u043e\u0439\u0421\u0442\u0440\u043e\u043a\u0438, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 20),
+            "DragEnd": ("\u041e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u0435\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 21),
+            "PlannerActionClick": ("\u041d\u0430\u0436\u0430\u0442\u0438\u0435\u041d\u0430\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435\u041f\u043b\u0430\u043d\u0438\u0440\u043e\u0432\u0449\u0438\u043a\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u042d\u043b\u0435\u043c\u0435\u043d\u0442\u041f\u043b\u0430\u043d\u0438\u0440\u043e\u0432\u0449\u0438\u043a\u0430, \u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0435\u042d\u043b\u0435\u043c\u0435\u043d\u0442\u0430\u041f\u043b\u0430\u043d\u0438\u0440\u043e\u0432\u0449\u0438\u043a\u0430", "", "", 22),
+        },
+        "ProgressBarField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+        },
+        "RadioButtonField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+        },
+        "SpreadSheetDocumentField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "URLProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u043e\u0439\u0421\u0441\u044b\u043b\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u0430\u044f\u0421\u0441\u044b\u043b\u043a\u0430\u0424\u043e\u0440\u043c\u0430\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u043d\u043e\u0439\u0421\u0442\u0440\u043e\u043a\u0438, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "8.3.24", "", 1),
+            "AdditionalDetailProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u043e\u0439\u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", ("8.3.20", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0430, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430, \u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b", "8.5", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0430, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430, \u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b, \u0412\u0441\u0435\u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0438\u041e\u0431\u043b\u0430\u0441\u0442\u0438, \u0414\u043b\u044f\u041f\u0430\u043d\u0435\u043b\u0438\u0414\u0435\u0439\u0441\u0442\u0432\u0438\u0439"), "", "", 2),
+            "DragCheck": ("\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430, \u041e\u0431\u043b\u0430\u0441\u0442\u044c", "", "", 3),
+            "OnActivate": ("\u041f\u0440\u0438\u0410\u043a\u0442\u0438\u0432\u0438\u0437\u0430\u0446\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 4),
+            "Selection": ("\u0412\u044b\u0431\u043e\u0440", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041e\u0431\u043b\u0430\u0441\u0442\u044c, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 5),
+            "DetailProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0420\u0430\u0441\u0448\u0438\u0444\u0440\u043e\u0432\u043a\u0430, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430, \u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b", "", "", 6),
+            "OnChangeAreaContent": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438\u0421\u043e\u0434\u0435\u0440\u0436\u0438\u043c\u043e\u0433\u043e\u041e\u0431\u043b\u0430\u0441\u0442\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041e\u0431\u043b\u0430\u0441\u0442\u044c, \u0414\u043e\u043f\u043e\u043b\u043d\u0438\u0442\u0435\u043b\u044c\u043d\u044b\u0435\u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b", "", "", 7),
+            "BeforePrint": ("\u041f\u0435\u0440\u0435\u0434\u041f\u0435\u0447\u0430\u0442\u044c\u044e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0414\u0438\u0430\u043b\u043e\u0433\u041f\u0435\u0447\u0430\u0442\u0438, \u041e\u0442\u043a\u0430\u0437", "", "", 8),
+            "DragStart": ("\u041d\u0430\u0447\u0430\u043b\u043e\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0412\u044b\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u0435", "", "", 9),
+            "Drag": ("\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430, \u041e\u0431\u043b\u0430\u0441\u0442\u044c", "", "", 10),
+            "AfterWrite": ("\u041f\u043e\u0441\u043b\u0435\u0417\u0430\u043f\u0438\u0441\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 11),
+            "BeforeWrite": ("\u041f\u0435\u0440\u0435\u0434\u0417\u0430\u043f\u0438\u0441\u044c\u044e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435, \u041e\u0442\u043a\u0430\u0437", "", "", 12),
+            "OnGenerateToolTipText": ("\u041f\u0440\u0438\u0424\u043e\u0440\u043c\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0438\u0422\u0435\u043a\u0441\u0442\u0430\u041f\u043e\u0434\u0441\u043a\u0430\u0437\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041e\u0431\u043b\u0430\u0441\u0442\u044c, \u0422\u0435\u043a\u0441\u0442\u041f\u043e\u0434\u0441\u043a\u0430\u0437\u043a\u0438, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "8.5", "", 13),
+            "DragEnd": ("\u041e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u0435\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 14),
+        },
+        "Table": {
+            "OnEditEnd": ("\u041f\u0440\u0438\u041e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u0438\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u043e\u0432\u0430\u044f\u0421\u0442\u0440\u043e\u043a\u0430, \u041e\u0442\u043c\u0435\u043d\u0430\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f", "", "", 0),
+            "DragCheck": ("\u041f\u0440\u043e\u0432\u0435\u0440\u043a\u0430\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430, \u0421\u0442\u0440\u043e\u043a\u0430, \u041f\u043e\u043b\u0435", "", "", 1),
+            "ValueChoice": ("\u0412\u044b\u0431\u043e\u0440\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0417\u043d\u0430\u0447\u0435\u043d\u0438\u0435, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 2),
+            "Selection": ("\u0412\u044b\u0431\u043e\u0440", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0412\u044b\u0431\u0440\u0430\u043d\u043d\u0430\u044f\u0421\u0442\u0440\u043e\u043a\u0430, \u041f\u043e\u043b\u0435, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 3),
+            "OnSelectedRowsSetChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438\u0421\u043e\u0441\u0442\u0430\u0432\u0430\u0412\u044b\u0434\u0435\u043b\u0435\u043d\u043d\u044b\u0445\u0421\u0442\u0440\u043e\u043a", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "8.5", "", 4),
+            "BeforeAddRow": ("\u041f\u0435\u0440\u0435\u0434\u041d\u0430\u0447\u0430\u043b\u043e\u043c\u0414\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041e\u0442\u043a\u0430\u0437, \u041a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435, \u0420\u043e\u0434\u0438\u0442\u0435\u043b\u044c, \u042d\u0442\u043e\u0413\u0440\u0443\u043f\u043f\u0430, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440", "", "", 5),
+            "OnCurrentParentChange": ("\u041f\u0440\u0438\u0421\u043c\u0435\u043d\u0435\u0422\u0435\u043a\u0443\u0449\u0435\u0433\u043e\u0420\u043e\u0434\u0438\u0442\u0435\u043b\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 6),
+            "BeforeDeleteRow": ("\u041f\u0435\u0440\u0435\u0434\u0423\u0434\u0430\u043b\u0435\u043d\u0438\u0435\u043c", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041e\u0442\u043a\u0430\u0437", "", "", 7),
+            "OnLoadUserSettingsAtServer": ("\u041f\u0440\u0438\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u0435\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c\u0441\u043a\u0438\u0445\u041d\u0430\u0441\u0442\u0440\u043e\u0435\u043a\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438, \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u044e\u0442\u0441\u044f\u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u044b\u0435\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438", "", "DynamicList", 8),
+            "URLListGetProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041f\u043e\u043b\u0443\u0447\u0435\u043d\u0438\u044f\u0421\u043f\u0438\u0441\u043a\u0430\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u044b\u0445\u0421\u0441\u044b\u043b\u043e\u043a", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0421\u043f\u0438\u0441\u043e\u043a\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u044b\u0445\u0421\u0441\u044b\u043b\u043e\u043a, \u041a\u043b\u044e\u0447\u041f\u043e\u0423\u043c\u043e\u043b\u0447\u0430\u043d\u0438\u044e", "8.3.23", "DynamicList", 9),
+            "BeforeEditEnd": ("\u041f\u0435\u0440\u0435\u0434\u041e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u0435\u043c\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u043e\u0432\u0430\u044f\u0421\u0442\u0440\u043e\u043a\u0430, \u041e\u0442\u043c\u0435\u043d\u0430\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f, \u041e\u0442\u043a\u0430\u0437", "", "", 10),
+            "OnActivateRow": ("\u041f\u0440\u0438\u0410\u043a\u0442\u0438\u0432\u0438\u0437\u0430\u0446\u0438\u0438\u0421\u0442\u0440\u043e\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 11),
+            "URLGetProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u041f\u043e\u043b\u0443\u0447\u0435\u043d\u0438\u044f\u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u043e\u0439\u0421\u0441\u044b\u043b\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041a\u043b\u044e\u0447, \u041f\u0440\u0435\u0434\u0441\u0442\u0430\u0432\u043b\u0435\u043d\u0438\u0435, \u041d\u0430\u0432\u0438\u0433\u0430\u0446\u0438\u043e\u043d\u043d\u0430\u044f\u0421\u0441\u044b\u043b\u043a\u0430, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "8.3.23", "DynamicList", 12),
+            "DragStart": ("\u041d\u0430\u0447\u0430\u043b\u043e\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0412\u044b\u043f\u043e\u043b\u043d\u0435\u043d\u0438\u0435", "", "", 13),
+            "OnActivateField": ("\u041f\u0440\u0438\u0410\u043a\u0442\u0438\u0432\u0438\u0437\u0430\u0446\u0438\u0438\u041f\u043e\u043b\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 14),
+            "BeforeExpand": ("\u041f\u0435\u0440\u0435\u0434\u0420\u0430\u0437\u0432\u043e\u0440\u0430\u0447\u0438\u0432\u0430\u043d\u0438\u0435\u043c", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0421\u0442\u0440\u043e\u043a\u0430, \u041e\u0442\u043a\u0430\u0437", "", "", 15),
+            "Drag": ("\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430, \u0421\u0442\u0440\u043e\u043a\u0430, \u041f\u043e\u043b\u0435", "", "", 16),
+            "ChoiceProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0412\u044b\u0431\u043e\u0440\u0430", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0412\u044b\u0431\u0440\u0430\u043d\u043d\u043e\u0435\u0417\u043d\u0430\u0447\u0435\u043d\u0438\u0435, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 17),
+            "OnGetDataAtServer": ("\u041f\u0440\u0438\u041f\u043e\u043b\u0443\u0447\u0435\u043d\u0438\u0438\u0414\u0430\u043d\u043d\u044b\u0445\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435\u0411\u0435\u0437\u041a\u043e\u043d\u0442\u0435\u043a\u0441\u0442\u0430", "\u0418\u043c\u044f\u042d\u043b\u0435\u043c\u0435\u043d\u0442\u0430, \u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438, \u0421\u0442\u0440\u043e\u043a\u0438", "", "DynamicList", 18),
+            "OnSaveUserSettingsAtServer": ("\u041f\u0440\u0438\u0421\u043e\u0445\u0440\u0430\u043d\u0435\u043d\u0438\u0438\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c\u0441\u043a\u0438\u0445\u041d\u0430\u0441\u0442\u0440\u043e\u0435\u043a\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438", "", "DynamicList", 19),
+            "BeforeCollapse": ("\u041f\u0435\u0440\u0435\u0434\u0421\u0432\u043e\u0440\u0430\u0447\u0438\u0432\u0430\u043d\u0438\u0435\u043c", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0421\u0442\u0440\u043e\u043a\u0430, \u041e\u0442\u043a\u0430\u0437", "", "", 20),
+            "BeforeRowChange": ("\u041f\u0435\u0440\u0435\u0434\u041d\u0430\u0447\u0430\u043b\u043e\u043c\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041e\u0442\u043a\u0430\u0437", "", "", 21),
+            "OnStartEdit": ("\u041f\u0440\u0438\u041d\u0430\u0447\u0430\u043b\u0435\u0420\u0435\u0434\u0430\u043a\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u043e\u0432\u0430\u044f\u0421\u0442\u0440\u043e\u043a\u0430, \u041a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435", "", "", 22),
+            "BeforeLoadUserSettingsAtServer": ("\u041f\u0435\u0440\u0435\u0434\u0417\u0430\u0433\u0440\u0443\u0437\u043a\u043e\u0439\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c\u0441\u043a\u0438\u0445\u041d\u0430\u0441\u0442\u0440\u043e\u0435\u043a\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438, \u0418\u0441\u043f\u043e\u043b\u044c\u0437\u0443\u044e\u0442\u0441\u044f\u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u044b\u0435\u041d\u0430\u0441\u0442\u0440\u043e\u0439\u043a\u0438", "", "DynamicList", 23),
+            "OnHover": ("\u041f\u0440\u0438\u041d\u0430\u0432\u0435\u0434\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0421\u0442\u0440\u043e\u043a\u0430, \u041f\u043e\u043b\u0435", "8.5", "", 24),
+            "DragEnd": ("\u041e\u043a\u043e\u043d\u0447\u0430\u043d\u0438\u0435\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041f\u0430\u0440\u0430\u043c\u0435\u0442\u0440\u044b\u041f\u0435\u0440\u0435\u0442\u0430\u0441\u043a\u0438\u0432\u0430\u043d\u0438\u044f, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 25),
+            "NewWriteProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0417\u0430\u043f\u0438\u0441\u0438\u041d\u043e\u0432\u043e\u0433\u043e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u041d\u043e\u0432\u044b\u0439\u041e\u0431\u044a\u0435\u043a\u0442, \u0418\u0441\u0442\u043e\u0447\u043d\u0438\u043a, \u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "", 26),
+            "AfterDeleteRow": ("\u041f\u043e\u0441\u043b\u0435\u0423\u0434\u0430\u043b\u0435\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 27),
+            "OnUpdateUserSettingSetAtServer": ("\u041f\u0440\u0438\u041e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u0438\u0421\u043e\u0441\u0442\u0430\u0432\u0430\u041f\u043e\u043b\u044c\u0437\u043e\u0432\u0430\u0442\u0435\u043b\u044c\u0441\u043a\u0438\u0445\u041d\u0430\u0441\u0442\u0440\u043e\u0435\u043a\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u041d\u0430\u0421\u0435\u0440\u0432\u0435\u0440\u0435", "\u0421\u0442\u0430\u043d\u0434\u0430\u0440\u0442\u043d\u0430\u044f\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430", "", "DynamicList", 28),
+            "OnActivateCell": ("\u041f\u0440\u0438\u0410\u043a\u0442\u0438\u0432\u0438\u0437\u0430\u0446\u0438\u0438\u042f\u0447\u0435\u0439\u043a\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 29),
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 30),
+            "RefreshRequestProcessing": ("\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u043a\u0430\u0417\u0430\u043f\u0440\u043e\u0441\u0430\u041e\u0431\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u044f", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "", "", "", 31),
+        },
+        "TextDocumentField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+            "BeforePrint": ("\u041f\u0435\u0440\u0435\u0434\u041f\u0435\u0447\u0430\u0442\u044c\u044e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u0414\u0438\u0430\u043b\u043e\u0433\u041f\u0435\u0447\u0430\u0442\u0438, \u041e\u0442\u043a\u0430\u0437", "", "", 1),
+            "BeforeWrite": ("\u041f\u0435\u0440\u0435\u0434\u0417\u0430\u043f\u0438\u0441\u044c\u044e", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442, \u041a\u043e\u043f\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435, \u041e\u0442\u043a\u0430\u0437", "", "", 2),
+            "AfterWrite": ("\u041f\u043e\u0441\u043b\u0435\u0417\u0430\u043f\u0438\u0441\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 3),
+        },
+        "TrackBarField": {
+            "OnChange": ("\u041f\u0440\u0438\u0418\u0437\u043c\u0435\u043d\u0435\u043d\u0438\u0438", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "", "", 0),
+        },
+        "UsualGroup": {
+            "Click": ("\u041d\u0430\u0436\u0430\u0442\u0438\u0435", "\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435", "\u042d\u043b\u0435\u043c\u0435\u043d\u0442", "8.5", "", 0),
+        },
+    }
+
+
+# Form event order of the owners whose order differs from the catalog positions
+def get_form_event_order():
+    return {
+        "Document": ["AfterWrite", "BeforeReopenFromOtherServer", "ValueChoice", "OnReopenFromOtherServer", "OnSaveDataInSettingsAtServer", "ChoiceProcessing", "AfterWriteAtServer", "OnPasteFromClipboard", "NotificationProcessing", "OnReadAtServer", "NewWriteProcessing", "OnOpen", "URLListGetProcessing", "BeforeClose", "ExternalEvent", "CollaborationSystemUsersAutoComplete", "URLGetProcessing", "OnReopen", "OnLoadDataFromSettingsAtServer", "BeforeWrite", "BeforeWriteAtServer", "NavigationProcessing", "OnCreateAtServer", "CollaborationSystemUsersChoiceFormGetProcessing", "ActivationProcessing", "OnChangeDisplaySettings", "OnWriteAtServer", "OnClose", "OnMainServerAvailabilityChange", "URLProcessing", "FillCheckProcessingAtServer", "BeforeLoadDataFromSettingsAtServer", "AddInDetachmentOnError"],
+    }
+# --- конец каталога событий формы ---
+EVENT_CATALOG = get_form_event_catalog()
+FORM_EVENT_ORDER = get_form_event_order()
+def detect_format_version(d):
+    while d:
+        # Автономная внешняя обработка/отчёт: своего Configuration.xml у неё нет, версию несёт
+        # корень самой обработки. Без этого форма и макет внутри обработки 2.21 писались бы 2.17.
+        ext_path = d + ".xml"
+        if os.path.isfile(ext_path):
+            with open(ext_path, "r", encoding="utf-8-sig") as f:
+                ext_head = f.read(2000)
+            if re.search(r'<(ExternalDataProcessor|ExternalReport)[ >]', ext_head):
+                m = re.search(r'<MetaDataObject[^>]+version="(\d+\.\d+)"', ext_head)
+                if m:
+                    return m.group(1)
+        cfg_path = os.path.join(d, "Configuration.xml")
+        if os.path.isfile(cfg_path):
+            with open(cfg_path, "r", encoding="utf-8-sig") as f:
+                head = f.read(2000)
+            m = re.search(r'<MetaDataObject[^>]+version="(\d+\.\d+)"', head)
+            if m:
+                return m.group(1)
+        parent = os.path.dirname(d)
+        if parent == d:
+            break
+        d = parent
+    return "2.17"
+
+
+# Form format version: an event of a newer platform in an older-format form gets a warning.
+# No version attribute — as in form-compile: from the configuration, else 2.17.
+_format_version = root.get('version') or detect_format_version(os.path.dirname(resolved_form_path))
+
+
+def get_event_entry(xml_tag, event_name):
+    if not xml_tag or xml_tag not in EVENT_CATALOG:
+        return None
+    return EVENT_CATALOG[xml_tag].get(event_name)
+
+
+# Расстояние Левенштейна — для подсказки к неизвестному событию.
+def get_edit_distance(a, b):
+    prev = list(range(len(b) + 1))
+    for i in range(1, len(a) + 1):
+        cur = [i] + [0] * len(b)
+        for j in range(1, len(b) + 1):
+            cost = 0 if a[i - 1] == b[j - 1] else 1
+            cur[j] = min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + cost)
+        prev = cur
+    return prev[len(b)]
+
+
+# Подсказка к неизвестному событию: ближайшие по написанию события вида элемента и виды, у которых такое событие есть.
+def get_event_hint(xml_tag, name):
+    parts = []
+    evs = EVENT_CATALOG.get(xml_tag)
+    if evs:
+        lim = max(2, len(name) // 3)
+        near = sorted('{:03d}|{}'.format(d, k) for k in evs
+                      for d in [get_edit_distance(name.lower(), k.lower())] if d <= lim)
+        if near:
+            parts.append('Did you mean: ' + ', '.join(x.split('|')[1] for x in near[:3]) + '?')
+    tags = sorted(t for t in EVENT_CATALOG if t != xml_tag and get_event_entry(t, name) is not None)
+    if tags:
+        parts.append(f"'{name}' is an event of: {', '.join(tags)}.")
+    return ' '.join(parts)
+
+
+# Позиция события в <Events>: платформа пишет события в порядке каталога (у формы — в порядке владельца,
+# если он у владельца свой), внутри события — Before, затем After. Событие вне каталога — после известных.
+def get_event_rank(xml_tag, name, call_type=''):
+    ct = {'After': 1, 'Override': 2}.get(call_type or '', 0)
+    pos = 2 ** 31 - 1
+    own = FORM_EVENT_ORDER.get(_form_owner) if xml_tag == 'Form' and _form_owner else None
+    if own is not None:
+        if name in own:
+            pos = own.index(name)
+    else:
+        e = get_event_entry(xml_tag, name)
+        if e:
+            pos = e[5]
+    return pos * 4 + ct
+
+def test_event_pairs(pairs, xml_tag, element_name, source=''):
+    what = 'the form' if xml_tag == 'Form' else f"{xml_tag} '{element_name}'"
+    evs = EVENT_CATALOG.get(xml_tag)
+    for ev, _, _ in pairs:
+        ev = str(ev)
+        entry = get_event_entry(xml_tag, ev) if evs else None
+        if not entry:
+            # сводкой перед записью формы (report_unknown_events): модель исправит все сразу
+            _unknown_events.append({'tag': xml_tag, 'name': element_name, 'ev': ev, 'noEvents': not evs})
+            continue
+        since = entry[3]
+        if since and format_rank(_format_version) < PLATFORM_FORMAT_RANK.get(since, 0):
+            print(f"[WARN] Event '{ev}' of {what} exists since platform {since} — earlier platforms drop it on load")
+        only = entry[4]
+        if only and xml_tag == 'Form':
+            if _form_owner and _form_owner not in [x.strip() for x in only.split(',')]:
+                print(f"[WARN] Event '{ev}' of {what} exists only for forms of {only} (this form: {_form_owner}) — the platform drops it on load")
+        elif only and source and source.lower() != only.lower():
+            print(f"[WARN] Event '{ev}' of {what} exists only for a table bound to {only} (bound to {source}) — the platform drops it on load")
+
+# Владелец формы по типу основного реквизита — как в ограничениях каталога событий ("" — не определить
+# или вид не замерен: события формы по владельцу тогда не сверяются).
+_FORM_OWNER_KINDS = {
+    'DataProcessorObject': 'DataProcessor', 'ExternalDataProcessorObject': 'DataProcessor',
+    'ReportObject': 'Report', 'ExternalReportObject': 'Report', 'DocumentObject': 'Document',
+    'CatalogObject': 'Catalog', 'ChartOfCharacteristicTypesObject': 'ChartOfCharacteristicTypes',
+    'ExchangePlanObject': 'ExchangePlan', 'ChartOfAccountsObject': 'ChartOfAccounts',
+    'ChartOfCalculationTypesObject': 'ChartOfCalculationTypes',
+    'BusinessProcessObject': 'BusinessProcess', 'TaskObject': 'Task',
+    'InformationRegisterRecordManager': 'InformationRegisterRecord',
+    'InformationRegisterRecordSet': 'InformationRegisterRecordSet', 'ConstantsSet': 'Constants',
+    'DynamicList': 'List',
 }
 
-KNOWN_EVENTS = {
-    "input": ["OnChange", "StartChoice", "ChoiceProcessing", "AutoComplete", "TextEditEnd", "Clearing", "Creating", "EditTextChange"],
-    "check": ["OnChange"],
-    "radio": ["OnChange"],
-    "label": ["Click", "URLProcessing"],
-    "labelField": ["OnChange", "StartChoice", "ChoiceProcessing", "Click", "URLProcessing", "Clearing"],
-    "table": ["Selection", "BeforeAddRow", "AfterDeleteRow", "BeforeDeleteRow", "OnActivateRow", "OnEditEnd", "OnStartEdit", "BeforeRowChange", "BeforeEditEnd", "ValueChoice", "OnActivateCell", "OnActivateField", "Drag", "DragStart", "DragCheck", "DragEnd", "OnGetDataAtServer", "BeforeLoadUserSettingsAtServer", "OnUpdateUserSettingSetAtServer", "OnChange"],
-    "pages": ["OnCurrentPageChange"],
-    "page": ["OnCurrentPageChange"],
-    "button": ["Click"],
-    "picField": ["OnChange", "StartChoice", "ChoiceProcessing", "Click", "Clearing"],
-    "calendar": ["OnChange", "OnActivate"],
-    "picture": ["Click"],
-    "cmdBar": [],
-    "popup": [],
-    "group": [],
-}
+# Сводка неизвестных событий за запуск — одним блоком перед записью формы. Формы ветки 8.3 — ошибка (форма не
+# пишется), 8.5 — предупреждение. Перечень событий вида — только если подсказать нечего, один раз на вид.
+def report_unknown_events():
+    if not _unknown_events:
+        return
+    # одно событие у нескольких элементов вида — одной строкой (одна и та же опечатка — одно исправление)
+    groups = {}
+    for u in _unknown_events:
+        g = groups.setdefault((u['tag'], u['ev']), {'u': u, 'names': []})
+        if u['name'] and u['name'] not in g['names']:
+            g['names'].append(u['name'])
+    lines, known_tags = [], []
+    for g in groups.values():
+        u = g['u']
+        where = 'the form' if u['tag'] == 'Form' else f"{u['tag']} " + ', '.join(f"'{n}'" for n in g['names'])
+        hint = get_event_hint(u['tag'], u['ev'])
+        line = f"  '{u['ev']}' for {where}"
+        if u['noEvents']:
+            line += f" — {u['tag']} has no events." + (f" {hint}" if hint else '')
+        elif hint:
+            line += f" — {hint}"
+        elif u['tag'] not in known_tags:
+            known_tags.append(u['tag'])
+        lines.append(line)
+    for t in known_tags:
+        lines.append(f"  Events of {t}: {', '.join(sorted(EVENT_CATALOG[t]))}")
+    if format_rank(_format_version) <= EVENT_CATALOG_CLOSED_RANK:
+        print('[ERROR] Unknown events — the platform drops them on load; the form is not written:\n' + '\n'.join(lines), file=sys.stderr)
+        sys.exit(1)
+    print('[WARN] Unknown events — the platform drops them on load (8.5 builds may add events):\n' + '\n'.join(lines))
 
-KNOWN_FORM_EVENTS = [
-    "OnCreateAtServer", "OnOpen", "BeforeClose", "OnClose", "NotificationProcessing",
-    "ChoiceProcessing", "OnReadAtServer", "AfterWriteAtServer", "BeforeWriteAtServer",
-    "AfterWrite", "BeforeWrite", "OnWriteAtServer", "FillCheckProcessingAtServer",
-    "OnLoadDataFromSettingsAtServer", "BeforeLoadDataFromSettingsAtServer",
-    "OnSaveDataInSettingsAtServer", "ExternalEvent", "OnReopen", "Opening",
-]
+
+def get_form_owner_kind(type_str):
+    t = re.sub(r'^\w+:(?=\w)', '', str(type_str or ''))
+    if t.lower() == 'settingscomposer':
+        return 'SettingsComposer'
+    k = t.split('.')[0].lower()
+    return next((v for n, v in _FORM_OWNER_KINDS.items() if n.lower() == k), '')
+
+
+# Владелец формы — по основному реквизиту в Form.xml. Считается перед сверкой событий формы:
+# реквизиты правятся раньше событий, и основной реквизит мог появиться или смениться в этом же вызове.
+_form_owner = ''
+
+
+def update_form_owner():
+    global _form_owner
+    _form_owner = ''
+    for _a in root.findall('f:Attributes/f:Attribute', NS):
+        _ma = _a.find('f:MainAttribute', NS)
+        if _ma is not None and (_ma.text or '').strip() == 'true':
+            _tn = _a.find('f:Type/v8:Type', NS)
+            if _tn is not None:
+                _form_owner = get_form_owner_kind(_tn.text)
+            break
+
+
+def warn_events_ignored(el, xml_tag, element_name):
+    events = el.get('events')
+    on = el.get('on')
+    lst = list(on if isinstance(on, list) else ([] if on is None else [on]))
+    if isinstance(events, list):
+        names, lst = [], list(events) + lst
+    elif isinstance(events, dict):
+        names = list(events.keys())
+    else:
+        names = [str(events)] if events else []
+    for evt in lst:
+        if evt is not None:
+            names.append(str(evt.get('event', '')) if isinstance(evt, dict) else str(evt))
+    if names:
+        print(f"[WARN] {xml_tag} '{element_name}' has no events — ignored: {', '.join(names)}")
+
+
+# First XML format version of the platform where a catalog event appeared.
+PLATFORM_FORMAT_RANK = {"8.3.20": 213, "8.3.23": 216, "8.3.24": 217, "8.3.25": 218, "8.3.26": 219, "8.3.27": 220, "8.5": 221}
+# Каталог событий полон по формат 2.20 включительно (ветка 8.3 закрыта): неизвестное событие — ошибка; выше — предупреждение
+EVENT_CATALOG_CLOSED_RANK = 220
+_unknown_events = []
+
+# --- Заготовки обработчиков в модуле формы ---
+# Привязки, которые затронул запуск, собираются в _handler_bindings; после записи Form.xml
+# update_form_module дописывает в модуль процедуры, которых там ещё нет, — в области по стандарту БСП.
+_handler_bindings = []
+# таблица, колонки которой сейчас эмитятся
+_handler_table = {'name': ''}
+
+
+# kind: form | element | command; table — таблица, внутри которой элемент (область «…ТаблицыФормы<Имя>»).
+# Одно имя на несколько событий — одна процедура: сигнатуру даёт первая привязка.
+def register_handler(handler, kind, xml_tag='', event_name='', table=''):
+    if not handler:
+        return
+    for b in _handler_bindings:
+        if b['handler'].lower() == handler.lower():
+            return
+    _handler_bindings.append({'handler': handler, 'kind': kind, 'xmlTag': xml_tag, 'eventName': event_name, 'table': table or ''})
+
+
+# Пустой модуль формы. Табличных областей нет: имя таблицы при создании формы неизвестно.
+def get_form_module_template():
+    out = []
+    for r in ('\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u0421\u043e\u0431\u044b\u0442\u0438\u0439\u0424\u043e\u0440\u043c\u044b',
+              '\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u0421\u043e\u0431\u044b\u0442\u0438\u0439\u042d\u043b\u0435\u043c\u0435\u043d\u0442\u043e\u0432\u0428\u0430\u043f\u043a\u0438\u0424\u043e\u0440\u043c\u044b',
+              '\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u041a\u043e\u043c\u0430\u043d\u0434\u0424\u043e\u0440\u043c\u044b',
+              '\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u041e\u043f\u043e\u0432\u0435\u0449\u0435\u043d\u0438\u0439',
+              '\u0421\u043b\u0443\u0436\u0435\u0431\u043d\u044b\u0435\u041f\u0440\u043e\u0446\u0435\u0434\u0443\u0440\u044b\u0418\u0424\u0443\u043d\u043a\u0446\u0438\u0438'):
+        if out:
+            out.append('')
+        out += [f'#\u041e\u0431\u043b\u0430\u0441\u0442\u044c {r}', '', '#\u041a\u043e\u043d\u0435\u0446\u041e\u0431\u043b\u0430\u0441\u0442\u0438']
+    return out
+
+
+# Процедуры и функции модуля (имя, первая и последняя строка; первая — с аннотациями над заголовком)
+# и области (имя, строки #Область и #КонецОбласти, вложенность). Строки нумеруются с 1.
+# Заголовок — только в начале строки: продолжение литерала («|…») и комментарий заголовком не станут.
+def get_module_outline(lines):
+    procs, regions, opened = [], [], []
+    cur = None
+    for i, l in enumerate(lines):
+        if cur is not None:
+            # \u043a\u043e\u043d\u0435\u0446 \u043f\u0440\u043e\u0446\u0435\u0434\u0443\u0440\u044b \u2014 \u0432 \u043d\u0430\u0447\u0430\u043b\u0435 \u0441\u0442\u0440\u043e\u043a\u0438 \u0438\u043b\u0438 \u043f\u043e\u0441\u043b\u0435 \u00ab;\u00bb (`\u0412\u043e\u0437\u0432\u0440\u0430\u0442 \u0425;\u041a\u043e\u043d\u0435\u0446\u0424\u0443\u043d\u043a\u0446\u0438\u0438`)
+            if re.search(r'(^|;)\s*(\u041a\u043e\u043d\u0435\u0446\u041f\u0440\u043e\u0446\u0435\u0434\u0443\u0440\u044b|\u041a\u043e\u043d\u0435\u0446\u0424\u0443\u043d\u043a\u0446\u0438\u0438|EndProcedure|EndFunction)(?!\w)', l, re.I):
+                cur['end'] = i + 1
+                procs.append(cur)
+                cur = None
+            continue
+        m = re.match(r'^\s*(?:(?:\u0410\u0441\u0438\u043d\u0445|Async)\s+)?(?:\u041f\u0440\u043e\u0446\u0435\u0434\u0443\u0440\u0430|\u0424\u0443\u043d\u043a\u0446\u0438\u044f|Procedure|Function)\s+(\w+)\s*\(', l, re.I)
+        if m:
+            s = i
+            while s > 0 and re.match(r'^\s*&', lines[s - 1]):
+                s -= 1
+            cur = {'name': m.group(1), 'start': s + 1, 'end': i + 1}
+            continue
+        m = re.match(r'^\s*#(?:\u041e\u0431\u043b\u0430\u0441\u0442\u044c|Region)\s+(\S+)', l, re.I)
+        if m:
+            opened.append({'name': m.group(1), 'start': i + 1, 'end': 0, 'depth': len(opened)})
+            continue
+        if re.match(r'^\s*#(\u041a\u043e\u043d\u0435\u0446\u041e\u0431\u043b\u0430\u0441\u0442\u0438|EndRegion)(?!\w)', l, re.I) and opened:
+            r = opened.pop()
+            r['end'] = i + 1
+            regions.append(r)
+    return {'procs': procs, 'regions': regions}
+
+
+# Разметка модуля по коду без литералов и комментариев: «;КонецПроцедуры» в строке не закроет процедуру.
+def get_module_code_outline(lines):
+    return get_module_outline(get_bsl_scan('\n'.join(lines))['Code'])
+
+
+# Параметры обработчика события по версии формата формы: строка — одна сигнатура для всех платформ;
+# кортеж ("8.3.20", "А, Б", "8.3.23", "А, Б, В") — сигнатура с указанной платформы (по возрастанию).
+# Формат формы не определён — новейшая сигнатура.
+def get_event_params(entry):
+    p = entry[2]
+    if not isinstance(p, (list, tuple)):
+        return p
+    rank = format_rank(_format_version)
+    res = p[1]
+    for i in range(0, len(p), 2):
+        since = PLATFORM_FORMAT_RANK.get(p[i])
+        if since is None:
+            continue
+        if rank == 0 or rank >= since:
+            res = p[i + 1]
+    return res
+
+
+# Текст заготовки: директива и параметры — из каталога событий, у команды — (Команда) на клиенте.
+# None — событие вне каталога, сигнатура неизвестна.
+def get_handler_stub(b):
+    if b['kind'] == 'command':
+        directive, params = '\u041d\u0430\u041a\u043b\u0438\u0435\u043d\u0442\u0435', '\u041a\u043e\u043c\u0430\u043d\u0434\u0430'
+    else:
+        entry = get_event_entry(b['xmlTag'], b['eventName'])
+        if not entry:
+            return None
+        directive, params = entry[1], get_event_params(entry)
+    return [f'&{directive}', f"\u041f\u0440\u043e\u0446\u0435\u0434\u0443\u0440\u0430 {b['handler']}({params})", '\t// \u0412\u0441\u0442\u0430\u0432\u0438\u0442\u044c \u0441\u043e\u0434\u0435\u0440\u0436\u0438\u043c\u043e\u0435 \u043e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0430.', '\u041a\u043e\u043d\u0435\u0446\u041f\u0440\u043e\u0446\u0435\u0434\u0443\u0440\u044b']
+
+
+# Порядок областей модуля формы по стандарту (типовые): куда встаёт новая область.
+def get_region_rank(name):
+    n = name.lower()
+    if n == '\u043e\u043f\u0438\u0441\u0430\u043d\u0438\u0435\u043f\u0435\u0440\u0435\u043c\u0435\u043d\u043d\u044b\u0445':
+        return 0
+    if n == '\u043e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u0441\u043e\u0431\u044b\u0442\u0438\u0439\u0444\u043e\u0440\u043c\u044b':
+        return 1
+    if n in ('\u043e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u0441\u043e\u0431\u044b\u0442\u0438\u0439\u044d\u043b\u0435\u043c\u0435\u043d\u0442\u043e\u0432\u0448\u0430\u043f\u043a\u0438\u0444\u043e\u0440\u043c\u044b', '\u043e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u0441\u043e\u0431\u044b\u0442\u0438\u0439\u044d\u043b\u0435\u043c\u0435\u043d\u0442\u043e\u0432\u0444\u043e\u0440\u043c\u044b'):
+        return 2
+    if n.startswith('\u043e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u0441\u043e\u0431\u044b\u0442\u0438\u0439\u044d\u043b\u0435\u043c\u0435\u043d\u0442\u043e\u0432\u0442\u0430\u0431\u043b\u0438\u0446\u044b\u0444\u043e\u0440\u043c\u044b'):
+        return 3
+    if n == '\u043e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u043a\u043e\u043c\u0430\u043d\u0434\u0444\u043e\u0440\u043c\u044b':
+        return 4
+    if n == '\u043e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u043e\u043f\u043e\u0432\u0435\u0449\u0435\u043d\u0438\u0439':
+        return 5
+    if n == '\u0441\u043b\u0443\u0436\u0435\u0431\u043d\u044b\u0435\u043f\u0440\u043e\u0446\u0435\u0434\u0443\u0440\u044b\u0438\u0444\u0443\u043d\u043a\u0446\u0438\u0438':
+        return 6
+    return -1
+
+
+# Область для привязки. Общая область элементов (без «шапки») — для всех элементов, и табличных тоже:
+# модуль уже так устроен.
+def get_handler_region_name(b, regions):
+    if b['kind'] == 'form':
+        return '\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u0421\u043e\u0431\u044b\u0442\u0438\u0439\u0424\u043e\u0440\u043c\u044b'
+    if b['kind'] == 'command':
+        return '\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u041a\u043e\u043c\u0430\u043d\u0434\u0424\u043e\u0440\u043c\u044b'
+    has = {r['name'].lower() for r in regions}
+    # своя область таблицы, если она уже есть, — важнее общей
+    if b['table'] and f"\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u0421\u043e\u0431\u044b\u0442\u0438\u0439\u042d\u043b\u0435\u043c\u0435\u043d\u0442\u043e\u0432\u0422\u0430\u0431\u043b\u0438\u0446\u044b\u0424\u043e\u0440\u043c\u044b{b['table']}".lower() in has:
+        return f"\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u0421\u043e\u0431\u044b\u0442\u0438\u0439\u042d\u043b\u0435\u043c\u0435\u043d\u0442\u043e\u0432\u0422\u0430\u0431\u043b\u0438\u0446\u044b\u0424\u043e\u0440\u043c\u044b{b['table']}"
+    if '\u043e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u0441\u043e\u0431\u044b\u0442\u0438\u0439\u044d\u043b\u0435\u043c\u0435\u043d\u0442\u043e\u0432\u0444\u043e\u0440\u043c\u044b' in has and '\u043e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u0441\u043e\u0431\u044b\u0442\u0438\u0439\u044d\u043b\u0435\u043c\u0435\u043d\u0442\u043e\u0432\u0448\u0430\u043f\u043a\u0438\u0444\u043e\u0440\u043c\u044b' not in has:
+        return '\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u0421\u043e\u0431\u044b\u0442\u0438\u0439\u042d\u043b\u0435\u043c\u0435\u043d\u0442\u043e\u0432\u0424\u043e\u0440\u043c\u044b'
+    if b['table']:
+        return f"\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u0421\u043e\u0431\u044b\u0442\u0438\u0439\u042d\u043b\u0435\u043c\u0435\u043d\u0442\u043e\u0432\u0422\u0430\u0431\u043b\u0438\u0446\u044b\u0424\u043e\u0440\u043c\u044b{b['table']}"
+    return '\u041e\u0431\u0440\u0430\u0431\u043e\u0442\u0447\u0438\u043a\u0438\u0421\u043e\u0431\u044b\u0442\u0438\u0439\u042d\u043b\u0435\u043c\u0435\u043d\u0442\u043e\u0432\u0428\u0430\u043f\u043a\u0438\u0424\u043e\u0440\u043c\u044b'
+
+
+# Вставить заготовку в модуль (список строк): в конец своей области, нет области — создать её на месте
+# по порядку областей, нет областей вообще — в конец модуля. Отделяется одной пустой строкой.
+def add_stub_to_module(lines, stub, b):
+    outline = get_module_code_outline(lines)
+    if not outline['regions']:
+        while lines and not lines[-1].strip():
+            lines.pop()
+        if lines:
+            lines.append('')
+        lines.extend(stub)
+        return
+    name = get_handler_region_name(b, outline['regions'])
+    target = None
+    for r in outline['regions']:
+        if r['name'].lower() == name.lower() and (target is None or r['start'] < target['start']):
+            target = r
+    if target is not None:
+        # перед #КонецОбласти, сняв пустые строки над ним
+        k = target['end'] - 1
+        while k - 1 > target['start'] - 1 and not lines[k - 1].strip():
+            k -= 1
+            del lines[k]
+        lines[k:k] = [''] + stub + ['']
+        return
+    block = [f'#\u041e\u0431\u043b\u0430\u0441\u0442\u044c {name}', ''] + stub + ['', '#\u041a\u043e\u043d\u0435\u0446\u041e\u0431\u043b\u0430\u0441\u0442\u0438']
+    rank = get_region_rank(name)
+    top = sorted([r for r in outline['regions'] if r['depth'] == 0], key=lambda r: r['start'])
+    after = before = None
+    for r in top:
+        rr = get_region_rank(r['name'])
+        if rr < 0:
+            continue
+        if rr <= rank:
+            after = r
+        elif before is None:
+            before = r
+    if after is not None:
+        lines[after['end']:after['end']] = [''] + block
+        return
+    if before is not None:
+        lines[before['start'] - 1:before['start'] - 1] = block + ['']
+        return
+    while lines and not lines[-1].strip():
+        lines.pop()
+    lines.extend([''] + block)
+
+
+# Дописать в модуль формы процедуры для привязок, которых в нём нет. Модуль — <каталог Form.xml>/Form/Module.bsl;
+# нет модуля — создаётся из шаблона, но только в раскладке выгрузки (Form.xml в каталоге Ext).
+# Кодировка и переводы строк существующего модуля сохраняются; новый — UTF-8 с BOM, CRLF, как у form-add.
+# Возвращает строки отчёта: что добавлено, что уже было, с диапазонами строк по итоговому тексту.
+def update_form_module(form_xml_path, shown_form_path):
+    if not _handler_bindings:
+        return []
+    xml_dir = os.path.dirname(form_xml_path)
+    path = os.path.join(xml_dir, 'Form', 'Module.bsl')
+    # путь для вывода — в том же виде, что путь к Form.xml в выводе навыка
+    sep = '\\' if ('\\' in shown_form_path and '/' not in shown_form_path) else '/'
+    shown = re.sub(r'[^\\/]+$', '', shown_form_path) + f'Form{sep}Module.bsl'
+    created = False
+    if os.path.exists(path):
+        with open(path, 'rb') as f:
+            raw = f.read()
+        bom = raw.startswith(b'\xef\xbb\xbf')
+        # строго: модуль не в UTF-8 перезапись испортила бы — такой не трогаем
+        try:
+            text = raw.decode('utf-8')
+        except UnicodeDecodeError:
+            return [f'[WARN] Form module is not UTF-8: {shown} — handler stubs not created']
+        if bom:
+            text = text[1:]
+        eol = '\r\n' if ('\r\n' in text or '\n' not in text) else '\n'
+        norm = text.replace('\r\n', '\n')
+        # сколько переводов строк в конце — столько и запишем: модуль не должен меняться вне вставок
+        tail = len(norm) - len(norm.rstrip('\n'))
+        src = norm.rstrip('\n').split('\n')
+        if not text.strip():
+            src = get_form_module_template()
+    elif os.path.basename(xml_dir).lower() == 'ext':
+        created, bom, eol, tail = True, True, '\r\n', 0
+        src = get_form_module_template()
+    else:
+        return [f'[WARN] Form module not found: {shown} \u2014 handler stubs not created']
+    lines = list(src)
+    status = {}
+    changed = False
+    for b in _handler_bindings:
+        key = b['handler'].lower()
+        outline = get_module_code_outline(lines)
+        if any(p['name'].lower() == key for p in outline['procs']):
+            status[key] = 'exists'
+            continue
+        stub = get_handler_stub(b)
+        if stub is None:
+            status[key] = f"not added: no signature known for event '{b['eventName']}' of {b['xmlTag']}"
+            continue
+        add_stub_to_module(lines, stub, b)
+        status[key] = 'added'
+        changed = True
+    if changed or created:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        out = eol.join(lines) + eol * tail
+        with open(path, 'wb') as f:
+            f.write((('\ufeff' if bom else '') + out).encode('utf-8'))
+    outline = get_module_code_outline(lines)
+    # \u0432 \u043f\u043e\u0440\u044f\u0434\u043a\u0435 \u0441\u0442\u0440\u043e\u043a \u043c\u043e\u0434\u0443\u043b\u044f; \u043d\u0435 \u0434\u043e\u0431\u0430\u0432\u043b\u0435\u043d\u043d\u044b\u0435 \u2014 \u0432 \u043a\u043e\u043d\u0446\u0435
+    rows = []
+    for b in _handler_bindings:
+        key = b['handler'].lower()
+        st = status[key]
+        p = next((x for x in outline['procs'] if x['name'].lower() == key), None)
+        if st == 'added':
+            rows.append((p['start'], len(rows), f"  + {b['handler']} \u2014 empty stub added, lines {p['start']}-{p['end']}"))
+        elif st == 'exists':
+            rows.append((p['start'], len(rows), f"  = {b['handler']} \u2014 exists, lines {p['start']}-{p['end']}"))
+        else:
+            rows.append((sys.maxsize, len(rows), f"  ? {b['handler']} \u2014 {st}"))
+    report = [f'Handlers ({shown}, module created):' if created else f'Handlers ({shown}):']
+    report += [r[2] for r in sorted(rows)]
+    return report
+
+
+def format_rank(ver):
+    """"2.20" → 220, "2.9" → 209. Строковое сравнение неверно ("2.9" > "2.17")."""
+    m = re.match(r'^(\d+)\.(\d+)$', ver or '')
+    return int(m.group(1)) * 100 + int(m.group(2)) if m else 0
+
+
+# Type of the form attribute the table is bound to ('' — undetermined: no path or no such attribute).
+def get_table_source(el):
+    if el.get('_dynList'):
+        return 'DynamicList'
+    return get_data_path_source(str(el.get('path') or ''))
+
+
+def get_data_path_source(path):
+    root_name = path.split('.')[0]
+    if not root_name:
+        return ''
+    for a in root.findall("f:Attributes/f:Attribute", NS):
+        if (a.get('name') or '').lower() == root_name.lower():
+            t = a.find("f:Type/v8:Type", NS)
+            return re.sub(r'^[^:]*:', '', t.text or '') if t is not None else ''
+    return ''
+
 
 KNOWN_KEYS = {
     "group", "columnGroup", "buttonGroup", "input", "check", "radio", "label", "labelField", "table", "pages", "page",
@@ -800,6 +1562,29 @@ REF_ROOT_SYNONYMS = {
 }
 
 ENUM_VALUE_SYNONYMS = {"EnumValue", "ЗначениеПеречисления"}
+
+
+# Значение ссылки в dcscor:DesignTimeValue (отборы, параметры) — к виду Конфигуратора:
+# "Enum.X.EnumValue.Y" / "Enum.X.Y" → "Перечисление.X.Y", "Catalog.X.EmptyRef" → "Справочник.X.ПустаяСсылка".
+# Вид с сегментом EnumValue платформа не разрешает: сравнение с ним всегда ложно (замер 8.3.24).
+DESIGN_TIME_REF_ROOTS = {
+    "Enum": "Перечисление", "Catalog": "Справочник", "Document": "Документ", "ChartOfAccounts": "ПланСчетов",
+    "ChartOfCharacteristicTypes": "ПланВидовХарактеристик", "ChartOfCalculationTypes": "ПланВидовРасчета",
+    "ExchangePlan": "ПланОбмена", "BusinessProcess": "БизнесПроцесс", "Task": "Задача",
+}
+
+
+def normalize_design_time_value(v):
+    parts = str(v).split('.')
+    if len(parts) < 3:
+        return str(v)
+    # Сравнения без учёта регистра — как в PS-порте (ключи хэш-таблицы, -contains)
+    parts[0] = next((v for k, v in DESIGN_TIME_REF_ROOTS.items() if k.lower() == parts[0].lower()), parts[0])
+    if parts[0] == 'Перечисление' and len(parts) >= 4 and parts[2].lower() in {x.lower() for x in ENUM_VALUE_SYNONYMS}:
+        parts = parts[:2] + parts[3:]
+    if parts[-1] == 'EmptyRef':
+        parts[-1] = 'ПустаяСсылка'
+    return '.'.join(parts)
 
 _FMT_MARKUP_RE = re.compile(r'</>|<\s*(?:link|b|i|u|s|color|colorStyle|bgColor|bgColorStyle|font|fontSize|fontStyle|img)(?:\s|>)', re.I)
 
@@ -1053,6 +1838,7 @@ _FORM_TYPE_SYNONYMS = {
 TYPE_SYNONYMS = _FORM_TYPE_SYNONYMS
 
 valid_enum_values = {
+    "ActionPurpose": ["Usual", "Create", "Finish"],
     "AppearanceInCard": ["Auto", "Extended"],
     "AppearanceMode": ["Auto", "CommandBar", "UsualGroup"],
     "AutoAddIncomplete": ["true", "false", "auto"],
@@ -1097,6 +1883,7 @@ valid_enum_values = {
     "ControlRepresentation": ["TitleHyperlink", "Picture", "Button", "ButtonInParentElement"],
     "ConversationsRepresentation": ["Auto", "Show", "DontShow"],
     "CreateButton": ["true", "false", "auto"],
+    "Command.CurrentRowUse": ["Use", "DontUse", "Auto"],
     "Pages.CurrentRowUse": ["Use", "DontUse", "Auto"],
     "Table.CurrentRowUse": ["Auto", "Choice", "SelectionPresentation", "SelectionPresentationAndChoice"],
     "UsualGroup.CurrentRowUse": ["Use", "DontUse", "Auto"],
@@ -1110,6 +1897,7 @@ valid_enum_values = {
     "EqualItemsWidth": ["true", "false", "auto"],
     "ExtendedEdit": ["true", "false", "auto"],
     "FileDragMode": ["AsFile", "AsFileRef"],
+    "FillCheck": ["DontCheck", "ShowError"],
     "FixInCard": ["true", "false", "auto"],
     "FixingInTable": ["None", "Left", "Right"],
     "FooterHorizontalAlign": ["Left", "Center", "Right", "Auto"],
@@ -1134,6 +1922,7 @@ valid_enum_values = {
     "ColumnGroup.HorizontalStretch": ["true", "false", "auto"],
     "CommandBar.HorizontalStretch": ["true", "false", "auto"],
     "ContextMenu.HorizontalStretch": ["true", "false", "auto"],
+    "ExtendedTooltip.HorizontalStretch": ["true", "false", "auto"],
     "InputField.HorizontalStretch": ["true", "false", "auto"],
     "LabelDecoration.HorizontalStretch": ["true", "false", "auto"],
     "LabelField.HorizontalStretch": ["true", "false", "auto"],
@@ -1142,13 +1931,17 @@ valid_enum_values = {
     "PictureDecoration.HorizontalStretch": ["true", "false", "auto"],
     "Popup.HorizontalStretch": ["true", "false", "auto"],
     "RadioButtonField.HorizontalStretch": ["true", "false", "auto"],
+    "SearchControlAddition.HorizontalStretch": ["true", "false", "auto"],
+    "SearchStringAddition.HorizontalStretch": ["true", "false", "auto"],
     "UsualGroup.HorizontalStretch": ["true", "false", "auto"],
+    "ViewStatusAddition.HorizontalStretch": ["true", "false", "auto"],
     "Importance": ["Main", "Normal", "Supplementary"],
     "IncompleteChoiceMode": ["OnEnterPressed", "OnActivate"],
     "InitialListView": ["Beginning", "End", "Auto"],
     "InitialRowActivation": ["Auto", "Activate", "NoActivate"],
     "InitialTreeView": ["NoExpand", "ExpandTopLevel", "ExpandAllLevels"],
     "IntervalsSelectionMode": ["Auto", "Multiple", "Single", "None"],
+    "KeyType": ["Auto", "FieldValue", "RowKey", "RowNumber"],
     "LocationInCommandBar": ["Auto", "InAdditionalSubmenu", "InCommandBar", "InCommandBarAndInAdditionalSubmenu"],
     "MarkNegatives": ["true", "false", "auto"],
     "MarkRequiredComplete": ["true", "false", "auto"],
@@ -1177,6 +1970,7 @@ valid_enum_values = {
     "ReportResultViewMode": ["Auto", "Default", "Compact"],
     "Button.Representation": ["Text", "Picture", "PictureAndText", "Auto"],
     "ButtonGroup.Representation": ["Auto", "Usual", "Compact"],
+    "Command.Representation": ["Text", "Picture", "TextPicture", "Auto"],
     "Popup.Representation": ["Text", "Picture", "PictureAndText", "Auto"],
     "ProgressBarField.Representation": ["Smooth", "Broken", "BrokenTilt"],
     "Table.Representation": ["List", "HierarchicalList", "Tree"],
@@ -1194,6 +1988,7 @@ valid_enum_values = {
     "SearchControlLocation": ["Auto", "None", "CommandBar"],
     "SearchOnInput": ["Use", "DontUse", "Auto"],
     "SearchStringLocation": ["Auto", "None", "CommandBar", "Top", "Bottom", "FormCaption", "PullFromTop"],
+    "SelectedRowsUse": ["Use", "DontUse", "Auto"],
     "CalendarField.SelectionMode": ["Single", "Multiple", "Interval"],
     "Table.SelectionMode": ["SingleRow", "MultiRow"],
     "SelectionShowMode": ["WhenActive", "Always", "DontShow", "WhenMultipleCellsSelected", "WhenMultipleCellsSelectedWhenActive"],
@@ -1220,7 +2015,7 @@ valid_enum_values = {
     "TitleLocation": ["None", "Auto", "Left", "Top", "Right", "Bottom"],
     "ToolTipRepresentation": ["Auto", "None", "Balloon", "Button", "ShowAuto", "ShowTop", "ShowLeft", "ShowBottom", "ShowRight"],
     "TumblerRepresentation": ["Text", "Picture", "Auto"],
-    "Type": ["CommandBarButton", "UsualButton", "Hyperlink", "CommandBarHyperlink"],
+    "Button.Type": ["CommandBarButton", "UsualButton", "Hyperlink", "CommandBarHyperlink"],
     "UpdateOnDataChange": ["Auto", "DontUpdate"],
     "UseAlternationRowColorBWA": ["true", "false", "auto"],
     "UseCopy": ["true", "false", "auto"],
@@ -1237,6 +2032,7 @@ valid_enum_values = {
     "ColumnGroup.VerticalStretch": ["true", "false", "auto"],
     "CommandBar.VerticalStretch": ["true", "false", "auto"],
     "ContextMenu.VerticalStretch": ["true", "false", "auto"],
+    "ExtendedTooltip.VerticalStretch": ["true", "false", "auto"],
     "InputField.VerticalStretch": ["true", "false", "auto"],
     "LabelDecoration.VerticalStretch": ["true", "false", "auto"],
     "LabelField.VerticalStretch": ["true", "false", "auto"],
@@ -1265,6 +2061,7 @@ enum_value_aliases = {
 }
 
 enum_default_values = {
+    "Attribute.FillCheck": "DontCheck",
     "AutoCommandBar.GroupHorizontalAlign": "Auto",
     "AutoCommandBar.GroupVerticalAlign": "Auto",
     "AutoCommandBar.HorizontalAlign": "Left",
@@ -1331,6 +2128,7 @@ enum_default_values = {
     "CheckBoxField.ToolTipRepresentation": "Auto",
     "CheckBoxField.VerticalAlign": "Auto",
     "CheckBoxField.WarningOnEditRepresentation": "Auto",
+    "Column.FillCheck": "DontCheck",
     "ColumnGroup.FixingInTable": "None",
     "ColumnGroup.Group": "Vertical",
     "ColumnGroup.GroupHorizontalAlign": "Auto",
@@ -1339,6 +2137,8 @@ enum_default_values = {
     "ColumnGroup.HorizontalStretch": "auto",
     "ColumnGroup.ToolTipRepresentation": "Auto",
     "ColumnGroup.VerticalStretch": "auto",
+    "Command.CurrentRowUse": "Auto",
+    "Command.Representation": "Auto",
     "CommandBar.GroupHorizontalAlign": "Auto",
     "CommandBar.GroupVerticalAlign": "Auto",
     "CommandBar.HorizontalLocation": "Left",
@@ -1350,6 +2150,15 @@ enum_default_values = {
     "ContextMenu.HorizontalStretch": "auto",
     "ContextMenu.ToolTipRepresentation": "Auto",
     "ContextMenu.VerticalStretch": "auto",
+    "ExtendedTooltip.GroupHorizontalAlign": "Auto",
+    "ExtendedTooltip.GroupVerticalAlign": "Auto",
+    "ExtendedTooltip.HorizontalAlign": "Left",
+    "ExtendedTooltip.HorizontalStretch": "auto",
+    "ExtendedTooltip.OnMainServerUnavalableBehavior": "Auto",
+    "ExtendedTooltip.SkipOnInput": "auto",
+    "ExtendedTooltip.ToolTipRepresentation": "Auto",
+    "ExtendedTooltip.VerticalAlign": "Auto",
+    "ExtendedTooltip.VerticalStretch": "auto",
     "Form.AutoSaveDataInSettings": "DontUse",
     "Form.ChildItemsWidth": "Auto",
     "Form.ChildrenAlign": "Auto",
@@ -1588,6 +2397,17 @@ enum_default_values = {
     "RadioButtonField.ToolTipRepresentation": "Auto",
     "RadioButtonField.VerticalAlign": "Auto",
     "RadioButtonField.WarningOnEditRepresentation": "Auto",
+    "SearchControlAddition.GroupHorizontalAlign": "Auto",
+    "SearchControlAddition.GroupVerticalAlign": "Auto",
+    "SearchControlAddition.HorizontalStretch": "auto",
+    "SearchControlAddition.PlacementArea": "userCmds",
+    "SearchControlAddition.ToolTipRepresentation": "Auto",
+    "SearchStringAddition.GroupHorizontalAlign": "Auto",
+    "SearchStringAddition.GroupVerticalAlign": "Auto",
+    "SearchStringAddition.HorizontalStretch": "auto",
+    "SearchStringAddition.PlacementArea": "userCmds",
+    "SearchStringAddition.ToolTipRepresentation": "Auto",
+    "Settings.KeyType": "Auto",
     "SpreadSheetDocumentField.DrawingSelectionShowMode": "Auto",
     "SpreadSheetDocumentField.EditMode": "Enter",
     "SpreadSheetDocumentField.FixingInTable": "None",
@@ -1679,6 +2499,62 @@ enum_default_values = {
     "UsualGroup.VerticalAlign": "Auto",
     "UsualGroup.VerticalSpacing": "Auto",
     "UsualGroup.VerticalStretch": "auto",
+    "ViewStatusAddition.GroupHorizontalAlign": "Auto",
+    "ViewStatusAddition.GroupVerticalAlign": "Auto",
+    "ViewStatusAddition.HorizontalLocation": "Auto",
+    "ViewStatusAddition.HorizontalStretch": "auto",
+    "ViewStatusAddition.PlacementArea": "userCmds",
+    "ViewStatusAddition.ToolTipRepresentation": "Auto",
+}
+
+enum_scope_types = {
+    'Attribute',
+    'AutoCommandBar',
+    'Button',
+    'ButtonGroup',
+    'CalendarField',
+    'ChartField',
+    'CheckBoxField',
+    'Column',
+    'ColumnGroup',
+    'Command',
+    'CommandBar',
+    'ContextMenu',
+    'ExtendedTooltip',
+    'Form',
+    'FormattedDocumentField',
+    'GanttChartField',
+    'GraphicalSchemaField',
+    'HTMLDocumentField',
+    'InputField',
+    'LabelDecoration',
+    'LabelField',
+    'Page',
+    'Pages',
+    'PeriodField',
+    'PictureDecoration',
+    'PictureField',
+    'PlannerField',
+    'Popup',
+    'ProgressBarField',
+    'RadioButtonField',
+    'SearchControlAddition',
+    'SearchStringAddition',
+    'Settings',
+    'SpreadSheetDocumentField',
+    'Table',
+    'TextDocumentField',
+    'TrackBarField',
+    'UsualGroup',
+    'ViewStatusAddition',
+}
+
+enum_input_synonyms = {
+    "Command.Representation": {"PictureAndText": "TextPicture"},
+    "Button.Representation": {"TextPicture": "PictureAndText"},
+    "Popup.Representation": {"TextPicture": "PictureAndText"},
+    "Table.SelectionMode": {"Single": "SingleRow", "Multiple": "MultiRow"},
+    "CalendarField.SelectionMode": {"SingleRow": "Single", "MultiRow": "Multiple"},
 }
 
 obj_type = None
@@ -1712,7 +2588,7 @@ CHILD_TAG_ORDER = {
     "Table": "Representation Visible UserVisible TitleLocation CommandBarLocation Autofill Enabled TitleHeight ReadOnly SkipOnInput DefaultItem ChangeRowSet ChangeRowOrder Width AutoMaxWidth MaxWidth Height AutoMaxHeight MaxHeight HeightInTableRows HeightControlVariant AutoMaxRowsCount MaxRowsCount ChoiceMode MultipleChoice RowInputMode SelectionMode RowSelectionMode Header FooterHeight HeaderHeight Footer HorizontalScrollBar VerticalScrollBar HorizontalLines VerticalLines UseAlternationRowColor AutoInsertNewRow AutoAddIncomplete AutoMarkIncomplete SearchOnInput InitialListView InitialTreeView HorizontalStretch Output VerticalStretch EnableStartDrag EnableDrag FileDragMode DataPath Font RowPictureDataPath RowsPicture BackColor BorderColor TextColor Title BehaviorOnHorizontalCompression GroupVerticalAlign Shortcut TitleTextColor TitleFont CommandSet ToolTip ToolTipRepresentation SearchStringLocation ViewStatusLocation SearchControlLocation GroupHorizontalAlign CurrentRowUse RefreshRequest AutoRefresh AutoRefreshPeriod Period ChoiceFoldersAndItems RestoreCurrentRow RowFilter TopLevelParent ShowRoot AllowRootChoice UpdateOnDataChange UserSettingsGroup AllowGettingCurrentRowURL ViewMode SettingsNamedItemDetailedRepresentation ContextMenu AutoCommandBar ExtendedTooltip SearchStringAddition ViewStatusAddition SearchControlAddition Events ChildItems",
     "TextDocumentField": "DataPath DefaultItem ReadOnly Title TitleFont TitleLocation EditMode ToolTip Width AutoMaxWidth Font MaxWidth Height AutoMaxHeight ContextMenu ExtendedTooltip Events",
     "TrackBarField": "DataPath Title TitleLocation HorizontalAlign ToolTip ToolTipRepresentation Width AutoMaxWidth HorizontalStretch MaxWidth Height AutoMaxHeight MinValue MarkingAppearance MaxValue LargeStep Step MarkingStep ContextMenu ExtendedTooltip Events",
-    "UsualGroup": "UserVisible Visible Enabled ReadOnly EnableContentChange Title TitleTextColor TitleFont ToolTip ToolTipRepresentation Shortcut Width Height HorizontalStretch VerticalStretch GroupHorizontalAlign GroupVerticalAlign Group ChildrenAlign HorizontalSpacing VerticalSpacing HorizontalAlign VerticalAlign Behavior CollapsedRepresentationTitle Collapsed ControlRepresentation Representation CurrentRowUse Format ShowLeftMargin United ChildItemsWidth ShowTitle BackColor ThroughAlign TitleDataPath ExtendedTooltip ChildItems",
+    "UsualGroup": "UserVisible Visible Enabled ReadOnly EnableContentChange Title TitleTextColor TitleFont ToolTip ToolTipRepresentation Shortcut Width Height HorizontalStretch VerticalStretch GroupHorizontalAlign GroupVerticalAlign Group ChildrenAlign HorizontalSpacing VerticalSpacing HorizontalAlign VerticalAlign Behavior CollapsedRepresentationTitle Collapsed ControlRepresentation Representation CurrentRowUse Format ShowLeftMargin United ChildItemsWidth ShowTitle BackColor ThroughAlign TitleDataPath ExtendedTooltip Events ChildItems",
 }
 
 CHILD_RANK = {t: {c: i for i, c in enumerate(v.split(" "))} for t, v in CHILD_TAG_ORDER.items()}
@@ -1878,7 +2754,7 @@ def parse_filter_shorthand(s):
             elif re.match(r'^\d+(\.\d+)?$', val_part):
                 result['value'] = val_part
                 result['valueType'] = 'xs:decimal'
-            elif re.match(r'^(Перечисление|Справочник|ПланСчетов|Документ|ПланВидовХарактеристик|ПланВидовРасчета)\.', val_part):
+            elif re.match(r'^(Перечисление|Справочник|ПланСчетов|Документ|ПланВидовХарактеристик|ПланВидовРасчета|БизнесПроцесс|Задача|ПланОбмена|Enum|Catalog|Document|ChartOfAccounts|ChartOfCharacteristicTypes|ChartOfCalculationTypes|BusinessProcess|Task|ExchangePlan)\.[^.]+\.[^.]+', val_part):
                 result['value'] = val_part
                 result['valueType'] = 'dcscor:DesignTimeValue'
             else:
@@ -1924,7 +2800,7 @@ def emit_filter_item(lines, item, indent):
         g = str(item['group'])
         group_type = {'And': 'AndGroup', 'Or': 'OrGroup', 'Not': 'NotGroup'}.get(g, g + 'Group')
         lines.append(f'{indent}<dcsset:item xsi:type="dcsset:FilterItemGroup">')
-        if item.get('use') is False:
+        if (not get_dsl_bool(item, ['use'], True)):
             lines.append(f'{indent}\t<dcsset:use>false</dcsset:use>')   # группа отключена (перед groupType)
         lines.append(f'{indent}\t<dcsset:groupType>{group_type}</dcsset:groupType>')
         if item.get('items'):
@@ -1932,7 +2808,7 @@ def emit_filter_item(lines, item, indent):
                 if isinstance(sub, str):
                     parsed = parse_filter_shorthand(sub)
                     obj = {'field': parsed['field'], 'op': parsed['op']}
-                    if parsed['use'] is False:
+                    if not get_dsl_bool(parsed, ['use'], True):
                         obj['use'] = False
                     if parsed['value'] is not None:
                         obj['value'] = parsed['value']
@@ -1957,7 +2833,7 @@ def emit_filter_item(lines, item, indent):
         return
 
     lines.append(f'{indent}<dcsset:item xsi:type="dcsset:FilterItemComparison">')
-    if item.get('use') is False:
+    if (not get_dsl_bool(item, ['use'], True)):
         lines.append(f'{indent}\t<dcsset:use>false</dcsset:use>')
     lines.append(f'{indent}\t<dcsset:left xsi:type="dcscor:Field">{esc_xml_text(str(item.get("field", "")))}</dcsset:left>')
     # Регистронезависимый лукап (зеркало PS): Like/LIKE/ПОДОБНО → канон; иначе — как есть
@@ -1975,7 +2851,7 @@ def emit_filter_item(lines, item, indent):
         else:
             for v in val:
                 vt = _value_type_for(v, item.get('valueType'))
-                v_str = str(v).lower() if isinstance(v, bool) else esc_xml_text(str(v))
+                v_str = str(v).lower() if isinstance(v, bool) else esc_xml_text(normalize_design_time_value(v) if vt == 'dcscor:DesignTimeValue' else str(v))
                 ns_attr = _value_type_ns_attr(vt, v)
                 lines.append(f'{indent}\t<dcsset:right{ns_attr} xsi:type="{vt}">{v_str}</dcsset:right>')
     elif val is not None and (
@@ -2003,7 +2879,7 @@ def emit_filter_item(lines, item, indent):
         lines.append(f'{indent}\t<dcsset:right xsi:type="{vt}"/>')
     elif val is not None:
         vt = _value_type_for(val, item.get('valueType'))
-        v_str = str(val).lower() if isinstance(val, bool) else esc_xml_text(str(val))
+        v_str = str(val).lower() if isinstance(val, bool) else esc_xml_text(normalize_design_time_value(val) if vt == 'dcscor:DesignTimeValue' else str(val))
         ns_attr = _value_type_ns_attr(vt, val)
         lines.append(f'{indent}\t<dcsset:right{ns_attr} xsi:type="{vt}">{v_str}</dcsset:right>')
     if item.get('presentation'):
@@ -2028,7 +2904,7 @@ def emit_filter(lines, items, indent, block_view_mode=None, block_user_setting_i
         if isinstance(item, str):
             parsed = parse_filter_shorthand(item)
             obj = {'field': parsed['field'], 'op': parsed['op']}
-            if parsed['use'] is False:
+            if not get_dsl_bool(parsed, ['use'], True):
                 obj['use'] = False
             if parsed['value'] is not None:
                 obj['value'] = parsed['value']
@@ -2085,7 +2961,7 @@ def emit_order(lines, items, indent, skip_auto=False, block_view_mode=None, bloc
             elif re.match(r'(?i)^(asc|возр)', direction):
                 direction = 'Asc'
             lines.append(f'{indent}\t<dcsset:item xsi:type="dcsset:OrderItemField">')
-            if item.get('use') is False:
+            if (not get_dsl_bool(item, ['use'], True)):
                 lines.append(f'{indent}\t\t<dcsset:use>false</dcsset:use>')
             lines.append(f'{indent}\t\t<dcsset:field>{esc_xml_text(str(item.get("field", "")))}</dcsset:field>')
             lines.append(f'{indent}\t\t<dcsset:orderType>{direction}</dcsset:orderType>')
@@ -2116,13 +2992,13 @@ def emit_appearance_value(lines, key, val, indent):
     inner_val = val
     nested_items = None
     if is_top_level_line:
-        if _has_key(val, 'use') and (_get(val, 'use') is False):
+        if _has_key(val, 'use') and (not to_dsl_bool(_get(val, 'use'), 'use', True)):
             use_wrapper = True
         if _has_key(val, 'items'):
             nested_items = _get(val, 'items')
     elif _has_key(val, 'value') and isinstance(val, dict):
         inner_val = _get(val, 'value')
-        if _has_key(val, 'use') and (_get(val, 'use') is False):
+        if _has_key(val, 'use') and (not to_dsl_bool(_get(val, 'use'), 'use', True)):
             use_wrapper = True
         if _has_key(val, 'items'):
             nested_items = _get(val, 'items')
@@ -2155,7 +3031,7 @@ def emit_appearance_value(lines, key, val, indent):
         # Локализуемый текст параметра оформления: платформа объявляет xsi:type на dcscor:value
         emit_mltext(lines, f'{indent}\t', 'dcscor:value', inner_val, xsi_type='v8:LocalStringType')
     else:
-        actual_val = str(inner_val)
+        actual_val = (str(inner_val).lower() if isinstance(inner_val, bool) else str(inner_val)) if inner_val is not None else ''
         key_type_map = {
             'Размещение': 'dcscor:DataCompositionTextPlacementType',
             'ГоризонтальноеПоложение': 'v8ui:HorizontalAlign',
@@ -2292,7 +3168,7 @@ def emit_calc_fields(lines, calc_fields, indent):
             type_str = str(type_str) if type_str else None
             ur = cf.get('useRestriction') or cf.get('restrict')
             if isinstance(ur, dict):
-                restrict = [k for k in ('field', 'condition', 'group', 'order') if ur.get(k)]
+                restrict = [k for k in ('field', 'condition', 'group', 'order') if to_dsl_bool(ur.get(k), k, False)]
             elif isinstance(ur, str):
                 restrict = [_CALC_RESTRICT_MAP.get(t.strip().lstrip('#'), t.strip().lstrip('#')) for t in ur.split() if t.strip()]
             elif isinstance(ur, list):
@@ -2341,7 +3217,7 @@ def parse_restrict(ur):
     if not ur:
         return []
     if isinstance(ur, dict):
-        return [k for k in ('field', 'condition', 'group', 'order') if ur.get(k)]
+        return [k for k in ('field', 'condition', 'group', 'order') if to_dsl_bool(ur.get(k), k, False)]
     if isinstance(ur, str):
         return [_CALC_RESTRICT_MAP.get(t.strip().lstrip('#'), t.strip().lstrip('#')) for t in ur.split() if t.strip()]
     if isinstance(ur, list):
@@ -2368,7 +3244,7 @@ def emit_conditional_appearance(lines, items, indent, block_view_mode=None, bloc
     lines.append(f'{indent}<{wrap_tag}>')
     for ca in (items or []):
         lines.append(f'{indent}\t<dcsset:item>')
-        if ca.get('use') is False:
+        if (not get_dsl_bool(ca, ['use'], True)):
             lines.append(f'{indent}\t\t<dcsset:use>false</dcsset:use>')
         if ca.get('selection') and len(ca['selection']) > 0:
             lines.append(f'{indent}\t\t<dcsset:selection>')
@@ -2756,11 +3632,14 @@ def normalize_radio_button_type(raw):
     return str(raw).strip()
 
 
-def get_handler_name(element_name, event_name):
-    suffix = EVENT_SUFFIX_MAP.get(event_name)
-    if suffix:
-        return f"{element_name}{suffix}"
-    return f"{element_name}{event_name}"
+def get_handler_name(element_name, event_name, xml_tag='', call_type=''):
+    entry = get_event_entry(xml_tag, event_name)
+    name = f"{element_name}{entry[0]}" if entry and entry[0] else f"{element_name}{event_name}"
+    # Обработчик с видом вызова (расширение) — как называет Конфигуратор: префикс расширения + имя + вид вызова.
+    # Без этого имя совпало бы с процедурой исходной формы.
+    if call_type:
+        name = f"{_ext_name_prefix}{name}" + {'Before': '\u041f\u0435\u0440\u0435\u0434', 'After': '\u041f\u043e\u0441\u043b\u0435', 'Override': '\u0412\u043c\u0435\u0441\u0442\u043e'}.get(call_type, '')
+    return name
 
 
 def get_element_name(el, type_key):
@@ -2769,18 +3648,49 @@ def get_element_name(el, type_key):
     return str(el.get(type_key, ''))
 
 
+# Имя события из DSL. События платформы пишутся с заглавной (OnOpen); строчная первая буква — либо
+# событие в другом регистре (приводится к каталогу), либо ключ не на своём месте (remove, handler…) — ошибка.
+def resolve_event_name(xml_tag, name, ctx):
+    name = '' if name is None else str(name)
+    if not name:
+        print(f"[ERROR] {ctx}: event name is empty — a list item object needs \"event\": "
+              f"{{ \"event\": \"OnChange\", \"handler\": \"Name\" }}", file=sys.stderr)
+        sys.exit(1)
+    if xml_tag and xml_tag in EVENT_CATALOG:
+        for k in EVENT_CATALOG[xml_tag]:
+            if k.lower() == name.lower():
+                return k
+    if name[:1].isascii() and name[:1].isupper():
+        return name
+    hint = ('to unbind a handler in form-edit, set the event to null: { "OnOpen": null }' if name in ('remove', 'delete')
+            else 'keys of events are event names (OnOpen), values are handler names')
+    print(f"[ERROR] {ctx}: '{name}' is not an event name — {hint}", file=sys.stderr)
+    sys.exit(1)
+
+
 # Собрать упорядоченный список событий элемента (имя, обработчик) из DSL.
-# Основной формат: el['events'] = { Событие: ИмяОбработчика } (None/"" → авто-имя по конвенции).
-# Legacy (принимается ради совместимости): el['on'] (массив) + el['handlers'] (переопределение имён).
-
-
-def get_event_pairs(el, element_name):
+# Объект { Событие: ИмяОбработчика | { handler, callType } | [ … ] } — имена явно;
+# список [ "Событие" | { event, handler?, callType? } ] — имена по конвенции (get_handler_name).
+# null в объекте здесь — ошибка: снимать у нового элемента нечего (снятие — в form-edit, до этой функции).
+# Legacy (принимается ради совместимости): el['on'] (как список) + el['handlers'] (переопределение имён).
+def get_event_pairs(el, element_name, xml_tag=''):
     pairs = []
+    ctx = 'Form events' if xml_tag == 'Form' else f"Element '{element_name}' events"
     events = el.get('events')
-    if events:
-        for ev_name, val in events.items():
-            # Значение — имя обработчика; null — имя по шаблону; объект { handler, callType } или массив
-            # таких объектов (в расширении на одно событие вешают и Before, и After)
+    lst = None
+    if isinstance(events, list):
+        lst = events
+    elif events:
+        if not isinstance(events, dict):
+            print(f"[ERROR] {ctx}: events — an object {{ \"OnChange\": \"Handler\" }} or a list of events [\"OnChange\"]", file=sys.stderr)
+            sys.exit(1)
+        for ev_key, val in events.items():
+            ev_name = resolve_event_name(xml_tag, ev_key, ctx)
+            # Значение — имя обработчика; объект { handler, callType } или массив таких объектов
+            # (в расширении на одно событие вешают и Before, и After)
+            if val == []:
+                print(f"[ERROR] {ctx}: '{ev_name}' — empty list, specify the handler name", file=sys.stderr)
+                sys.exit(1)
             for v in (val if isinstance(val, list) else [val]):
                 if isinstance(v, dict):
                     handler = '' if v.get('handler') is None else str(v.get('handler'))
@@ -2789,21 +3699,32 @@ def get_event_pairs(el, element_name):
                     handler = '' if v is None else str(v)
                     call_type = ''
                 if not handler:
-                    handler = get_handler_name(element_name, ev_name)
+                    print(f"[ERROR] {ctx}: '{ev_name}' has no handler name — null unbinds a handler only when editing a form (form-edit); "
+                          f"for a handler named by convention list the event: \"events\": [\"{ev_name}\"]", file=sys.stderr)
+                    sys.exit(1)
                 pairs.append((ev_name, handler, call_type))
     elif el.get('on'):
+        lst = el['on'] if isinstance(el['on'], list) else [el['on']]
+    if lst is not None:
         handlers = el.get('handlers') or {}
-        for evt in (el['on'] if isinstance(el['on'], list) else [el['on']]):
+        for evt in lst:
             if isinstance(evt, dict):
-                evt_name = str(evt.get('event', ''))
+                evt_name = resolve_event_name(xml_tag, evt.get('event', ''), ctx)
                 handler = '' if evt.get('handler') is None else str(evt.get('handler'))
                 call_type = normalize_call_type(evt.get('callType'), element_name, evt_name)
             else:
-                evt_name, handler, call_type = str(evt), '', ''
+                evt_name, handler, call_type = resolve_event_name(xml_tag, evt, ctx), '', ''
             if not handler:
-                handler = str(handlers[evt_name]) if handlers.get(evt_name) else get_handler_name(element_name, evt_name)
+                hk = next((k for k in handlers if str(k).lower() == evt_name.lower() and handlers[k]), None)
+                handler = str(handlers[hk]) if hk is not None else get_handler_name(element_name, evt_name, xml_tag, call_type)
             pairs.append((evt_name, handler, call_type))
     return pairs
+
+
+# Пары событий в порядке, в котором их пишет платформа (get_event_rank); равные — в порядке ввода.
+# Только для вывода <Events>: заготовки в модуле идут в порядке ввода.
+def sort_event_pairs(pairs, xml_tag):
+    return sorted(pairs, key=lambda p: get_event_rank(xml_tag, p[0], p[2]))
 
 
 # Вид вызова обработчика в расширении: Before / After / Override (регистр не важен); пусто — не указан.
@@ -2822,20 +3743,17 @@ def normalize_call_type(raw, element_name, event_name):
 # Проверить, подключено ли событие к элементу (в любом из форматов).
 
 
-def emit_events(lines, el, element_name, indent, type_key):
-    pairs = get_event_pairs(el, element_name)
+def emit_events(lines, el, element_name, indent, xml_tag, source=''):
+    pairs = get_event_pairs(el, element_name, xml_tag)
     if not pairs:
         return
-
-    # Validate event names
-    if type_key and type_key in KNOWN_EVENTS:
-        allowed = KNOWN_EVENTS[type_key]
-        for ev_name, _, _ in pairs:
-            if allowed and str(ev_name) not in allowed:
-                print(f"[WARN] Unknown event '{ev_name}' for {type_key} '{element_name}'. Known: {', '.join(allowed)}")
+    test_event_pairs(pairs, xml_tag, element_name, source)
+    table = element_name if xml_tag == 'Table' else _handler_table['name']
+    for ev_name, handler, _ in pairs:
+        register_handler(handler, 'element', xml_tag, ev_name, table)
 
     lines.append(f"{indent}<Events>")
-    for ev_name, handler, call_type in pairs:
+    for ev_name, handler, call_type in sort_event_pairs(pairs, xml_tag):
         ct_attr = f' callType="{call_type}"' if call_type else ''
         lines.append(f'{indent}\t<Event name="{ev_name}"{ct_attr}>{handler}</Event>')
     lines.append(f"{indent}</Events>")
@@ -2855,7 +3773,7 @@ def _has_real_markup(text):
 def resolve_ml_formatted(val):
     # {text, formatted} = явный override; строка/мапа → авто-детект formatted
     if isinstance(val, dict) and 'text' in val:
-        return val['text'], bool(val.get('formatted'))
+        return val['text'], to_dsl_bool(val.get('formatted'), 'formatted', False)
     return val, _has_real_markup(val)
 
 
@@ -2882,7 +3800,7 @@ def emit_companion(lines, tag, name, indent, content=None):
     if isinstance(content, dict) and any(k in content for k in COMPANION_STRUCT_KEYS):
         # own-content ПЕРЕД Title (в корпусе layout-first 582 vs 10).
         emit_common_flags(lines, content, inner)
-        if content.get('hyperlink') is True:
+        if get_dsl_bool(content, ['hyperlink'], False):
             lines.append(f'{inner}<Hyperlink>true</Hyperlink>')
         emit_layout(lines, content, inner)
         emit_appearance(lines, content, inner, 'decoration')
@@ -2892,7 +3810,7 @@ def emit_companion(lines, tag, name, indent, content=None):
         if content.get('tooltip'):
             emit_mltext(lines, inner, 'ToolTip', content['tooltip'])
         # События компаньона (ExtendedTooltip = LabelDecoration: напр. URLProcessing у hyperlink-подсказки)
-        emit_events(lines, content, name, inner, 'label')
+        emit_events(lines, content, name, inner, 'ExtendedTooltip')
     else:
         emit_companion_title(lines, content, inner)
     lines.append(f'{indent}</{tag}>')
@@ -2909,7 +3827,7 @@ def emit_companion_panel(lines, tag, name, indent, panel):
         children = panel
     elif panel is not None:
         if panel.get('autofill') is not None:
-            autofill = bool(panel.get('autofill'))
+            autofill = to_dsl_bool(panel.get('autofill'), 'autofill', False)
         if panel.get('horizontalAlign'):
             halign = str(panel.get('horizontalAlign'))
         children = panel.get('children')
@@ -3016,13 +3934,14 @@ def get_addition_override(additions, type_key):
 def emit_xr_flag(lines, tag, val, indent):
     if val is None:
         return
-    if isinstance(val, bool):
+    if not isinstance(val, dict):
+        flag = to_dsl_bool(val, tag, False)
         lines.append(f"{indent}<{tag}>")
-        lines.append(f"{indent}\t<xr:Common>{'true' if val else 'false'}</xr:Common>")
+        lines.append(f"{indent}\t<xr:Common>{'true' if flag else 'false'}</xr:Common>")
         lines.append(f"{indent}</{tag}>")
         return
     # объектная форма { common, roles }
-    common = bool(val.get('common')) if val.get('common') is not None else False
+    common = to_dsl_bool(val.get('common'), 'common', False)
     lines.append(f"{indent}<{tag}>")
     lines.append(f"{indent}\t<xr:Common>{'true' if common else 'false'}</xr:Common>")
     roles = val.get('roles')
@@ -3033,18 +3952,18 @@ def emit_xr_flag(lines, tag, val, indent):
             rn = re.sub(r'^(Role|Роль)\.', '', rname)
             if not re.match(r'^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$', rn):
                 rn = "Role." + rn
-            lines.append(f"{indent}\t<xr:Value name=\"{rn}\">{'true' if rval else 'false'}</xr:Value>")
+            lines.append(f"{indent}\t<xr:Value name=\"{rn}\">{'true' if to_dsl_bool(rval, str(rname), False) else 'false'}</xr:Value>")
     lines.append(f"{indent}</{tag}>")
 
 
 def emit_common_flags(lines, el, indent):
-    if el.get('visible') is False or el.get('hidden') is True:
+    if (not get_dsl_bool(el, ['visible'], True)) or get_dsl_bool(el, ['hidden'], False):
         lines.append(f"{indent}<Visible>false</Visible>")
     if el.get('userVisible') is not None:
         emit_xr_flag(lines, 'UserVisible', el.get('userVisible'), indent)
-    if el.get('enabled') is False or el.get('disabled') is True:
+    if (not get_dsl_bool(el, ['enabled'], True)) or get_dsl_bool(el, ['disabled'], False):
         lines.append(f"{indent}<Enabled>false</Enabled>")
-    if el.get('readOnly') is True:
+    if get_dsl_bool(el, ['readOnly'], False):
         lines.append(f"{indent}<ReadOnly>true</ReadOnly>")
 
 
@@ -3052,10 +3971,10 @@ def emit_common_flags(lines, el, indent):
 
 
 def emit_common_element_props(lines, el, indent):
-    if el.get('defaultItem') is True:
+    if get_dsl_bool(el, ['defaultItem'], False):
         lines.append(f"{indent}<DefaultItem>true</DefaultItem>")
     if 'skipOnInput' in el and el['skipOnInput'] is not None:
-        siv = 'true' if el['skipOnInput'] is True else 'false'
+        siv = 'true' if get_dsl_bool(el, ['skipOnInput'], False) else 'false'
         lines.append(f"{indent}<SkipOnInput>{siv}</SkipOnInput>")
     # EnableStartDrag — фактическое значение (платформа эмитит и явный false, напр. SpreadSheet)
     if el.get('enableStartDrag') is not None:
@@ -3090,7 +4009,7 @@ def emit_picture_ref(lines, val, pic_tag, indent):
         src, lt = val, False
     else:
         src = val.get('src')
-        lt = val.get('loadTransparent') is True
+        lt = get_dsl_bool(val, ['loadTransparent'], False)
         tpx = val.get('transparentPixel')
     if not src:
         return
@@ -3128,12 +4047,12 @@ def emit_command_picture(lines, pic, elem_lt, indent):
     else:
         src = pic.get('src')
         if pic.get('loadTransparent') is not None:
-            lt = bool(pic.get('loadTransparent'))
+            lt = to_dsl_bool(pic.get('loadTransparent'), 'loadTransparent', False)
         tpx = pic.get('transparentPixel')
     if not src:
         return
     if lt is None and elem_lt is not None:
-        lt = bool(elem_lt)
+        lt = to_dsl_bool(elem_lt, 'loadTransparent', False)
     src_str = str(src)
     lines.append(f'{indent}<Picture>')
     if src_str.startswith('abs:'):
@@ -3521,13 +4440,13 @@ def emit_layout(lines, el, indent, skip_height=False, multi_line_default=False):
         lines.append(f'{indent}</CommandSet>')
     emit_common_element_props(lines, el, indent)
     if 'autoMaxWidth' in el:
-        if el.get('autoMaxWidth') is False:
+        if (not get_dsl_bool(el, ['autoMaxWidth'], True)):
             lines.append(f"{indent}<AutoMaxWidth>false</AutoMaxWidth>")
     elif multi_line_default:
         lines.append(f"{indent}<AutoMaxWidth>false</AutoMaxWidth>")
     if el.get('maxWidth') is not None:
         lines.append(f"{indent}<MaxWidth>{el['maxWidth']}</MaxWidth>")
-    if el.get('autoMaxHeight') is False:
+    if (not get_dsl_bool(el, ['autoMaxHeight'], True)):
         lines.append(f"{indent}<AutoMaxHeight>false</AutoMaxHeight>")
     if el.get('maxHeight') is not None:
         lines.append(f"{indent}<MaxHeight>{el['maxHeight']}</MaxHeight>")
@@ -3642,6 +4561,69 @@ def resolve_type_str(type_str):
     return type_str
 
 
+# Разбор примитивного типа DSL: Number / String / Date / DateTime / Time — с синонимами
+# (decimal, numeric, Число, Строка, Дата …), в любом регистре, с пробелами в скобках.
+# Тело общее у всех навыков-компиляторов (семья в check-inline-drift); умолчание для голого типа
+# зависит от места (хранимый реквизит — 10,0 и 10, СКД — без ограничения) и приходит аргументами.
+# Возврат: None — не примитив (ссылки, Boolean, …); {'error'} — база примитива узнана, а
+# параметры нет (вызывающий сообщает ошибку своим способом); иначе описание квалификаторов.
+def parse_primitive_type(type_str, def_digits, def_fraction, def_length):
+    m = re.match(r'^\s*([^\s(]+)\s*(\(.*)?$', type_str or '')
+    if not m:
+        return None
+    rest = m.group(2) or ''
+    kind = {
+        'number': 'Number', 'decimal': 'Number', 'numeric': 'Number', 'число': 'Number',
+        'string': 'String', 'строка': 'String',
+        'date': 'Date', 'дата': 'Date', 'datetime': 'DateTime', 'датавремя': 'DateTime',
+        'time': 'Time', 'время': 'Time',
+    }.get(m.group(1).lower())
+    if not kind:
+        return None
+    bad = {'error': (f"Invalid type '{type_str}'. Expected Number, Number(D), Number(D,F), Number(D,F,nonneg), "
+                     "String, String(N), String(N,fixed), Date, DateTime, Time")}
+    parts = []
+    if rest:
+        m2 = re.match(r'^\((.*)\)\s*$', rest)
+        if not m2:
+            return bad
+        parts = [p.strip().lower() for p in m2.group(1).split(',')]
+    if kind == 'Number':
+        sign = 'Any'
+        if parts and (parts[-1] == 'nonneg' or parts[-1] == 'any'):
+            if parts[-1] == 'nonneg':
+                sign = 'Nonnegative'
+            parts = parts[:-1]
+        if len(parts) > 2:
+            return bad
+        for p in parts:
+            if not re.match(r'^[0-9]{1,9}$', p):
+                return bad
+        d = int(parts[0]) if len(parts) >= 1 else def_digits
+        f = int(parts[1]) if len(parts) >= 2 else (0 if len(parts) == 1 else def_fraction)
+        # Дробная часть у числа без ограничения (0,F) платформа молча обнуляет — это ошибка ввода
+        if d > 38 or f > d:
+            return bad
+        return {'kind': 'Number', 'digits': d, 'fraction': f, 'sign': sign}
+    if kind == 'String':
+        allowed = 'Variable'
+        if len(parts) == 2:
+            if parts[1] == 'fixed' or parts[1] == 'fix':
+                allowed = 'Fixed'
+            elif parts[1] != 'variable':
+                return bad
+        if len(parts) > 2 or (len(parts) >= 1 and not re.match(r'^[0-9]{1,9}$', parts[0])):
+            return bad
+        length = int(parts[0]) if len(parts) >= 1 else def_length
+        # Фиксированную длину у неограниченной строки платформа молча снимает — это ошибка ввода
+        if allowed == 'Fixed' and length == 0:
+            return bad
+        return {'kind': 'String', 'length': length, 'allowed': allowed}
+    if parts:
+        return bad
+    return {'kind': 'Date', 'fractions': kind}
+
+
 def emit_single_type(lines, type_str, indent):
     type_str = resolve_type_str(type_str)
     # TypeId — тип, заданный глобальным стабильным GUID (<v8:TypeId>, не <v8:Type>). Платформа так
@@ -3652,45 +4634,34 @@ def emit_single_type(lines, type_str, indent):
         lines.append(f'{indent}<v8:TypeId>{m.group(1)}</v8:TypeId>')
         return
     # boolean
-    if type_str == 'boolean':
+    if type_str.lower() == 'boolean':
         lines.append(f'{indent}<v8:Type>xs:boolean</v8:Type>')
         return
 
-    # string or string(N) or string(N,fixed) (AllowedLength: Variable дефолт / Fixed)
-    m = re.match(r'^string(\((\d+)(\s*,\s*(fixed|variable))?\))?$', type_str, re.IGNORECASE)
-    if m:
-        length = m.group(2) if m.group(2) else '0'
-        al = 'Fixed' if (m.group(4) and m.group(4).lower() == 'fixed') else 'Variable'
-        lines.append(f'{indent}<v8:Type>xs:string</v8:Type>')
-        lines.append(f'{indent}<v8:StringQualifiers>')
-        lines.append(f'{indent}\t<v8:Length>{length}</v8:Length>')
-        lines.append(f'{indent}\t<v8:AllowedLength>{al}</v8:AllowedLength>')
-        lines.append(f'{indent}</v8:StringQualifiers>')
-        return
-
-    # decimal(D,F) or decimal(D,F,nonneg)
-    m = re.match(r'^decimal\((\d+),(\d+)(,nonneg)?\)$', type_str)
-    if m:
-        digits = m.group(1)
-        fraction = m.group(2)
-        sign = 'Nonnegative' if m.group(3) else 'Any'
-        lines.append(f'{indent}<v8:Type>xs:decimal</v8:Type>')
-        lines.append(f'{indent}<v8:NumberQualifiers>')
-        lines.append(f'{indent}\t<v8:Digits>{digits}</v8:Digits>')
-        lines.append(f'{indent}\t<v8:FractionDigits>{fraction}</v8:FractionDigits>')
-        lines.append(f'{indent}\t<v8:AllowedSign>{sign}</v8:AllowedSign>')
-        lines.append(f'{indent}</v8:NumberQualifiers>')
-        return
-
-    # date / dateTime / time
-    m = re.match(r'^(date|dateTime|time)$', type_str)
-    if m:
-        fractions_map = {'date': 'Date', 'dateTime': 'DateTime', 'time': 'Time'}
-        fractions = fractions_map[type_str]
-        lines.append(f'{indent}<v8:Type>xs:dateTime</v8:Type>')
-        lines.append(f'{indent}<v8:DateQualifiers>')
-        lines.append(f'{indent}\t<v8:DateFractions>{fractions}</v8:DateFractions>')
-        lines.append(f'{indent}</v8:DateQualifiers>')
+    # Примитивы: string / decimal / date / dateTime / time. Голое число реквизита формы — 10,0,
+    # голая строка — неограниченная.
+    prim = parse_primitive_type(type_str, 10, 0, 0)
+    if prim:
+        if prim.get('error'):
+            raise ValueError(prim['error'])
+        if prim['kind'] == 'String':
+            lines.append(f'{indent}<v8:Type>xs:string</v8:Type>')
+            lines.append(f'{indent}<v8:StringQualifiers>')
+            lines.append(f'{indent}\t<v8:Length>{prim["length"]}</v8:Length>')
+            lines.append(f'{indent}\t<v8:AllowedLength>{prim["allowed"]}</v8:AllowedLength>')
+            lines.append(f'{indent}</v8:StringQualifiers>')
+        elif prim['kind'] == 'Number':
+            lines.append(f'{indent}<v8:Type>xs:decimal</v8:Type>')
+            lines.append(f'{indent}<v8:NumberQualifiers>')
+            lines.append(f'{indent}\t<v8:Digits>{prim["digits"]}</v8:Digits>')
+            lines.append(f'{indent}\t<v8:FractionDigits>{prim["fraction"]}</v8:FractionDigits>')
+            lines.append(f'{indent}\t<v8:AllowedSign>{prim["sign"]}</v8:AllowedSign>')
+            lines.append(f'{indent}</v8:NumberQualifiers>')
+        else:
+            lines.append(f'{indent}<v8:Type>xs:dateTime</v8:Type>')
+            lines.append(f'{indent}<v8:DateQualifiers>')
+            lines.append(f'{indent}\t<v8:DateFractions>{prim["fractions"]}</v8:DateFractions>')
+            lines.append(f'{indent}</v8:DateQualifiers>')
         return
 
     # V8 types
@@ -3819,6 +4790,15 @@ def normalize_enum_value(prop_name, value):
     # 4. Unknown property — pass-through (no validation data)
     return value
 
+# Значение из соседнего перечисления того же свойства (у кнопки PictureAndText, у команды TextPicture) →
+# значение этого типа. Только ввод DSL: в XML такое значение платформа не загружает
+
+
+def resolve_enum_input_synonym(typ, tag, value):
+    syn = enum_input_synonyms.get(f'{typ}.{tag}') or {}
+    return next((b for a, b in syn.items() if a.lower() == value.lower()), value)
+
+
 # Значения перечислений в выводе эмиттера — к каноническому виду (normalize_enum_value): простой тег
 # элемента формы известного типа или корня формы. Регистр и старые имена исправляются молча,
 # неизвестное значение — ошибка с перечнем допустимых. root_type — тип для тегов прямо под корнем
@@ -3839,25 +4819,28 @@ def normalize_enum_tags(text, root_type='', keep_defaults=False):
             continue
         m = re.fullmatch(r'(\t*)<([A-Za-z_][\w.:-]*)(\s[^>]*)?>', line)
         if m and not line.endswith('/>'):
-            stack.append((m.group(2), len(m.group(1))))
+            stack.append((m.group(2), len(m.group(1)), m.group(3) or ''))
             continue
         if not stack:
             continue
         m = re.fullmatch(r'(\t*)<([A-Za-z]\w*)>([^<]+)</([A-Za-z]\w*)>', line)
         if not m or m.group(2) != m.group(4):
             continue
-        name, ind = stack[-1]
+        name, ind, attrs = stack[-1]
         if len(m.group(1)) != ind + 1:
             continue
         if len(stack) == 1:
             ptype = 'Form' if name == 'Form' else root_type
         else:
             ptype = name
-        if not ptype or (ptype != 'Form' and ptype not in CHILD_TAG_ORDER):
+        if not ptype or ptype not in enum_scope_types:
+            continue
+        # Settings — только настройки динамического списка (у ValueList/Planner/Chart свои), как в form-validate
+        if ptype == 'Settings' and 'xsi:type="DynamicList"' not in attrs:
             continue
         obj_type = ptype
         tag = m.group(2)
-        v = normalize_enum_value(tag, m.group(3))
+        v = normalize_enum_value(tag, resolve_enum_input_synonym(ptype, tag, m.group(3)))
         if not keep_defaults and enum_default_values.get(f'{ptype}.{tag}') == v:
             lines[i] = None
             continue
@@ -4072,7 +5055,7 @@ def emit_group(lines, el, name, eid, indent):
     elif el.get('behavior') and behavior_val not in bmap:
         _warn_unrecognized('behavior', el.get('behavior'), ('collapsible', 'popup'), name)
     # Collapsed — у Collapsible и PopUp (не привязано к одному behavior)
-    if el.get('collapsed') is True:
+    if get_dsl_bool(el, ['collapsed'], False):
         lines.append(f'{inner}<Collapsed>true</Collapsed>')
 
     # Representation
@@ -4091,15 +5074,23 @@ def emit_group(lines, el, name, eid, indent):
         lines.append(f'{inner}<CurrentRowUse>{el["currentRowUse"]}</CurrentRowUse>')
 
     # ShowTitle
-    # ShowTitle=true — умолчание платформы (в корпусе только false): пишем лишь false
-    if el.get('showTitle') is not None and not el['showTitle']:
+    # Обычная группа без showTitle: заголовок показан, если он задан (title или titleDataPath), иначе скрыт — служебная группа
+    # раскладки без заголовка давала бы пустую строку-заголовок (умолчание платформы — показан).
+    # У сворачиваемой/всплывающей заголовок — переключатель: умолчание платформы, пишется лишь явный false.
+    if behavior_val in ('collapsible', 'popup'):
+        if el.get('showTitle') is not None and not el['showTitle']:
+            lines.append(f'{inner}<ShowTitle>false</ShowTitle>')
+    elif el.get('showTitle') is not None:
+        if str(el['showTitle']).lower() != 'true':
+            lines.append(f'{inner}<ShowTitle>false</ShowTitle>')
+    elif not el.get('title') and not el.get('titleDataPath'):
         lines.append(f'{inner}<ShowTitle>false</ShowTitle>')
     # Заголовок свёрнутого представления (collapsible/popup) — мультиязычный текст
     if el.get('collapsedTitle'):
         emit_mltext(lines, inner, 'CollapsedRepresentationTitle', el['collapsedTitle'])
 
     # United
-    if el.get('united') is False:
+    if (not get_dsl_bool(el, ['united'], True)):
         lines.append(f'{inner}<United>false</United>')
 
     # Формат значения пути к данным заголовка (<Format>; парный к titleDataPath группы)
@@ -4116,6 +5107,7 @@ def emit_group(lines, el, name, eid, indent):
 
     # Companion: ExtendedTooltip
     emit_companion(lines, 'ExtendedTooltip', f'{name}\u0420\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u043d\u0430\u044f\u041f\u043e\u0434\u0441\u043a\u0430\u0437\u043a\u0430', inner, el.get('extendedTooltip'))
+    emit_events(lines, el, name, inner, 'UsualGroup')
 
     # Children
     if el.get('children') and len(el['children']) > 0:
@@ -4130,6 +5122,7 @@ def emit_group(lines, el, name, eid, indent):
 def emit_column_group(lines, el, name, eid, indent):
     lines.append(f'{indent}<ColumnGroup name="{name}" id="{eid}"{di_attr(el)}>')
     inner = f'{indent}\t'
+    warn_events_ignored(el, 'ColumnGroup', name)
 
     emit_title(lines, el, name, inner)
 
@@ -4206,7 +5199,7 @@ def emit_input(lines, el, name, eid, indent):
     if el.get('editMode'):
         lines.append(f'{inner}<EditMode>{el["editMode"]}</EditMode>')
     emit_column_pics(lines, el, inner)
-    if el.get('textEdit') is False:
+    if (not get_dsl_bool(el, ['textEdit'], True)):
         lines.append(f'{inner}<TextEdit>false</TextEdit>')
     # InputField-специфичные скаляры (захват «как есть»: платформа эмитит явное не-дефолтное значение)
     for key, tag in (('wrap', 'Wrap'), ('openButton', 'OpenButton'), ('listChoiceMode', 'ListChoiceMode'),
@@ -4233,7 +5226,7 @@ def emit_input(lines, el, name, eid, indent):
     if el.get('choiceButtonRepresentation'):
         lines.append(f'{inner}<ChoiceButtonRepresentation>{el["choiceButtonRepresentation"]}</ChoiceButtonRepresentation>')
     emit_picture_ref(lines, el.get('choiceButtonPicture'), 'ChoiceButtonPicture', inner)
-    emit_layout(lines, el, inner, multi_line_default=(el.get('multiLine') is True))
+    emit_layout(lines, el, inner, multi_line_default=(get_dsl_bool(el, ['multiLine'], False)))
 
     if el.get('inputHint'):
         emit_mltext(lines, inner, 'InputHint', el['inputHint'])
@@ -4262,7 +5255,7 @@ def emit_input(lines, el, name, eid, indent):
     emit_companion_panel(lines, 'ContextMenu', f'{name}\u041a\u043e\u043d\u0442\u0435\u043a\u0441\u0442\u043d\u043e\u0435\u041c\u0435\u043d\u044e', inner, el.get('contextMenu'))
     emit_companion(lines, 'ExtendedTooltip', f'{name}\u0420\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u043d\u0430\u044f\u041f\u043e\u0434\u0441\u043a\u0430\u0437\u043a\u0430', inner, el.get('extendedTooltip'))
 
-    emit_events(lines, el, name, inner, 'input')
+    emit_events(lines, el, name, inner, 'InputField')
 
     lines.append(f'{indent}</InputField>')
 
@@ -4313,7 +5306,7 @@ def emit_check(lines, el, name, eid, indent):
     emit_companion_panel(lines, 'ContextMenu', f'{name}\u041a\u043e\u043d\u0442\u0435\u043a\u0441\u0442\u043d\u043e\u0435\u041c\u0435\u043d\u044e', inner, el.get('contextMenu'))
     emit_companion(lines, 'ExtendedTooltip', f'{name}\u0420\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u043d\u0430\u044f\u041f\u043e\u0434\u0441\u043a\u0430\u0437\u043a\u0430', inner, el.get('extendedTooltip'))
 
-    emit_events(lines, el, name, inner, 'check')
+    emit_events(lines, el, name, inner, 'CheckBoxField')
 
     lines.append(f'{indent}</CheckBoxField>')
 
@@ -4351,7 +5344,7 @@ def emit_radio_button_field(lines, el, name, eid, indent):
     emit_companion_panel(lines, 'ContextMenu', f'{name}КонтекстноеМеню', inner, el.get('contextMenu'))
     emit_companion(lines, 'ExtendedTooltip', f'{name}РасширеннаяПодсказка', inner, el.get('extendedTooltip'))
 
-    emit_events(lines, el, name, inner, 'radio')
+    emit_events(lines, el, name, inner, 'RadioButtonField')
 
     lines.append(f'{indent}</RadioButtonField>')
 
@@ -4366,7 +5359,7 @@ def emit_decoration_title(lines, el, name, indent, auto=False):
     if title_val:
         text, fmt = resolve_ml_formatted(title_val)
         if 'formatted' in el:
-            fmt = bool(el['formatted'])
+            fmt = to_dsl_bool(el['formatted'], 'formatted', False)
         lines.append(f'{indent}<Title formatted="{"true" if fmt else "false"}">')
         emit_ml_items(lines, f'{indent}\t', text)
         lines.append(f'{indent}</Title>')
@@ -4383,7 +5376,7 @@ def emit_label(lines, el, name, eid, indent):
     # Порядок как у платформы: own-content (флаги/hyperlink/layout/оформление) ПЕРЕД Title
     # (корпус layout-first 16970 vs 44 — заодно убирает шум атрибуции харнесса на многострочном Title).
     emit_common_flags(lines, el, inner)
-    if el.get('hyperlink') is True:
+    if get_dsl_bool(el, ['hyperlink'], False):
         lines.append(f'{inner}<Hyperlink>true</Hyperlink>')
     emit_layout(lines, el, inner)
     emit_appearance(lines, el, inner, 'decoration')
@@ -4394,7 +5387,7 @@ def emit_label(lines, el, name, eid, indent):
     emit_companion_panel(lines, 'ContextMenu', f'{name}\u041a\u043e\u043d\u0442\u0435\u043a\u0441\u0442\u043d\u043e\u0435\u041c\u0435\u043d\u044e', inner, el.get('contextMenu'))
     emit_companion(lines, 'ExtendedTooltip', f'{name}\u0420\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u043d\u0430\u044f\u041f\u043e\u0434\u0441\u043a\u0430\u0437\u043a\u0430', inner, el.get('extendedTooltip'))
 
-    emit_events(lines, el, name, inner, 'label')
+    emit_events(lines, el, name, inner, 'LabelDecoration')
 
     lines.append(f'{indent}</LabelDecoration>')
 
@@ -4421,7 +5414,7 @@ def emit_label_field(lines, el, name, eid, indent):
         lines.append(f'{inner}<PasswordMode>{"true" if el["passwordMode"] else "false"}</PasswordMode>')
     emit_column_pics(lines, el, inner)
     # ВНИМАНИЕ: у LabelField платформенный тег <Hiperlink> (опечатка 1С), не <Hyperlink>.
-    if el.get('hyperlink') is True:
+    if get_dsl_bool(el, ['hyperlink'], False):
         lines.append(f'{inner}<Hiperlink>true</Hiperlink>')
     emit_layout(lines, el, inner)
 
@@ -4443,7 +5436,7 @@ def emit_label_field(lines, el, name, eid, indent):
     emit_companion_panel(lines, 'ContextMenu', f'{name}\u041a\u043e\u043d\u0442\u0435\u043a\u0441\u0442\u043d\u043e\u0435\u041c\u0435\u043d\u044e', inner, el.get('contextMenu'))
     emit_companion(lines, 'ExtendedTooltip', f'{name}\u0420\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u043d\u0430\u044f\u041f\u043e\u0434\u0441\u043a\u0430\u0437\u043a\u0430', inner, el.get('extendedTooltip'))
 
-    emit_events(lines, el, name, inner, 'labelField')
+    emit_events(lines, el, name, inner, 'LabelField')
 
     lines.append(f'{indent}</LabelField>')
 
@@ -4454,7 +5447,7 @@ def emit_label_field(lines, el, name, eid, indent):
 def emit_dynlist_table_block(lines, el, indent):
     # (useAlternationRowColor — общее свойство таблицы, эмитится в emit_table)
     # Group A (гарант. блок): дефолт + override
-    ar = 'true' if el.get('autoRefresh') is True else 'false'
+    ar = 'true' if get_dsl_bool(el, ['autoRefresh'], False) else 'false'
     lines.append(f'{indent}<AutoRefresh>{ar}</AutoRefresh>')
     arp = el['autoRefreshPeriod'] if el.get('autoRefreshPeriod') is not None else 60
     lines.append(f'{indent}<AutoRefreshPeriod>{arp}</AutoRefreshPeriod>')
@@ -4465,18 +5458,18 @@ def emit_dynlist_table_block(lines, el, indent):
     lines.append(f'{indent}</Period>')
     cfi = el.get('choiceFoldersAndItems') or 'Items'
     lines.append(f'{indent}<ChoiceFoldersAndItems>{cfi}</ChoiceFoldersAndItems>')
-    rcr = 'true' if el.get('restoreCurrentRow') is True else 'false'
+    rcr = 'true' if get_dsl_bool(el, ['restoreCurrentRow'], False) else 'false'
     lines.append(f'{indent}<RestoreCurrentRow>{rcr}</RestoreCurrentRow>')
     lines.append(f'{indent}<TopLevelParent xsi:nil="true"/>')
-    sr = 'false' if el.get('showRoot') is False else 'true'
+    sr = 'false' if (not get_dsl_bool(el, ['showRoot'], True)) else 'true'
     lines.append(f'{indent}<ShowRoot>{sr}</ShowRoot>')
-    arc = 'true' if el.get('allowRootChoice') is True else 'false'
+    arc = 'true' if get_dsl_bool(el, ['allowRootChoice'], False) else 'false'
     lines.append(f'{indent}<AllowRootChoice>{arc}</AllowRootChoice>')
     uodc = el.get('updateOnDataChange') or 'Auto'
     lines.append(f'{indent}<UpdateOnDataChange>{uodc}</UpdateOnDataChange>')
     if el.get('userSettingsGroup'):
         lines.append(f'{indent}<UserSettingsGroup>{el["userSettingsGroup"]}</UserSettingsGroup>')
-    agcru = 'false' if el.get('allowGettingCurrentRowURL') is False else 'true'
+    agcru = 'false' if (not get_dsl_bool(el, ['allowGettingCurrentRowURL'], True)) else 'true'
     lines.append(f'{indent}<AllowGettingCurrentRowURL>{agcru}</AllowGettingCurrentRowURL>')
 
 
@@ -4497,10 +5490,10 @@ def emit_table(lines, el, name, eid, indent):
         lines.append(f'{inner}<TitleLocation>{map_title_loc(el["titleLocation"])}</TitleLocation>')
     # ChangeRowSet/Order — явное значение (в т.ч. false: платформа пишет его на ValueTable)
     if 'changeRowSet' in el and el['changeRowSet'] is not None:
-        lines.append(f'{inner}<ChangeRowSet>{"true" if el["changeRowSet"] is True else "false"}</ChangeRowSet>')
+        lines.append(f'{inner}<ChangeRowSet>{"true" if get_dsl_bool(el, ["changeRowSet"], False) else "false"}</ChangeRowSet>')
     if 'changeRowOrder' in el and el['changeRowOrder'] is not None:
-        lines.append(f'{inner}<ChangeRowOrder>{"true" if el["changeRowOrder"] is True else "false"}</ChangeRowOrder>')
-    if el.get('autoInsertNewRow') is True:
+        lines.append(f'{inner}<ChangeRowOrder>{"true" if get_dsl_bool(el, ["changeRowOrder"], False) else "false"}</ChangeRowOrder>')
+    if get_dsl_bool(el, ['autoInsertNewRow'], False):
         lines.append(f'{inner}<AutoInsertNewRow>true</AutoInsertNewRow>')
     # RowFilter — nil-плейсхолдер (ключ присутствует → эмитим)
     if 'rowFilter' in el:
@@ -4509,9 +5502,9 @@ def emit_table(lines, el, name, eid, indent):
     # эмитится generic-ом emit_layout ниже). Таблица может нести оба (237 в корпусе).
     if el.get('heightInTableRows'):
         lines.append(f'{inner}<HeightInTableRows>{el["heightInTableRows"]}</HeightInTableRows>')
-    if el.get('header') is False:
+    if (not get_dsl_bool(el, ['header'], True)):
         lines.append(f'{inner}<Header>false</Header>')
-    if el.get('footer') is True:
+    if get_dsl_bool(el, ['footer'], False):
         lines.append(f'{inner}<Footer>true</Footer>')
 
     if el.get('commandBarLocation'):
@@ -4519,12 +5512,12 @@ def emit_table(lines, el, name, eid, indent):
     if el.get('searchStringLocation'):
         lines.append(f'{inner}<SearchStringLocation>{el["searchStringLocation"]}</SearchStringLocation>')
 
-    if el.get('choiceMode') is True:
+    if get_dsl_bool(el, ['choiceMode'], False):
         lines.append(f'{inner}<ChoiceMode>true</ChoiceMode>')
     # Скаляры таблицы (захват «как есть»). Autofill — СВОЁ свойство таблицы (≠ AutoCommandBar autofill = tableAutofill).
     if el.get('autofill') is not None:
         lines.append(f'{inner}<Autofill>{"true" if el["autofill"] else "false"}</Autofill>')
-    if el.get('multipleChoice') is True:
+    if get_dsl_bool(el, ['multipleChoice'], False):
         lines.append(f'{inner}<MultipleChoice>true</MultipleChoice>')
     if el.get('searchOnInput'):
         lines.append(f'{inner}<SearchOnInput>{el["searchOnInput"]}</SearchOnInput>')
@@ -4535,15 +5528,15 @@ def emit_table(lines, el, name, eid, indent):
         lines.append(f'{inner}<HeaderHeight>{el["headerHeight"]}</HeaderHeight>')
     if el.get('footerHeight') is not None:
         lines.append(f'{inner}<FooterHeight>{el["footerHeight"]}</FooterHeight>')
-    if el.get('useAlternationRowColor') is True:
+    if get_dsl_bool(el, ['useAlternationRowColor'], False):
         lines.append(f'{inner}<UseAlternationRowColor>true</UseAlternationRowColor>')
     if el.get('selectionMode'):
         lines.append(f'{inner}<SelectionMode>{el["selectionMode"]}</SelectionMode>')
     if el.get('rowSelectionMode'):
         lines.append(f'{inner}<RowSelectionMode>{el["rowSelectionMode"]}</RowSelectionMode>')
-    if el.get('verticalLines') is False:
+    if (not get_dsl_bool(el, ['verticalLines'], True)):
         lines.append(f'{inner}<VerticalLines>false</VerticalLines>')
-    if el.get('horizontalLines') is False:
+    if (not get_dsl_bool(el, ['horizontalLines'], True)):
         lines.append(f'{inner}<HorizontalLines>false</HorizontalLines>')
     if el.get('initialTreeView'):
         lines.append(f'{inner}<InitialTreeView>{el["initialTreeView"]}</InitialTreeView>')
@@ -4596,11 +5589,14 @@ def emit_table(lines, el, name, eid, indent):
     # Columns
     if el.get('columns') and len(el['columns']) > 0:
         lines.append(f'{inner}<ChildItems>')
+        prev_table = _handler_table['name']
+        _handler_table['name'] = name
         for col in el['columns']:
             emit_element(lines, col, f'{inner}\t')
+        _handler_table['name'] = prev_table
         lines.append(f'{inner}</ChildItems>')
 
-    emit_events(lines, el, name, inner, 'table')
+    emit_events(lines, el, name, inner, 'Table', get_table_source(el))
 
     lines.append(f'{indent}</Table>')
 
@@ -4626,7 +5622,7 @@ def emit_pages(lines, el, name, eid, indent):
     # Companion
     emit_companion(lines, 'ExtendedTooltip', f'{name}\u0420\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u043d\u0430\u044f\u041f\u043e\u0434\u0441\u043a\u0430\u0437\u043a\u0430', inner, el.get('extendedTooltip'))
 
-    emit_events(lines, el, name, inner, 'pages')
+    emit_events(lines, el, name, inner, 'Pages')
 
     # Children (pages)
     if el.get('children') and len(el['children']) > 0:
@@ -4641,6 +5637,7 @@ def emit_pages(lines, el, name, eid, indent):
 def emit_page(lines, el, name, eid, indent):
     lines.append(f'{indent}<Page name="{name}" id="{eid}"{di_attr(el)}>')
     inner = f'{indent}\t'
+    warn_events_ignored(el, 'Page', name)
 
     emit_title(lines, el, name, inner, auto=True)
     emit_common_flags(lines, el, inner)
@@ -4757,11 +5754,11 @@ def emit_button(lines, el, name, eid, indent, in_cmd_bar=False):
     emit_title(lines, el, name, inner, auto=not (el.get('command') or el.get('commandName') or el.get('stdCommand')))
     emit_common_flags(lines, el, inner)
 
-    if el.get('defaultButton') is True:
+    if get_dsl_bool(el, ['defaultButton'], False):
         lines.append(f'{inner}<DefaultButton>true</DefaultButton>')
     # Check (пометка toggle-кнопки командной панели) — платформа эмитит только true.
     # Ключ 'checked' (не 'check': 'check' — тип-ключ CheckBoxField, был бы конфликт диспетчера типов)
-    if el.get('checked') is True:
+    if get_dsl_bool(el, ['checked'], False):
         lines.append(f'{inner}<Check>true</Check>')
 
     # Picture
@@ -4780,7 +5777,7 @@ def emit_button(lines, el, name, eid, indent, in_cmd_bar=False):
     # Companion
     emit_companion(lines, 'ExtendedTooltip', f'{name}\u0420\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u043d\u0430\u044f\u041f\u043e\u0434\u0441\u043a\u0430\u0437\u043a\u0430', inner, el.get('extendedTooltip'))
 
-    emit_events(lines, el, name, inner, 'button')
+    emit_events(lines, el, name, inner, 'Button')
 
     lines.append(f'{indent}</Button>')
 
@@ -4799,7 +5796,7 @@ def emit_picture_decoration(lines, el, name, eid, indent):
     # Префикс "abs:" → встроенная картинка <xr:Abs>; иначе именованная/стилевая <xr:Ref>.
     if el.get('src'):
         src_str = str(el['src'])
-        lt = 'true' if el.get('loadTransparent') is True else 'false'
+        lt = 'true' if get_dsl_bool(el, ['loadTransparent'], False) else 'false'
         lines.append(f'{inner}<Picture>')
         if src_str.startswith('abs:'):
             lines.append(f'{inner}\t<xr:Abs>{esc_xml_text(src_str[4:])}</xr:Abs>')
@@ -4811,7 +5808,7 @@ def emit_picture_decoration(lines, el, name, eid, indent):
             lines.append(f'{inner}\t<xr:TransparentPixel x="{tpx.get("x")}" y="{tpx.get("y")}"/>')
         lines.append(f'{inner}</Picture>')
 
-    if el.get('hyperlink') is True:
+    if get_dsl_bool(el, ['hyperlink'], False):
         lines.append(f'{inner}<Hyperlink>true</Hyperlink>')
     emit_layout(lines, el, inner)
     # EnableDrag — фактическое значение (декорация-картинка перетаскиваема; декомпилятор ловит generic-ом)
@@ -4825,7 +5822,7 @@ def emit_picture_decoration(lines, el, name, eid, indent):
     emit_companion_panel(lines, 'ContextMenu', f'{name}\u041a\u043e\u043d\u0442\u0435\u043a\u0441\u0442\u043d\u043e\u0435\u041c\u0435\u043d\u044e', inner, el.get('contextMenu'))
     emit_companion(lines, 'ExtendedTooltip', f'{name}\u0420\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u043d\u0430\u044f\u041f\u043e\u0434\u0441\u043a\u0430\u0437\u043a\u0430', inner, el.get('extendedTooltip'))
 
-    emit_events(lines, el, name, inner, 'picture')
+    emit_events(lines, el, name, inner, 'PictureDecoration')
 
     lines.append(f'{indent}</PictureDecoration>')
 
@@ -4845,7 +5842,7 @@ def emit_picture_field(lines, el, name, eid, indent):
     emit_column_pics(lines, el, inner)
     if el.get('titleLocation'):
         lines.append(f'{inner}<TitleLocation>{map_title_loc(el["titleLocation"])}</TitleLocation>')
-    if el.get('hyperlink') is True:
+    if get_dsl_bool(el, ['hyperlink'], False):
         lines.append(f'{inner}<Hyperlink>true</Hyperlink>')
 
     emit_layout(lines, el, inner)
@@ -4873,7 +5870,7 @@ def emit_picture_field(lines, el, name, eid, indent):
     emit_companion_panel(lines, 'ContextMenu', f'{name}\u041a\u043e\u043d\u0442\u0435\u043a\u0441\u0442\u043d\u043e\u0435\u041c\u0435\u043d\u044e', inner, el.get('contextMenu'))
     emit_companion(lines, 'ExtendedTooltip', f'{name}\u0420\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u043d\u0430\u044f\u041f\u043e\u0434\u0441\u043a\u0430\u0437\u043a\u0430', inner, el.get('extendedTooltip'))
 
-    emit_events(lines, el, name, inner, 'picField')
+    emit_events(lines, el, name, inner, 'PictureField')
 
     lines.append(f'{indent}</PictureField>')
 
@@ -4912,7 +5909,7 @@ def emit_simple_field(lines, el, name, eid, indent, xml_tag, type_key):
     emit_companion_panel(lines, 'ContextMenu', f'{name}КонтекстноеМеню', inner, el.get('contextMenu'))
     emit_companion(lines, 'ExtendedTooltip', f'{name}РасширеннаяПодсказка', inner, el.get('extendedTooltip'))
 
-    emit_events(lines, el, name, inner, type_key)
+    emit_events(lines, el, name, inner, xml_tag)
 
     lines.append(f'{indent}</{xml_tag}>')
 
@@ -4934,7 +5931,7 @@ def emit_gantt_chart(lines, el, name, eid, indent):
     # Вложенная таблица диаграммы Ганта (стандартный Table — переиспользуем emit_element)
     if el.get('ganttTable'):
         emit_element(lines, el['ganttTable'], inner)
-    emit_events(lines, el, name, inner, 'ganttChart')
+    emit_events(lines, el, name, inner, 'GanttChartField')
     lines.append(f'{indent}</GanttChartField>')
 
 
@@ -4973,7 +5970,7 @@ def emit_calendar(lines, el, name, eid, indent):
     emit_companion_panel(lines, 'ContextMenu', f'{name}\u041a\u043e\u043d\u0442\u0435\u043a\u0441\u0442\u043d\u043e\u0435\u041c\u0435\u043d\u044e', inner, el.get('contextMenu'))
     emit_companion(lines, 'ExtendedTooltip', f'{name}\u0420\u0430\u0441\u0448\u0438\u0440\u0435\u043d\u043d\u0430\u044f\u041f\u043e\u0434\u0441\u043a\u0430\u0437\u043a\u0430', inner, el.get('extendedTooltip'))
 
-    emit_events(lines, el, name, inner, 'calendar')
+    emit_events(lines, el, name, inner, 'CalendarField')
 
     lines.append(f'{indent}</CalendarField>')
 
@@ -4981,13 +5978,14 @@ def emit_calendar(lines, el, name, eid, indent):
 def emit_command_bar(lines, el, name, eid, indent):
     lines.append(f'{indent}<CommandBar name="{name}" id="{eid}"{di_attr(el)}>')
     inner = f'{indent}\t'
+    warn_events_ignored(el, 'CommandBar', name)
 
     emit_title(lines, el, name, inner)
 
     if el.get('commandSource'):
         lines.append(f'{inner}<CommandSource>{el["commandSource"]}</CommandSource>')
 
-    if el.get('autofill') is True:
+    if get_dsl_bool(el, ['autofill'], False):
         lines.append(f'{inner}<Autofill>true</Autofill>')
 
     # CommandBar хранит HorizontalLocation фактически (включая Auto); ≠ дополнениям (Auto=скип)
@@ -5012,6 +6010,7 @@ def emit_command_bar(lines, el, name, eid, indent):
 def emit_popup(lines, el, name, eid, indent):
     lines.append(f'{indent}<Popup name="{name}" id="{eid}"{di_attr(el)}>')
     inner = f'{indent}\t'
+    warn_events_ignored(el, 'Popup', name)
 
     emit_title(lines, el, name, inner, auto=True)
     emit_common_flags(lines, el, inner)
@@ -5044,6 +6043,7 @@ def emit_popup(lines, el, name, eid, indent):
 def emit_button_group(lines, el, name, eid, indent):
     lines.append(f'{indent}<ButtonGroup name="{name}" id="{eid}"{di_attr(el)}>')
     inner = f'{indent}\t'
+    warn_events_ignored(el, 'ButtonGroup', name)
 
     emit_title(lines, el, name, inner)
 
@@ -5201,7 +6201,28 @@ def is_dl_empty_value(v):
     return sv == '' or sv == '_' or sv.lower() == 'null'
 
 
+# Вид значения для ветвлений эмиттеров значений (параметры, пустые значения): примитив любого
+# написания (Число(15,2), numeric, String(10)) → decimal / string / date / dateTime / time, прочее —
+# через синонимы навыка. Квалификаторы значению не нужны и отбрасываются.
+def get_value_kind_type(type_str):
+    if not type_str:
+        return type_str
+    prim = parse_primitive_type(type_str, 0, 0, 0)
+    if prim and not prim.get('error'):
+        if prim['kind'] == 'Number':
+            return 'decimal'
+        if prim['kind'] == 'String':
+            return 'string'
+        if prim['fractions'] == 'Date':
+            return 'date'
+        if prim['fractions'] == 'Time':
+            return 'time'
+        return 'dateTime'
+    return resolve_type_str(type_str)
+
+
 def emit_dl_value(lines, type_str, val, indent, value_list_allowed=False):
+    type_str = get_value_kind_type(type_str)
     if is_dl_empty_value(val):
         # Дин-список: пустое значение платформа ВСЕГДА пишет как xsi:nil (даже при известном типе).
         if value_list_allowed:
@@ -5228,14 +6249,14 @@ def emit_dl_value(lines, type_str, val, indent, value_list_allowed=False):
     elif re.match(r'^string', t):
         lines.append(f'{indent}<dcssch:value xsi:type="xs:string">{esc_xml_text(val_str)}</dcssch:value>')
     elif re.match(r'^(CatalogRef|DocumentRef|EnumRef|ChartOfAccountsRef|ChartOfCharacteristicTypesRef|ChartOfCalculationTypesRef|BusinessProcessRef|TaskRef|ExchangePlanRef)\.', t):
-        lines.append(f'{indent}<dcssch:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(val_str)}</dcssch:value>')
+        lines.append(f'{indent}<dcssch:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(normalize_design_time_value(val_str))}</dcssch:value>')
     else:
         if re.match(r'^\d{4}-\d{2}-\d{2}T', val_str):
             lines.append(f'{indent}<dcssch:value xsi:type="xs:dateTime">{esc_xml_text(val_str)}</dcssch:value>')
         elif val_str in ('true', 'false'):
             lines.append(f'{indent}<dcssch:value xsi:type="xs:boolean">{esc_xml_text(val_str)}</dcssch:value>')
         elif re.match(r'^(ПланСчетов|Справочник|Перечисление|Документ|ПланВидовХарактеристик|ПланВидовРасчета|БизнесПроцесс|Задача|РегистрСведений|ПланОбмена)\.', val_str) or re.match(r'^(ChartOfAccounts|Catalog|Enum|Document|ChartOfCharacteristicTypes|ChartOfCalculationTypes|BusinessProcess|Task|InformationRegister|ExchangePlan)\.', val_str):
-            lines.append(f'{indent}<dcssch:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(val_str)}</dcssch:value>')
+            lines.append(f'{indent}<dcssch:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(normalize_design_time_value(val_str))}</dcssch:value>')
         else:
             lines.append(f'{indent}<dcssch:value xsi:type="xs:string">{esc_xml_text(val_str)}</dcssch:value>')
 
@@ -5286,7 +6307,7 @@ def emit_dl_input_parameters(lines, ip, indent):
                         elif isinstance(v, (int, float)):
                             lines.append(f'{indent}\t\t\t\t<dcscor:value xsi:type="xs:decimal">{v}</dcscor:value>')
                         else:
-                            lines.append(f'{indent}\t\t\t\t<dcscor:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(str(v))}</dcscor:value>')
+                            lines.append(f'{indent}\t\t\t\t<dcscor:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(normalize_design_time_value(v))}</dcscor:value>')
                     lines.append(f'{indent}\t\t\t</dcscor:item>')
                 lines.append(f'{indent}\t\t</dcscor:value>')
         elif 'choiceParameterLinks' in item:
@@ -5337,6 +6358,7 @@ def _test_empty_value(v):
 
 
 def emit_empty_value(lines, type_str, indent, tag_prefix='', value_list_allowed=False):
+    type_str = get_value_kind_type(type_str)
     if value_list_allowed:
         return
     t = type_str or ''
@@ -5400,17 +6422,17 @@ def emit_data_parameters(lines, items, indent, block_view_mode=None):
             dp = {'parameter': parsed['parameter']}
             if parsed['value'] is not None:
                 dp['value'] = parsed['value']
-            if parsed['use'] is False:
+            if not get_dsl_bool(parsed, ['use'], True):
                 dp['use'] = False
             if parsed['userSettingID']:
                 dp['userSettingID'] = parsed['userSettingID']
             if parsed['viewMode']:
                 dp['viewMode'] = parsed['viewMode']
         lines.append(f'{indent}\t<dcscor:item xsi:type="dcsset:SettingsParameterValue">')
-        if dp.get('use') is False:
+        if (not get_dsl_bool(dp, ['use'], True)):
             lines.append(f'{indent}\t\t<dcscor:use>false</dcscor:use>')
         lines.append(f'{indent}\t\t<dcscor:parameter>{esc_xml_text(str(dp.get("parameter", "")))}</dcscor:parameter>')
-        vtype = str(dp.get('valueType') or '')
+        vtype = get_value_kind_type(str(dp.get('valueType') or ''))
         val = dp.get('value')
         if isinstance(val, list):
             # Список значений параметра (valueListAllowed) — отдельный <dcscor:value> на каждое.
@@ -5418,12 +6440,13 @@ def emit_data_parameters(lines, items, indent, block_view_mode=None):
             for v in val:
                 v_str = ('true' if v else 'false') if isinstance(v, bool) else str(v)
                 if re.match(r'^[a-zA-Z]+:', avtype):
-                    lines.append(f'{indent}\t\t<dcscor:value xsi:type="{avtype}">{esc_xml_text(v_str)}</dcscor:value>')
+                    av_str = normalize_design_time_value(v_str) if avtype == 'dcscor:DesignTimeValue' else v_str
+                    lines.append(f'{indent}\t\t<dcscor:value xsi:type="{avtype}">{esc_xml_text(av_str)}</dcscor:value>')
                 elif re.match(r'^(ПланСчетов|Справочник|Перечисление|Документ|ПланВидовХарактеристик|ПланВидовРасчета|БизнесПроцесс|Задача|РегистрСведений|ПланОбмена)\.', v_str) or re.match(r'^(ChartOfAccounts|Catalog|Enum|Document|ChartOfCharacteristicTypes|ChartOfCalculationTypes|BusinessProcess|Task|InformationRegister|ExchangePlan)\.', v_str):
-                    lines.append(f'{indent}\t\t<dcscor:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(v_str)}</dcscor:value>')
+                    lines.append(f'{indent}\t\t<dcscor:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(normalize_design_time_value(v_str))}</dcscor:value>')
                 else:
                     lines.append(f'{indent}\t\t<dcscor:value xsi:type="xs:string">{esc_xml_text(v_str)}</dcscor:value>')
-        elif dp.get('nilValue') is True:
+        elif get_dsl_bool(dp, ['nilValue'], False):
             lines.append(f'{indent}\t\t<dcscor:value xsi:nil="true"/>')
         elif _test_empty_value(val) and vtype:
             emit_empty_value(lines, vtype, f'{indent}\t\t', tag_prefix='dcscor:', value_list_allowed=False)
@@ -5463,7 +6486,7 @@ def emit_data_parameters(lines, items, indent, block_view_mode=None):
             elif re.match(r'^string', vtype):
                 lines.append(f'{indent}\t\t<dcscor:value xsi:type="xs:string">{esc_xml_text(str(val))}</dcscor:value>')
             elif re.match(r'^(ПланСчетов|Справочник|Перечисление|Документ|ПланВидовХарактеристик|ПланВидовРасчета|БизнесПроцесс|Задача|РегистрСведений|ПланОбмена)\.', str(val)) or re.match(r'^(ChartOfAccounts|Catalog|Enum|Document|ChartOfCharacteristicTypes|ChartOfCalculationTypes|BusinessProcess|Task|InformationRegister|ExchangePlan)\.', str(val)):
-                lines.append(f'{indent}\t\t<dcscor:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(str(val))}</dcscor:value>')
+                lines.append(f'{indent}\t\t<dcscor:value xsi:type="dcscor:DesignTimeValue">{esc_xml_text(normalize_design_time_value(val))}</dcscor:value>')
             else:
                 lines.append(f'{indent}\t\t<dcscor:value xsi:type="xs:string">{esc_xml_text(str(val))}</dcscor:value>')
         if dp.get('viewMode'):
@@ -5499,12 +6522,12 @@ def emit_dl_parameter(lines, p, parsed, indent):
     if parsed.get('type'):
         emit_dl_value_type(lines, parsed['type'], ci)
     # value (дефолт nil; при valueListAllowed пустое — опускаем)
-    vla = bool(parsed.get('valueListAllowed'))
+    vla = to_dsl_bool(parsed.get('valueListAllowed'), 'valueListAllowed', False)
     pv = parsed.get('value')
     if isinstance(pv, list):
         for v in pv:
             emit_dl_value(lines, parsed.get('type', ''), v, ci, False)
-    elif parsed.get('value_explicit') and pv is not None and str(pv) == '' and (str(parsed.get('type', '')) == '' or re.match(r'^string', str(parsed.get('type', '')))):
+    elif parsed.get('value_explicit') and pv is not None and str(pv) == '' and (str(parsed.get('type', '')) == '' or re.match(r'^string', get_value_kind_type(str(parsed.get('type', ''))))):
         # Явный пустой СТРОКОВЫЙ параметр (value:"" от декомпилятора) → типизированный пустой
         # <dcssch:value xsi:type="xs:string"/>, НЕ nil. Решается ФОРМОЙ value (""→typed-empty,
         # null/отсутствие→nil), независимо от valueListAllowed; декомпилятор различает ""/null.
@@ -5518,7 +6541,7 @@ def emit_dl_parameter(lines, p, parsed, indent):
     # useRestriction — ВСЕГДА; дефолт true; false только при явном useRestriction:false.
     ur = True
     if is_obj and 'useRestriction' in p:
-        ur = bool(p['useRestriction'])
+        ur = to_dsl_bool(p['useRestriction'], 'useRestriction', False)
     lines.append(f'{ci}<dcssch:useRestriction>{"true" if ur else "false"}</dcssch:useRestriction>')
     # expression
     expr = str(p['expression']) if (is_obj and p.get('expression')) else None
@@ -5533,17 +6556,17 @@ def emit_dl_parameter(lines, p, parsed, indent):
         lines.append(f'{ci}<dcssch:valueListAllowed>true</dcssch:valueListAllowed>')
     # availableAsField=false (hidden или явный)
     aaf = None
-    if parsed.get('hidden') is True:
+    if get_dsl_bool(parsed, ['hidden'], False):
         aaf = False
     if is_obj and 'availableAsField' in p:
-        aaf = bool(p['availableAsField'])
+        aaf = to_dsl_bool(p['availableAsField'], 'availableAsField', False)
     if aaf is False:
         lines.append(f'{ci}<dcssch:availableAsField>false</dcssch:availableAsField>')
     # inputParameters
     if is_obj and p.get('inputParameters'):
         emit_dl_input_parameters(lines, p['inputParameters'], ci)
     # denyIncompleteValues
-    if is_obj and p.get('denyIncompleteValues') is True:
+    if is_obj and get_dsl_bool(p, ['denyIncompleteValues'], False):
         lines.append(f'{ci}<dcssch:denyIncompleteValues>true</dcssch:denyIncompleteValues>')
     # use
     if is_obj and p.get('use'):
@@ -5569,9 +6592,9 @@ def emit_dl_parameters(lines, params, indent):
             parsed = {'name': str(p.get('name', '')), 'type': resolved_type,
                       'value': p.get('value') if 'value' in p else None,
                       'value_explicit': ('value' in p), 'title': None}
-            if p.get('valueListAllowed') is True:
+            if get_dsl_bool(p, ['valueListAllowed'], False):
                 parsed['valueListAllowed'] = True
-            if p.get('hidden') is True:
+            if get_dsl_bool(p, ['hidden'], False):
                 parsed['hidden'] = True
         emit_dl_parameter(lines, p, parsed, indent)
 
@@ -5632,7 +6655,7 @@ def emit_attributes(lines, attrs, indent, conditional_appearance=None):
             ctype = 'd4p1:GanttChart' if 'GanttChart' in str(attr.get('type', '')) else 'd4p1:Chart'
             emit_chart_settings(lines, attr['chart'], inner, ctype)
 
-        if attr.get('main') is True:
+        if get_dsl_bool(attr, ['main'], False):
             lines.append(f'{inner}<MainAttribute>true</MainAttribute>')
         # Доступ по ролям: просмотр/редактирование (порядок схемы: View → Edit, после MainAttribute)
         if attr.get('view') is not None:
@@ -5640,11 +6663,11 @@ def emit_attributes(lines, attrs, indent, conditional_appearance=None):
         if attr.get('edit') is not None:
             emit_xr_flag(lines, 'Edit', attr.get('edit'), inner)
         main_saved = False
-        if attr.get('main') is True and attr.get('type'):
+        if get_dsl_bool(attr, ['main'], False) and attr.get('type'):
             t = str(attr['type'])
             main_saved = bool(re.match(r'^(CatalogObject|DocumentObject|ChartOfAccountsObject|ChartOfCalculationTypesObject|ChartOfCharacteristicTypesObject|ExchangePlanObject|BusinessProcessObject|TaskObject)\.', t)) or ('RecordManager.' in t)
         # Явный ключ savedData побеждает (в т.ч. False → суппресс авто-вывода main_saved); нет ключа → авто.
-        emit_saved = (attr['savedData'] is True) if 'savedData' in attr else main_saved
+        emit_saved = get_dsl_bool(attr, ['savedData'], False) if 'savedData' in attr else main_saved
         if emit_saved:
             lines.append(f'{inner}<SavedData>true</SavedData>')
         # Save: сохранение значения реквизита в пользовательских настройках. true → <Field>имя</Field>;
@@ -5696,7 +6719,7 @@ def emit_attributes(lines, attrs, indent, conditional_appearance=None):
             if fld not in ua_fields:
                 ua_fields.append(fld)
         for col in (attr.get('columns') or []):
-            if col.get('useAlways') is True:
+            if get_dsl_bool(col, ['useAlways'], False):
                 fld = f'{attr_name}.{col["name"]}'
                 if fld not in ua_fields:
                     ua_fields.append(fld)
@@ -5762,7 +6785,7 @@ def emit_attributes(lines, attrs, indent, conditional_appearance=None):
                 mq = 'true' if has_query else 'false'
             lines.append(f'{si}<ManualQuery>{mq}</ManualQuery>')
             # DynamicDataRead: дефолт true; false только при явном отключении
-            ddr = 'false' if s.get('dynamicDataRead') is False else 'true'
+            ddr = 'false' if (not get_dsl_bool(s, ['dynamicDataRead'], True)) else 'true'
             lines.append(f'{si}<DynamicDataRead>{ddr}</DynamicDataRead>')
             if has_query:
                 qtext = resolve_text_from_file(str(s['query']), QUERY_BASE_DIR)
@@ -5773,7 +6796,7 @@ def emit_attributes(lines, attrs, indent, conditional_appearance=None):
                     # Тип поля набора: DataSetFieldField (дефолт) vs DataSetFieldNestedDataSet
                     # (поле-вложенный набор = реквизит табличной части; маркер nested).
                     # folder = папка-группировка полей (DataSetFieldFolder, без <field>); nested = вложенный набор.
-                    is_folder = bool(fld.get('folder'))
+                    is_folder = to_dsl_bool(fld.get('folder'), 'folder', False)
                     ftype = 'DataSetFieldNestedDataSet' if fld.get('nested') else ('DataSetFieldFolder' if is_folder else 'DataSetFieldField')
                     lines.append(f'{si}<Field xsi:type="dcssch:{ftype}">')
                     # dataPath: явный (включая "" → self-closing) побеждает; иначе fallback на field.
@@ -5907,7 +6930,7 @@ def emit_parameters(lines, params, indent):
 
         emit_type(lines, str(param.get('type', '')), inner)
 
-        if param.get('key') is True:
+        if get_dsl_bool(param, ['key'], False):
             lines.append(f'{inner}<KeyParameter>true</KeyParameter>')
 
         lines.append(f'{indent}\t</Parameter>')
@@ -5942,9 +6965,16 @@ def emit_commands(lines, cmds, indent):
         if cmd.get('tooltip'):
             emit_mltext(lines, inner, 'ToolTip', cmd['tooltip'])
 
-        # Доступность команды по ролям (после ToolTip, до Action)
+        # Порядок детей — как пишет платформа (XSD FormCommand, корпус без обратных случаев):
+        # Title ToolTip Use Shortcut Picture Action FunctionalOptions Representation ModifiesSavedData
+        # CurrentRowUse AssociatedTableElementId
         if cmd.get('use') is not None:
             emit_xr_flag(lines, 'Use', cmd.get('use'), inner)
+
+        if cmd.get('shortcut'):
+            lines.append(f'{inner}<Shortcut>{cmd["shortcut"]}</Shortcut>')
+
+        emit_command_picture(lines, cmd.get('picture'), cmd.get('loadTransparent'), inner)
 
         # Обработчик; в расширении — с видом вызова (callType), или несколько: actions [{handler, callType}]
         if cmd.get('actions'):
@@ -5953,15 +6983,21 @@ def emit_commands(lines, cmds, indent):
                 ct = normalize_call_type(act.get('callType'), str(cmd.get('name', '')), 'Action')
                 ct_attr = f' callType="{ct}"' if ct else ''
                 lines.append(f'{inner}<Action{ct_attr}>{act.get("handler") if act.get("handler") is not None else ""}</Action>')
+                register_handler(str(act.get('handler')) if act.get('handler') is not None else '', 'command')
         elif cmd.get('action'):
             ct = normalize_call_type(cmd.get('callType'), str(cmd.get('name', '')), 'Action')
             ct_attr = f' callType="{ct}"' if ct else ''
             lines.append(f'{inner}<Action{ct_attr}>{cmd["action"]}</Action>')
-
-        if cmd.get('modifiesSavedData') is True:
-            lines.append(f'{inner}<ModifiesSavedData>true</ModifiesSavedData>')
+            register_handler(str(cmd['action']), 'command')
 
         emit_functional_options(lines, cmd.get('functionalOptions'), inner)
+
+        # Значение — к перечислению команды (Text/Picture/TextPicture/Auto) приводит normalize_enum_tags
+        if cmd.get('representation'):
+            lines.append(f'{inner}<Representation>{cmd["representation"]}</Representation>')
+
+        if get_dsl_bool(cmd, ['modifiesSavedData'], False):
+            lines.append(f'{inner}<ModifiesSavedData>true</ModifiesSavedData>')
 
         if cmd.get('currentRowUse'):
             lines.append(f'{inner}<CurrentRowUse>{cmd["currentRowUse"]}</CurrentRowUse>')
@@ -5973,14 +7009,6 @@ def emit_commands(lines, cmds, indent):
                      or _cmd_norm.get('используемаятаблица'))
         if cmd_table:
             lines.append(f'{inner}<AssociatedTableElementId xsi:type="xs:string">{esc_xml_text(str(cmd_table))}</AssociatedTableElementId>')
-
-        if cmd.get('shortcut'):
-            lines.append(f'{inner}<Shortcut>{cmd["shortcut"]}</Shortcut>')
-
-        emit_command_picture(lines, cmd.get('picture'), cmd.get('loadTransparent'), inner)
-
-        if cmd.get('representation'):
-            lines.append(f'{inner}<Representation>{cmd["representation"]}</Representation>')
 
         lines.append(f'{indent}\t</Command>')
     lines.append(f'{indent}</Commands>')
@@ -6079,14 +7107,6 @@ def get_form_root_rank(tag):
     return order.index(tag)
 
 
-# Незнакомое событие формы — предупреждение (опечатка в имени события не даёт ошибки платформы).
-
-
-def warn_unknown_form_event(name):
-    if name not in KNOWN_FORM_EVENTS:
-        print(f"[WARN] Unknown form event '{name}'. Known: {', '.join(KNOWN_FORM_EVENTS)}")
-
-
 def emit_properties(lines, props, indent):
     if not props:
         return
@@ -6135,7 +7155,17 @@ def _normalize_synonyms(el):
             _normalize_synonyms(child)
 
 
-def _apply_dlist_table_heuristic(el, list_name, has_main_table):
+def _dlist_has_explicit_key(attr_node):
+    """Явный ключ набора (FieldValue/RowKey/RowNumber) у списка без основной таблицы: ссылки в строке
+    нет — нет и DefaultPicture. Признак берётся из XML реквизита (Settings/KeyType, Settings/MainTable)."""
+    kt = attr_node.find("f:Settings/f:KeyType", NS)
+    v = (kt.text or '').strip() if kt is not None else ''
+    if v == '' or v.lower() == 'auto':
+        return False
+    return attr_node.find("f:Settings/f:MainTable", NS) is None
+
+
+def _apply_dlist_table_heuristic(el, list_name, has_main_table, has_key_type=False):
     if not isinstance(el, dict):
         return
     if el.get('table') is not None and str(el.get('path', '')).lower() == list_name.lower():
@@ -6148,11 +7178,13 @@ def _apply_dlist_table_heuristic(el, list_name, has_main_table):
         # RowPictureDataPath: умный дефолт <Список>.DefaultPicture, если ключ ОТСУТСТВУЕТ.
         # Декомпилятор опускает при rpdp == smart-default; реальное отсутствие → ""-маркер (не
         # перезатирается). Гейт has_main_table снят: дин-список без mainTable тоже несёт RowPictureDataPath.
-        if 'rowPictureDataPath' not in el:
+        # Но не при явном keyType: строка без ссылки, DefaultPicture платформа отвергает («Неверный путь
+        # к данным»); в корпусе у таких списков RowPictureDataPath нет ни разу.
+        if 'rowPictureDataPath' not in el and not has_key_type:
             el['rowPictureDataPath'] = f'{list_name}.DefaultPicture'
     if isinstance(el.get('children'), list):
         for child in el['children']:
-            _apply_dlist_table_heuristic(child, list_name, has_main_table)
+            _apply_dlist_table_heuristic(child, list_name, has_main_table, has_key_type)
 
 
 # Ключи типов — в порядке form-compile (ключ-свойство проверяется после типа, у которого он свойство)
@@ -6485,9 +7517,7 @@ def resolve_position(op, ctx, required):
     after = op.get("after")
     before = op.get("before")
     into = op.get("into")
-    if "first" in op and not isinstance(op.get("first"), bool):
-        fail(f"{ctx}: first — true или false")
-    first = op.get("first") is True
+    first = to_dsl_bool(op.get('first'), f"{ctx}: first", False)
     if after and before:
         fail(f"{ctx}: укажи что-то одно — after или before")
     anchor_name = str(after) if after else (str(before) if before else None)
@@ -6640,7 +7670,7 @@ def invoke_add(op, type_key, idx):
     for a in root.findall("f:Attributes/f:Attribute", NS):
         t = a.find("f:Type/v8:Type", NS)
         if t is not None and (t.text or "").strip() == 'cfg:DynamicList':
-            _apply_dlist_table_heuristic(el, a.get('name'), True)
+            _apply_dlist_table_heuristic(el, a.get('name'), True, _dlist_has_explicit_key(a))
     # Пул имён эмиттера — имена элементов формы на момент операции (без узлов событий)
     _seen_element_names.clear()
     for sc in get_element_scopes():
@@ -6672,10 +7702,14 @@ def invoke_add(op, type_key, idx):
             in_bar = True
             break
         cur = cur.getparent()
+    # Обработчики элементов внутри таблицы — в область этой таблицы
+    tbl = None if pos["Container"] is root else get_nearest_table(pos["Container"], True)
+    _handler_table['name'] = tbl.get('name') if tbl is not None else ''
     xml_lines.clear()
     X(f"<_F {ALL_NS_DECL}>")
     emit_element(xml_lines, el, indent, in_bar)
     X("</_F>")
+    _handler_table['name'] = ''
     node = import_element_nodes(parse_fragment(sort_element_tag_order(normalize_enum_tags("\n".join(xml_lines)))))[0]
     insert_node_at(ci, node, pos["Ref"], indent)
     if chained:
@@ -6699,10 +7733,11 @@ def invoke_auto_cmd_bar(op, idx):
         fail(f"{ctx}: у формы нет командной панели")
     assert_op_keys(op, ['autoCmdBar', 'children', 'autofill', 'horizontalAlign'], ctx)
     if 'autofill' in op:
-        if not isinstance(op.get('autofill'), bool):
+        if op.get('autofill') is None:
             fail(f"{ctx}: autofill — true или false")
-        set_value_tag(acb_node, 'Autofill', 'true' if op['autofill'] else 'false')
-        op_log.append(f"  * {acb_node.get('name')}: autofill={'true' if op['autofill'] else 'false'} → Autofill")
+        af = to_dsl_bool(op.get('autofill'), f"{ctx}: autofill", False)
+        set_value_tag(acb_node, 'Autofill', 'true' if af else 'false')
+        op_log.append(f"  * {acb_node.get('name')}: autofill={'true' if af else 'false'} → Autofill")
         changed_count += 1
     if op.get('horizontalAlign'):
         set_simple_tag(acb_node, 'HorizontalAlign', str(op['horizontalAlign']))
@@ -6857,7 +7892,7 @@ REPR_MAPS = {
     'Table': {'list': 'List', 'tree': 'Tree', 'hierarchicallist': 'HierarchicalList'},
     'Button': {'auto': 'Auto', 'text': 'Text', 'picture': 'Picture', 'pictureandtext': 'PictureAndText'},
     'Popup': {'auto': 'Auto', 'text': 'Text', 'picture': 'Picture', 'pictureandtext': 'PictureAndText'},
-    'ButtonGroup': {'usual': 'Usual', 'compact': 'Compact'},
+    'ButtonGroup': {'auto': 'Auto', 'usual': 'Usual', 'compact': 'Compact'},
 }
 XML_TAG_TO_DSL = {v: k for k, v in DSL_TAG_MAP.items()}
 
@@ -6884,10 +7919,10 @@ def get_applicable_set_keys(nt):
 # Значение перечисления — к виду платформы (как эмиттер: normalize_enum_value по типу элемента)
 def get_normalized_enum_value(node, tag, text):
     global obj_type
-    if not text or local_name(node) not in CHILD_TAG_ORDER:
+    if not text or local_name(node) not in enum_scope_types:
         return text
     obj_type = local_name(node)
-    return normalize_enum_value(tag, text)
+    return normalize_enum_value(tag, resolve_enum_input_synonym(obj_type, tag, text))
 
 
 def set_simple_tag(node, tag, text):
@@ -6957,34 +7992,47 @@ def set_ml_tag(node, tag, value):
     insert_child_canonical(node, new_el)
 
 
+# Узел, перед которым встаёт новое событие: первое существующее с большей позицией (get_event_rank);
+# None — в конец. Существующие события не переставляются.
+def get_event_insert_ref(events_node, xml_tag, name, call_type):
+    r = get_event_rank(xml_tag, name, call_type)
+    for e in events_node.findall('f:Event', NS):
+        if get_event_rank(xml_tag, e.get('name') or '', e.get('callType') or '') > r:
+            return e
+    return None
+
+
 def add_element_events(node, on, handlers, ctx):
     global changed_count
     nt = local_name(node)
     name = node.get('name')
     if get_child_rank(nt, 'Events') < 0:
         fail(f"{ctx}: у {nt} '{name}' событий нет")
-    dsl = XML_TAG_TO_DSL.get(nt)
-    allowed = KNOWN_EVENTS.get(dsl, []) if dsl else []
+    source = ''
+    if nt == 'Table':
+        dp = node.find("f:DataPath", NS)
+        if dp is not None:
+            source = get_data_path_source(dp.text or '')
     events = node.find("f:Events", NS)
     for evt in (on if isinstance(on, list) else [on]):
-        if isinstance(evt, str) or not (isinstance(evt, dict) and evt.get("event")):
+        if not isinstance(evt, dict):
             evt_name = str(evt)
             call_type = ""
-            handler = str(handlers.get(evt_name)) if handlers and handlers.get(evt_name) else get_handler_name(name, evt_name)
+            handler = ""
         else:
             evt_name = str(evt.get("event"))
             call_type = normalize_call_type(evt.get("callType"), name, evt_name)
-            if evt.get("handler"):
-                handler = str(evt.get("handler"))
-            elif handlers and handlers.get(evt_name):
-                handler = str(handlers.get(evt_name))
-            else:
-                handler = get_handler_name(name, evt_name)
+            handler = str(evt.get("handler")) if evt.get("handler") else ""
+        evt_name = resolve_event_name(nt, evt_name, f"{ctx} events")
         # В форме расширения обработчик без callType платформа читает как Before и так и пишет
         if not call_type and is_extension:
             call_type = 'Before'
-        if allowed and evt_name not in allowed:
-            print(f"[WARN] Unknown event '{evt_name}' for {dsl} '{name}'. Known: {', '.join(allowed)}")
+        if not handler:
+            hk = next((k for k in (handlers or {}) if str(k).lower() == evt_name.lower() and handlers[k]), None)
+            handler = str(handlers[hk]) if hk is not None else get_handler_name(name, evt_name, nt, call_type)
+        test_event_pairs([(evt_name, handler, call_type)], nt, name, source)
+        tbl = get_nearest_table(node, True)
+        register_handler(handler, 'element', nt, evt_name, tbl.get('name') if tbl is not None else '')
         ct_str = f"[{call_type}]" if call_type else ""
         if events is not None:
             dup = None
@@ -6993,10 +8041,16 @@ def add_element_events(node, on, handlers, ctx):
                     dup = e
                     break
             if dup is not None:
-                if (dup.text or "").lower() == handler.lower():
-                    op_log.append(f"  = {name}: событие {evt_name}{ct_str} -> {handler} уже есть")
+                old = dup.text or ""
+                if old.lower() == handler.lower():
+                    op_log.append(f"  = {name}: event {evt_name}{ct_str} -> {handler} already bound")
                     continue
-                fail(f"{ctx}: у '{name}' событие {evt_name}{ct_str} уже обрабатывает '{dup.text}' — второй обработчик не повесить")
+                # Другое имя — замена: у события один обработчик (на вид вызова)
+                dup.text = handler
+                add_unbound_handlers([old])
+                op_log.append(f"  ~ {name}: event {evt_name}{ct_str}: {old} -> {handler}")
+                changed_count += 1
+                continue
         if events is None:
             events = etree.Element(f"{{{FORM_NS}}}Events")
             insert_child_canonical(node, events)
@@ -7005,8 +8059,8 @@ def add_element_events(node, on, handlers, ctx):
         if call_type:
             ev.set('callType', call_type)
         ev.text = handler
-        insert_node_at(events, ev, None, get_child_indent(events))
-        op_log.append(f"  * {name}: событие {evt_name}{ct_str} -> {handler}")
+        insert_node_at(events, ev, get_event_insert_ref(events, nt, evt_name, call_type), get_child_indent(events))
+        op_log.append(f"  * {name}: event {evt_name}{ct_str} -> {handler}")
         changed_count += 1
 
 
@@ -7041,10 +8095,37 @@ def invoke_set(op, idx):
                 add_element_events(node, v, op.get("handlers"), c)
                 continue
             if kl == 'events':
+                # Список — имена по конвенции (в расширении вид вызова по умолчанию Before — его ставит add_element_events)
+                if isinstance(v, list):
+                    add_element_events(node, v, None, c)
+                    continue
                 if not isinstance(v, dict):
-                    fail(f"{c}: events — объект {{ Событие: обработчик }}")
-                on = [{'event': e, 'handler': h, 'callType': ct} for e, h, ct in get_event_pairs(op, n)]
-                add_element_events(node, on, None, c)
+                    fail(f"{c}: events — объект {{ Событие: обработчик }} или список событий")
+                # Объект: имя — повесить или заменить, null — снять (без callType — все привязки события)
+                on = []
+                for e_key, e_val in v.items():
+                    ev_name = resolve_event_name(nt, e_key, f"{c} events")
+                    if e_val == []:
+                        fail(f"{c}: событие {ev_name} — пустой список; чтобы снять обработчик, укажите null")
+                    for x in (e_val if isinstance(e_val, list) else [e_val]):
+                        is_obj = isinstance(x, dict)
+                        h = ('' if x.get('handler') is None else str(x.get('handler'))) if is_obj else ('' if x is None else str(x))
+                        ct = normalize_call_type(x.get('callType'), n, ev_name) if is_obj else ''
+                        if h:
+                            on.append({'event': ev_name, 'handler': h, 'callType': ct})
+                            continue
+                        ct_str = f"[{ct}]" if ct else ""
+                        hits = remove_event_bindings(node, ev_name, ct)
+                        if not hits:
+                            fail(f"{c}: событие {ev_name}{ct_str} у '{n}' не обрабатывается — снимать нечего")
+                        for hit in hits:
+                            hc = hit.get('callType') or ''
+                            hc_str = f"[{hc}]" if hc else ""
+                            op_log.append(f"  - {n}: event {ev_name}{hc_str} -> {hit.text or ''}")
+                            changed_count += 1
+                        add_unbound_handlers([hit.text or '' for hit in hits])
+                if on:
+                    add_element_events(node, on, None, c)
                 continue
             if kl in forbidden or (kl == (XML_TAG_TO_DSL.get(nt) or '').lower() and kl != 'group'):
                 fail(f"{c}: '{key}' через set не меняется (имя и привязку не трогаем — на них ссылаются модуль и расширения; состав — через move)")
@@ -7074,8 +8155,7 @@ def invoke_set(op, idx):
                 shown = v if isinstance(v, str) else " ".join(f"{k2}:{v2}" for k2, v2 in v.items())
                 op_log.append(f"  * {n}: {key}=\"{shown}\" → {tag}")
             elif kind == 'bool':
-                if not isinstance(v, bool):
-                    fail(f"{c}: {key} — true или false")
+                v = to_dsl_bool(v, f"{c}: {key}", False)
                 orig = 'true' if v else 'false'
                 if spec.get('Invert'):
                     v = not v
@@ -7097,7 +8177,7 @@ def invoke_set(op, idx):
                 rmap = REPR_MAPS.get(nt)
                 if rmap is None:
                     fail(f"{c}: свойство '{key}' к {nt} не применимо; доступно: {', '.join(get_applicable_set_keys(nt))} и остальные ключи элемента из form-compile")
-                text = rmap.get(str(v).lower())
+                text = rmap.get(resolve_enum_input_synonym(nt, 'Representation', str(v)).lower())
                 if not text:
                     fail(f"{c}: representation='{v}' — допустимо: {', '.join(sorted(rmap.keys()))}")
                 set_value_tag(node, tag, text)
@@ -7134,7 +8214,7 @@ def invoke_set_probe(node, props):
     for a in root.findall("f:Attributes/f:Attribute", NS):
         t = a.find("f:Type/v8:Type", NS)
         if t is not None and (t.text or "").strip() == 'cfg:DynamicList':
-            _apply_dlist_table_heuristic(el, a.get('name'), True)
+            _apply_dlist_table_heuristic(el, a.get('name'), True, _dlist_has_explicit_key(a))
     save_id = next_elem_id
     _seen_element_names.clear()
     tbl = get_nearest_table(node, False)
@@ -7396,69 +8476,105 @@ NS["dcsset"] = DCSSET_NS
 remove_log = []
 removed_count = 0
 left_handlers = []
+change_log = []
+section_changed = 0
+warn_log = []
+module_outline = None
 _module_scan = None
 
 
-# Модуль формы — рядом с Form.xml: <...>/Ext/Form/Module.bsl. Сканер BSL: строковые литералы (с "" и
-# многострочными продолжениями «|») и комментарии // отделяются от кода, номера строк сохраняются.
+# Сканер BSL: строковые литералы (с "" и многострочными продолжениями «|») и комментарии // отделяются
+# от кода, номера строк сохраняются. Lines — строки текста; Code — они же без комментариев, литерал
+# заменён на ""; Literals — {Line, Text, Prefix — код этой строки слева от литерала}.
+def get_bsl_scan(text):
+    lines = text.replace("\r", "").split("\n")
+    code = []
+    mask = []
+    lits = []
+    in_str = False
+    cur = None
+    cur_line = 0
+    cur_prefix = ""
+    cur_col = -1
+    for i, line in enumerate(lines):
+        # строка без кавычек вне литерала — только отрезать комментарий
+        if not in_str and '"' not in line:
+            k = line.find('//')
+            code.append(line[:k] if k >= 0 else line)
+            mask.append(line[:k] + ' ' * (len(line) - k) if k >= 0 else line)
+            continue
+        sb = []
+        mk = list(line)
+        j = 0
+        if in_str:
+            # продолжение многострочного литерала: пробелы, затем «|»
+            while j < len(line) and line[j] in (' ', '\t'):
+                j += 1
+            # строка «//…» между строками литерала — комментарий, литерал продолжается на следующей
+            if line.startswith('//', j):
+                code.append("")
+                mask.append(' ' * len(line))
+                continue
+            if j < len(line) and line[j] == '|':
+                mk[j] = ' '
+                j += 1
+            cur += "\n"
+            cur_col = -1
+        while j < len(line):
+            c = line[j]
+            if in_str:
+                if c == '"':
+                    if j + 1 < len(line) and line[j + 1] == '"':
+                        cur += '"'
+                        mk[j] = ' '
+                        mk[j + 1] = ' '
+                        j += 2
+                        continue
+                    in_str = False
+                    lits.append({"Line": cur_line, "Text": cur, "Prefix": cur_prefix, "Col": cur_col})
+                    sb.append('""')
+                    j += 1
+                    continue
+                cur += c
+                mk[j] = ' '
+                j += 1
+                continue
+            if c == '/' and j + 1 < len(line) and line[j + 1] == '/':
+                for q in range(j, len(mk)):
+                    mk[q] = ' '
+                break
+            if c == '"':
+                in_str = True
+                cur = ""
+                cur_line = i + 1
+                cur_prefix = "".join(sb)
+                cur_col = j + 1
+                j += 1
+                continue
+            sb.append(c)
+            j += 1
+        code.append("".join(sb))
+        mask.append("".join(mk))
+    return {"Lines": lines, "Code": code, "Mask": mask, "Literals": lits}
+
+
+# Модуль формы — рядом с Form.xml: <...>/Ext/Form/Module.bsl.
 def get_module_scan():
     global _module_scan
     if _module_scan is not None:
         return _module_scan
-    scan = {"Exists": False, "Raw": "", "Lines": [], "Code": [], "Literals": []}
+    scan = {"Exists": False, "Raw": "", "RawLines": [], "Lines": [], "Code": [], "Mask": [], "Literals": []}
     path = os.path.join(os.path.dirname(resolved_form_path), "Form", "Module.bsl")
     if os.path.exists(path):
         scan["Exists"] = True
-        with open(path, encoding="utf-8-sig", newline="") as fh:
+        with open(path, encoding="utf-8-sig", errors="replace", newline="") as fh:  # как ReadAllText в PS-порту
             scan["Raw"] = fh.read()
-        lines = scan["Raw"].replace("\r", "").split("\n")
-        code = []
-        lits = []
-        in_str = False
-        cur = None
-        cur_line = 0
-        cur_prefix = ""
-        for i, line in enumerate(lines):
-            sb = []
-            j = 0
-            if in_str:
-                # продолжение многострочного литерала: пробелы, затем «|»
-                while j < len(line) and line[j] in (' ', '\t'):
-                    j += 1
-                if j < len(line) and line[j] == '|':
-                    j += 1
-                cur += "\n"
-            while j < len(line):
-                c = line[j]
-                if in_str:
-                    if c == '"':
-                        if j + 1 < len(line) and line[j + 1] == '"':
-                            cur += '"'
-                            j += 2
-                            continue
-                        in_str = False
-                        lits.append({"Line": cur_line, "Text": cur, "Prefix": cur_prefix})
-                        sb.append('""')
-                        j += 1
-                        continue
-                    cur += c
-                    j += 1
-                    continue
-                if c == '/' and j + 1 < len(line) and line[j + 1] == '/':
-                    break
-                if c == '"':
-                    in_str = True
-                    cur = ""
-                    cur_line = i + 1
-                    cur_prefix = "".join(sb)
-                    j += 1
-                    continue
-                sb.append(c)
-                j += 1
-            code.append("".join(sb))
-        scan["Lines"] = lines
-        scan["Code"] = code
-        scan["Literals"] = lits
+        scan["RawLines"] = scan["Raw"].split("\n")
+        bsl = get_bsl_scan(scan["Raw"])
+        scan["Lines"] = bsl["Lines"]
+        scan["Code"] = bsl["Code"]
+        scan["Mask"] = bsl["Mask"]
+        scan["Literals"] = bsl["Literals"]
     _module_scan = scan
     return scan
 
@@ -7477,6 +8593,9 @@ def find_module_refs(name, kind):
     if not scan["Exists"]:
         return []
     n = re.escape(name)
+    if kind == 'attribute':
+        mm = get_module_methods()
+        local_names = find_module_decl(name)['Locals']
     for i, code in enumerate(scan["Code"]):
         if kind == 'element':
             if re.search(rf"(?<!\w)(Элементы|Items|ПодчиненныеЭлементы|ChildItems)\s*\.\s*{n}(?!\w)", code, re.I):
@@ -7489,12 +8608,19 @@ def find_module_refs(name, kind):
                 hits.add(i + 1)
         else:
             # Реквизит формы: имя целым словом не после точки; после точки — только ЭтаФорма./ЭтотОбъект.
+            # В методе без контекста реквизитов формы нет; где имя объявлено локально, голое имя — локальное
+            if name.lower() not in code.lower():
+                continue
+            meth = get_method_at(mm, i + 1)
+            if meth is not None and meth['noCtx']:
+                continue
+            is_local = meth is not None and meth['name'] in local_names
             for m in re.finditer(rf"(?<!\w){n}(?!\w)", code, re.I):
                 before = code[:m.start()]
                 if re.search(r'\.\s*$', before):
                     if re.search(r'(?<![\w.])(ЭтаФорма|ЭтотОбъект|ThisForm|ThisObject)\s*\.\s*$', before, re.I):
                         hits.add(i + 1)
-                else:
+                elif not is_local:
                     hits.add(i + 1)
     # Строкой имя передают только в узком наборе вызовов (по корпусу) — остальные литералы
     # (параметры запроса, ключи структур) с именем совпадают случайно и ссылкой не считаются.
@@ -7539,6 +8665,8 @@ def test_borrowed(name, kind):
         cands = [n for n in bf.iterdescendants() if _is_el(n) and n.get("name") is not None]
     elif kind == 'command':
         cands = bf.findall("f:Commands/f:Command", NS)
+    elif kind == 'parameter':
+        cands = bf.findall("f:Parameters/f:Parameter", NS)
     else:
         cands = bf.findall("f:Attributes/f:Attribute", NS)
     for n in cands:
@@ -7901,7 +9029,7 @@ def insert_root_child(node):
 
 
 # Вывод эмиттера form-compile во фрагмент: функция пишет в lines; результат — узлы верхнего уровня.
-def invoke_section_emit(emit, root_type=''):
+def invoke_section_emit(emit, root_type='', normalize=False):
     global next_elem_id
     save_id = next_elem_id
     xml_lines.clear()
@@ -7909,8 +9037,10 @@ def invoke_section_emit(emit, root_type=''):
     emit(xml_lines)
     X("</_F>")
     next_elem_id = save_id
+    # Перечисления — к виду платформы, как в form-compile: у тегов прямо под корнем фрагмента — по root_type
+    # (свойства формы); normalize — у вложенных узлов по их типу (добавляемые реквизиты и команды)
     text = "\n".join(xml_lines)
-    if root_type:
+    if root_type or normalize:
         text = normalize_enum_tags(text, root_type)
     return import_element_nodes(parse_fragment(text))
 
@@ -7940,49 +9070,126 @@ def set_form_property(key, value):
     form_changed += 1
 
 
-# События формы: { Событие: обработчик | { handler, callType } | [ … ] } — как events элемента.
+# Снять привязки события у формы или элемента: callType пуст — все (в расширении у события их бывает
+# несколько), иначе — только эту. Пустой <Events> убирается. Возвращает снятые узлы.
+def remove_event_bindings(owner, ev_name, call_type):
+    sec = owner.find("f:Events", NS)
+    hits = []
+    if sec is not None:
+        for e in sec.findall("f:Event", NS):
+            if (e.get('name') or '').lower() == ev_name.lower() and (not call_type or (e.get('callType') or '').lower() == call_type.lower()):
+                hits.append(e)
+    for e in hits:
+        remove_node_with_ws(e)
+    if hits and get_first_element_child(sec) is None:
+        remove_node_with_ws(sec)
+    return hits
+
+
+# Обработчики, отвязанные снятием или заменой. Проверяются в конце запуска (resolve_unbound_handlers):
+# правка могла привязать то же имя к другому событию.
+unbound_handlers = []
+
+
+def add_unbound_handlers(handlers):
+    unbound_handlers.extend(h for h in handlers if h)
+
+
+# Отвязанные, которые форма больше не вызывает, — в «Handlers left in module». Копия исходной формы
+# в <BaseForm> расширения не в счёт: её привязки — не привязки расширения.
+def resolve_unbound_handlers():
+    if not unbound_handlers:
+        return
+    base = root.find("f:BaseForm", NS)
+    in_base = set(base.iter()) if base is not None else set()
+    bound = {(e.text or '').strip().lower() for e in root.iter(f"{{{FORM_NS}}}Event", f"{{{FORM_NS}}}Action") if e not in in_base}
+    left = [h for h in unbound_handlers if h.lower() not in bound]
+    if left:
+        add_left_handlers(left)
+
+
+# События формы — как events элемента: объект { Событие: обработчик | { handler, callType } | [ … ] } вешает
+# или заменяет, null — снимает; список [ Событие | { event, callType } ] — имена по конвенции.
 def add_form_events_dsl(events):
     global form_changed
-    if not isinstance(events, dict):
-        fail("events — объект { Событие: обработчик }")
-    sec = None
-    for ev_name, val in events.items():
-        warn_unknown_form_event(ev_name)
-        for v in (val if isinstance(val, list) else [val]):
-            if isinstance(v, dict):
-                h = '' if v.get('handler') is None else str(v.get('handler'))
-                ct = normalize_call_type(v.get('callType'), 'Form', ev_name)
-            else:
-                h = '' if v is None else str(v)
-                ct = ''
+    update_form_owner()
+    adds = []
+    if isinstance(events, list):
+        for v in events:
+            is_obj = isinstance(v, dict)
+            n = resolve_event_name('Form', v.get('event') if is_obj else v, 'Form events')
+            h = ('' if v.get('handler') is None else str(v.get('handler'))) if is_obj else ''
+            ct = normalize_call_type(v.get('callType'), 'Form', n) if is_obj else ''
             if not ct and is_extension:
                 ct = 'Before'
             if not h:
-                fail(f"events: у события формы {ev_name} укажите имя обработчика")
-            ct_str = f"[{ct}]" if ct else ""
-            if sec is None:
-                sec = root.find("f:Events", NS)
-            if sec is not None:
-                dup = None
-                for e in sec.findall("f:Event", NS):
-                    if (e.get('name') or '').lower() == ev_name.lower() and (e.get('callType') or '').lower() == ct.lower():
-                        dup = e
-                        break
-                if dup is not None:
-                    if (dup.text or '').lower() == h.lower():
-                        form_log.append(f"  = событие {ev_name}{ct_str} -> {h} уже есть")
-                        continue
-                    fail(f"events: событие формы {ev_name}{ct_str} уже обрабатывает '{dup.text}' — второй обработчик не повесить")
-            if sec is None:
-                sec = get_or_create_root_section('Events')
-            ev = etree.Element(f"{{{FORM_NS}}}Event")
-            ev.set('name', ev_name)
-            if ct:
-                ev.set('callType', ct)
-            ev.text = h
-            insert_node_at(sec, ev, None, get_child_indent(sec))
-            form_log.append(f"  + событие {ev_name}{ct_str} -> {h}")
-            form_changed += 1
+                # Имя по конвенции типовых (ПриСозданииНаСервере); у события вне каталога его нет
+                if not get_event_entry('Form', n):
+                    fail(f"events: у события формы {n} укажите имя обработчика — имени по конвенции для него нет")
+                h = get_handler_name('', n, 'Form', ct)
+            adds.append((n, h, ct))
+    elif isinstance(events, dict):
+        for e_key, val in events.items():
+            n = resolve_event_name('Form', e_key, 'Form events')
+            if val == []:
+                fail(f"events: событие формы {n} — пустой список; чтобы снять обработчик, укажите null")
+            for v in (val if isinstance(val, list) else [val]):
+                is_obj = isinstance(v, dict)
+                h = ('' if v.get('handler') is None else str(v.get('handler'))) if is_obj else ('' if v is None else str(v))
+                ct = normalize_call_type(v.get('callType'), 'Form', n) if is_obj else ''
+                if not h:
+                    # null — снять: без callType — все привязки события, с callType — только эту
+                    ct_str = f"[{ct}]" if ct else ""
+                    hits = remove_event_bindings(root, n, ct)
+                    if not hits:
+                        fail(f"events: событие формы {n}{ct_str} не обрабатывается — снимать нечего")
+                    for hit in hits:
+                        hc = hit.get('callType') or ''
+                        hc_str = f"[{hc}]" if hc else ""
+                        form_log.append(f"  - event {n}{hc_str} -> {hit.text or ''}")
+                        form_changed += 1
+                    add_unbound_handlers([hit.text or '' for hit in hits])
+                    continue
+                if not ct and is_extension:
+                    ct = 'Before'
+                adds.append((n, h, ct))
+    else:
+        fail("events — объект { Событие: обработчик } или список событий")
+
+    sec = None
+    for n, h, ct in adds:
+        test_event_pairs([(n, '', '')], 'Form', '')
+        ct_str = f"[{ct}]" if ct else ""
+        register_handler(h, 'form', 'Form', n)
+        if sec is None:
+            sec = root.find("f:Events", NS)
+        if sec is not None:
+            dup = None
+            for e in sec.findall("f:Event", NS):
+                if (e.get('name') or '').lower() == n.lower() and (e.get('callType') or '').lower() == ct.lower():
+                    dup = e
+                    break
+            if dup is not None:
+                old = dup.text or ''
+                if old.lower() == h.lower():
+                    form_log.append(f"  = event {n}{ct_str} -> {h} already bound")
+                    continue
+                # Другое имя — замена: у события один обработчик (на вид вызова)
+                dup.text = h
+                add_unbound_handlers([old])
+                form_log.append(f"  ~ event {n}{ct_str}: {old} -> {h}")
+                form_changed += 1
+                continue
+        if sec is None:
+            sec = get_or_create_root_section('Events')
+        ev = etree.Element(f"{{{FORM_NS}}}Event")
+        ev.set('name', n)
+        if ct:
+            ev.set('callType', ct)
+        ev.text = h
+        insert_node_at(sec, ev, get_event_insert_ref(sec, 'Form', n, ct), get_child_indent(sec))
+        form_log.append(f"  + event {n}{ct_str} -> {h}")
+        form_changed += 1
 
 
 # Исключённые команды: список имён — исключить; { remove: [...] } — вернуть.
@@ -8020,10 +9227,10 @@ def update_excluded_commands(spec):
         form_changed += 1
 
 
-# Параметры формы: определения — как в form-compile; { remove: имя | [...] } — удалить.
+# Параметры формы — по порядку: определения — как в form-compile; { remove: имя | [...] } — удалить;
+# { set: имя, … } — изменить.
 def update_form_parameters(lst):
     global form_changed
-    adds = []
     for i, p in enumerate(lst if isinstance(lst, list) else [lst]):
         if isinstance(p, dict) and 'remove' in p:
             assert_op_keys(p, ['remove'], f"parameters[{i}] remove")
@@ -8045,24 +9252,23 @@ def update_form_parameters(lst):
                     remove_node_with_ws(sec)
                 form_log.append(f"  - параметр {n}")
                 form_changed += 1
+        elif isinstance(p, dict) and 'set' in p:
+            invoke_param_set(p, i)
+        elif isinstance(p, dict) and 'rename' in p:
+            invoke_param_rename(p, i)
         else:
-            adds.append(p)
-    if not adds:
-        return
-    sec = get_or_create_root_section('Parameters')
-    seen = set()
-    for p in adds:
-        _assert_edit_unique(str(p.get('name')), seen, 'parameter name')
-        for e in sec.findall("f:Parameter", NS):
-            if (e.get('name') or '').lower() == str(p.get('name')).lower():
-                fail(f"parameters: параметр '{p.get('name')}' уже есть в форме")
-    wrap = invoke_section_emit(lambda lines: emit_parameters(lines, adds, '\t'))[0]
-    for node in list(wrap.findall("f:Parameter", NS)):
-        wrap.remove(node)
-        node.tail = None
-        insert_node_at(sec, node, None, get_child_indent(sec))
-        form_log.append(f"  + параметр {node.get('name')}")
-        form_changed += 1
+            assert_op_keys(p, PARAM_KEYS, f"parameters[{i}] '{p.get('name')}'")
+            sec = get_or_create_root_section('Parameters')
+            for e in sec.findall("f:Parameter", NS):
+                if (e.get('name') or '').lower() == str(p.get('name')).lower():
+                    fail(f"parameters: параметр '{p.get('name')}' уже есть в форме; изменить: {{ \"set\": \"{p.get('name')}\", … }}")
+            wrap = invoke_section_emit(lambda lines: emit_parameters(lines, [p], '\t'))[0]
+            for node in list(wrap.findall("f:Parameter", NS)):
+                wrap.remove(node)
+                node.tail = None
+                insert_node_at(sec, node, None, get_child_indent(sec))
+                form_log.append(f"  + параметр {node.get('name')}")
+                form_changed += 1
 
 
 # Условное оформление: правила — как в form-compile; добавляются в конец оформления формы.
@@ -8126,6 +9332,1154 @@ def add_form_command_interface(ci):
 
 # Обработчики, которые были в форме до правки: callType по умолчанию ставится только новым
 _preexisting_handlers = set(n for n in root.iter(f"{{{FORM_NS}}}Event", f"{{{FORM_NS}}}Action"))
+
+# ── 9f. Реквизиты, команды, параметры: изменение (set), колонки по пути ──
+
+# Ключи записей — те, что читают эмиттеры form-compile, с их синонимами. Эмиттер незнакомый ключ
+# молча пропустил бы — поэтому он ошибка.
+ATTR_KEYS = ['name', 'title', 'type', 'valueType', 'typeDescription', 'описаниеТипов', 'типЗначений', 'planner', 'chart', 'main', 'view', 'edit', 'savedData', 'save', 'fillCheck', 'fillChecking', 'useAlways', 'functionalOptions', 'columns', 'additionalColumns', 'settings']
+COL_KEYS = ['name', 'title', 'type', 'fillCheck', 'fillChecking', 'functionalOptions', 'view', 'edit', 'useAlways']
+CMD_KEYS = ['name', 'title', 'tooltip', 'use', 'shortcut', 'picture', 'loadTransparent', 'action', 'actions', 'callType', 'functionalOptions', 'representation', 'modifiesSavedData', 'currentRowUse', 'table', 'associatedTableElementId', 'используемаяТаблица']
+PARAM_KEYS = ['name', 'type', 'key']
+
+# Тег, который пишет ключ. Ключи одного тега меняются одной пробой (action + callType, picture + loadTransparent).
+ATTR_KEY_TAGS = CIDict({'title': 'Title', 'type': 'Type', 'valueType': 'Settings', 'typeDescription': 'Settings', 'описаниеТипов': 'Settings', 'типЗначений': 'Settings', 'planner': 'Settings', 'chart': 'Settings', 'view': 'View', 'edit': 'Edit', 'savedData': 'SavedData', 'save': 'Save', 'fillCheck': 'FillCheck', 'fillChecking': 'FillCheck', 'useAlways': 'UseAlways', 'functionalOptions': 'FunctionalOptions', 'settings': 'Settings'})
+COL_KEY_TAGS = CIDict({'title': 'Title', 'type': 'Type', 'fillCheck': 'FillCheck', 'fillChecking': 'FillCheck', 'functionalOptions': 'FunctionalOptions', 'view': 'View', 'edit': 'Edit'})
+CMD_KEY_TAGS = CIDict({'title': 'Title', 'tooltip': 'ToolTip', 'use': 'Use', 'shortcut': 'Shortcut', 'picture': 'Picture', 'loadTransparent': 'Picture', 'action': 'Action', 'actions': 'Action', 'callType': 'Action', 'functionalOptions': 'FunctionalOptions', 'representation': 'Representation', 'modifiesSavedData': 'ModifiesSavedData', 'currentRowUse': 'CurrentRowUse', 'table': 'AssociatedTableElementId', 'associatedTableElementId': 'AssociatedTableElementId', 'используемаяТаблица': 'AssociatedTableElementId'})
+PARAM_KEY_TAGS = CIDict({'type': 'Type', 'key': 'KeyParameter'})
+
+# Ключи настроек динамического списка — теги, которые они пишут; отбор, параметры данных, сортировка и
+# оформление — части пользовательских настроек (ListSettings), меняются по отдельности
+DL_KEY_TAGS = CIDict({'query': ['ManualQuery', 'QueryText'], 'manualQuery': ['ManualQuery'], 'dynamicDataRead': ['DynamicDataRead'], 'autoFillAvailableFields': ['AutoFillAvailableFields'], 'fields': ['Field'], 'calculatedFields': ['CalculatedField'], 'parameters': ['Parameter'], 'keyType': ['KeyType'], 'keyFields': ['KeyField'], 'mainTable': ['MainTable'], 'getInvisibleFieldPresentations': ['GetInvisibleFieldPresentations'], 'autoSaveUserSettings': ['AutoSaveUserSettings'], 'listSettings': ['ListSettings']})
+DL_LIST_PARTS = CIDict({'filter': 'filter', 'dataParameters': 'dataParameters', 'order': 'order', 'conditionalAppearance': 'conditionalAppearance'})
+
+# Порядок детей — как пишут эмиттеры (он же платформенный). Settings динамического списка — после Columns.
+SECTION_CHILD_ORDER = {
+    'Attribute': ['Title', 'Type', 'Settings', 'MainAttribute', 'View', 'Edit', 'SavedData', 'Save', 'FillCheck', 'UseAlways', 'FunctionalOptions', 'Columns', 'Settings#DynamicList'],
+    'Column': ['Title', 'Type', 'FillCheck', 'FunctionalOptions', 'View', 'Edit'],
+    'Command': ['Title', 'ToolTip', 'Use', 'Shortcut', 'Picture', 'Action', 'FunctionalOptions', 'Representation', 'ModifiesSavedData', 'CurrentRowUse', 'AssociatedTableElementId'],
+    'Parameter': ['Type', 'KeyParameter'],
+    # Настройки динамического списка — порядок корпуса (ERP, БП, УТ); KeyField и MainTable вместе не встречаются — как в эмиттере
+    'ListSettings': ['filter', 'dataParameters', 'order', 'conditionalAppearance', 'item', 'itemsViewMode', 'itemsUserSettingID', 'itemsUserSettingPresentation'],
+    'Settings': ['AutoFillAvailableFields', 'ManualQuery', 'DynamicDataRead', 'QueryText', 'Field', 'CalculatedField', 'Parameter', 'KeyType', 'KeyField', 'MainTable', 'AutoSaveUserSettings', 'GetInvisibleFieldPresentations', 'ListSettings'],
+}
+
+
+def get_section_child_rank(parent_tag, child):
+    ln = local_name(child)
+    if ln == 'Settings' and child.get(f"{{{XSI_NS}}}type") == 'DynamicList':
+        ln = 'Settings#DynamicList'
+    order = SECTION_CHILD_ORDER.get(parent_tag, [])
+    return order.index(ln) if ln in order else -1
+
+
+def insert_section_child(parent, child, indent=None):
+    if not indent:
+        indent = get_child_indent(parent)
+    rank = get_section_child_rank(local_name(parent), child)
+    ref = None
+    for c in parent:
+        if not _is_el(c):
+            continue
+        if get_section_child_rank(local_name(parent), c) > rank:
+            ref = c
+            break
+    insert_node_at(parent, child, ref, indent)
+
+
+def new_dsl_spec(h):
+    return ci_json(json.loads(json.dumps(h, ensure_ascii=False)))
+
+
+# Узел секции по имени (имена в 1С регистронезависимы)
+def find_section_item(section, tag, name):
+    for n in root.findall(f"f:{section}/f:{tag}", NS):
+        if (n.get('name') or '').lower() == name.lower():
+            return n
+    return None
+
+
+def test_main_attribute(node):
+    m = node.find("f:MainAttribute", NS)
+    return m is not None and (m.text or '').strip() == 'true'
+
+
+# Вид реквизита: таблица (свои колонки), динамический список или прочее
+def get_attr_kind(node):
+    ts = [(t.text or '').strip() for t in node.findall("f:Type/v8:Type", NS)]
+    if len(ts) == 1 and ts[0] in ('v8:ValueTable', 'v8:ValueTree'):
+        return 'table'
+    if len(ts) == 1 and ts[0] == 'cfg:DynamicList':
+        return 'dynlist'
+    return 'scalar'
+
+
+# Тип для вывода — в записи DSL: string(150), decimal(15,2), CatalogRef.X, A | B
+def format_type_node(t):
+    tys = [] if t is None else [c for c in t if _is_el(c) and etree.QName(c.tag).namespace == V8_NS and local_name(c) in ('Type', 'TypeSet', 'TypeId')]
+    if not tys:
+        return '(no type)'
+    parts = []
+    for ty in tys:
+        v = re.sub(r'^(cfg|v8|xs|d\d+p\d+):', '', (ty.text or '').strip())
+        if v == 'string':
+            l = t.find("v8:StringQualifiers/v8:Length", NS)
+            if l is not None and (l.text or '').strip() != '0':
+                v = f"string({(l.text or '').strip()})"
+        elif v == 'decimal':
+            d = t.find("v8:NumberQualifiers/v8:Digits", NS)
+            f = t.find("v8:NumberQualifiers/v8:FractionDigits", NS)
+            if d is not None:
+                v = f"decimal({(d.text or '').strip()},{(f.text or '').strip() if f is not None else '0'})"
+        elif v == 'dateTime':
+            df = t.find("v8:DateQualifiers/v8:DateFractions", NS)
+            if df is not None:
+                v = {'Date': 'date', 'Time': 'time', 'DateTime': 'dateTime'}.get((df.text or '').strip())
+        parts.append(v)
+    return ' | '.join(str(p) for p in parts)
+
+
+# Пробы эмиттеров form-compile: узел, каким его пишет создание формы, — с отступами места назначения
+def get_attr_probe(spec, attr_indent):
+    ind = attr_indent[1:] if len(attr_indent) > 0 else ''
+    wrap = invoke_section_emit(lambda lines: emit_attributes(lines, [spec], ind), normalize=True)[0]
+    return wrap.find("f:Attribute", NS)
+
+
+def get_column_probe(spec, attr_name):
+    a = get_attr_probe(new_dsl_spec({'name': attr_name, 'title': '', 'type': 'ValueTable', 'columns': [spec]}), "\t\t")
+    return a.find("f:Columns/f:Column", NS)
+
+
+def get_command_probe(spec):
+    wrap = invoke_section_emit(lambda lines: emit_commands(lines, [spec], '\t'), normalize=True)[0]
+    return wrap.find("f:Command", NS)
+
+
+def get_parameter_probe(spec):
+    wrap = invoke_section_emit(lambda lines: emit_parameters(lines, [spec], '\t'))[0]
+    return wrap.find("f:Parameter", NS)
+
+
+# Теги ключа: у узла снимаются, из пробы встают на своё место (в пробе нет — так и остаётся: false, null)
+def set_section_tags(target, probe, tags):
+    # Отступ детей — до снятия тегов: без детей у узла остаётся только закрывающий перевод строки
+    ci = get_child_indent(target)
+    for t in tags:
+        for x in list(target.findall(f"f:{t}", NS)):
+            remove_node_with_ws(x)
+    if probe is None:
+        return
+    for t in tags:
+        for pn in list(probe.findall(f"f:{t}", NS)):
+            old = get_node_indent(pn)
+            remove_node_with_ws(pn)
+            insert_section_child(target, pn, ci)
+            set_subtree_indent(pn, old, ci)
+
+
+def format_set_value(v):
+    if v is None:
+        return 'null'
+    if isinstance(v, bool):
+        return str(v).lower()
+    if isinstance(v, (str, int, float)):
+        return str(v)
+    return json.dumps(v, ensure_ascii=False, separators=(',', ':'))
+
+
+# Общий ход set: ключи — по тегам; на каждый тег одна проба со всеми его ключами. probe_of — проба по
+# ключам тега, x — что ей нужно знать об узле (имя, отступ)
+def set_section_node(node, props, key_tags, probe_of, x, label, c):
+    global section_changed
+    by_tag = {}
+    for k, v in props:
+        by_tag.setdefault(key_tags[k], []).append((k, v))
+    for tag, ps in by_tag.items():
+        given = [(k, v) for k, v in ps if v is not None]
+        probe = None
+        if given:
+            probe = probe_of(dict(given), x)
+        elif tag == 'Title' and x.get('AutoTitle'):
+            # умолчание заголовка — как при добавлении: из имени
+            probe = probe_of({'#auto': True}, x)
+        before_type = format_type_node(node.find("f:Type", NS)) if tag == 'Type' else None
+        set_section_tags(node, probe, [tag])
+        if tag == 'Type':
+            change_log.append(f"  ~ {label}: type {before_type} → {format_type_node(node.find('f:Type', NS))}")
+        else:
+            shown = ', '.join(f"{k} сброшено" if v is None else f"{k}={format_set_value(v)}" for k, v in ps)
+            change_log.append(f"  ~ {label}: {shown}")
+        section_changed += 1
+
+
+def assert_set_keys(props, key_tags, c, rename_hint):
+    for k, _ in props:
+        if k.lower() == 'name':
+            fail(f"{c}: имя через set не меняется — переименование: {rename_hint}")
+        if k not in key_tags:
+            allowed = sorted(set(key_tags.keys()), key=str.lower)
+            fail(f"{c}: неизвестный ключ '{k}'; допустимы: {', '.join(allowed)}")
+
+
+def _set_targets(op):
+    v = op.get('set')
+    items = v if isinstance(v, list) else [v]
+    return [str(x) for x in items if x is not None and str(x) != '']
+
+
+# Колонка по пути: Таблица.Колонка — своя колонка реквизита-таблицы; Объект.ТЧ.Колонка — доп. колонка
+# табличной части (группа AdditionalColumns table="Объект.ТЧ")
+def resolve_column_path(path, c):
+    segs = path.split('.')
+    if len(segs) < 2 or any(not s for s in segs):
+        fail(f"{c}: путь колонки — Таблица.Колонка или Объект.ТабличнаяЧасть.Колонка")
+    attr = find_section_item('Attributes', 'Attribute', segs[0])
+    if attr is None:
+        fail(f"{c}: реквизит '{segs[0]}' не найден в форме")
+    col_name = segs[-1]
+    cols = attr.find("f:Columns", NS)
+    kind = get_attr_kind(attr)
+    if kind == 'dynlist':
+        fail(f"{c}: у динамического списка колонок нет — поля задаёт запрос (set + settings)")
+    if len(segs) == 2:
+        if kind != 'table':
+            fail(f"{c}: у '{segs[0]}' нет своих колонок; доп. колонка табличной части — путь {segs[0]}.ТабличнаяЧасть.Колонка")
+        container = cols
+        table = None
+    else:
+        table = '.'.join(segs[:-1])
+        container = None
+        if cols is not None:
+            for g in cols.findall("f:AdditionalColumns", NS):
+                if (g.get('table') or '').lower() == table.lower():
+                    container = g
+                    break
+    col = None
+    if container is not None:
+        for x in container.findall("f:Column", NS):
+            if (x.get('name') or '').lower() == col_name.lower():
+                col = x
+                break
+    return {'Attr': attr, 'Container': container, 'Table': table, 'Name': col_name, 'Column': col, 'Columns': cols, 'Segs': segs, 'Kind': kind}
+
+
+# Табличные части объекта формы — из его описания рядом (<Объект>.xml над Forms); нет описания — None
+def get_object_tabular_sections():
+    d = os.path.dirname(resolved_form_path)
+    for _ in range(3):
+        d = os.path.dirname(d)
+        if not d:
+            return None
+    xml = d + '.xml'
+    if not os.path.exists(xml):
+        return None
+    with open(xml, encoding='utf-8-sig', errors='replace') as fh:
+        t = fh.read()
+    return re.findall(r'<TabularSection uuid="[^"]*">[\s\S]*?<Properties>\s*<Name>([^<]+)</Name>', t)
+
+
+# Новая группа доп. колонок: путь таблицы — от колонки-таблицы реквизита или табличной части объекта.
+# Что можно проверить по форме и описанию объекта — проверяется; остальное проверит платформа при загрузке.
+def assert_additional_table(r, c):
+    segs = r['Segs']
+    an = r['Attr'].get('name')
+    if r['Kind'] == 'table':
+        # Каждый уровень пути — колонка-таблица предыдущего (в корпусе только ValueTable/ValueTree)
+        level = r['Columns']
+        for k in range(1, len(segs) - 1):
+            prefix = '.'.join(segs[:k])
+            if k > 1:
+                level = None
+                for g in r['Columns'].findall("f:AdditionalColumns", NS):
+                    if (g.get('table') or '').lower() == prefix.lower():
+                        level = g
+                        break
+                if level is None:
+                    fail(f"{c}: вложенной таблицы '{prefix}' в форме нет — сначала добавь её колонки")
+            owner = None
+            if level is not None:
+                for x in level.findall("f:Column", NS):
+                    if (x.get('name') or '').lower() == segs[k].lower():
+                        owner = x
+                        break
+            if owner is None:
+                fail(f"{c}: у '{prefix}' нет колонки '{segs[k]}' — путь вложенной таблицы идёт от колонки реквизита")
+            ot = [(t.text or '').strip() for t in owner.findall("f:Type/v8:Type", NS)]
+            if len(ot) != 1 or ot[0] not in ('v8:ValueTable', 'v8:ValueTree'):
+                fail(f"{c}: колонка '{prefix}.{segs[k]}' — не таблица значений, вложенных колонок у неё нет")
+        return
+    if len(segs) == 3 and test_main_attribute(r['Attr']) and not is_extension:
+        ts = get_object_tabular_sections()
+        if ts is not None:
+            if segs[1].lower() not in [x.lower() for x in ts]:
+                fail(f"{c}: у объекта нет табличной части '{segs[1]}'" + (f"; есть: {', '.join(ts)}" if ts else ""))
+            return
+    warn_log.append(f"[WARN] new additional columns of '{r['Table']}' — the table path is not checked here; the platform rejects a wrong one at load")
+
+
+def invoke_attr_set(op, idx):
+    ctx = f"attributes[{idx}] set"
+    targets = _set_targets(op)
+    if not targets:
+        fail(f"{ctx}: укажи имя реквизита (колонку — путём Таблица.Колонка) или список имён")
+    props = [(k, v) for k, v in op.items() if k.lower() != 'set']
+    if not props:
+        fail(f"{ctx}: не указано, что менять")
+    for t in targets:
+        c = f"{ctx} '{t}'"
+        if '.' in t:
+            r = resolve_column_path(t, c)
+            if r['Column'] is None:
+                fail(f"{c}: колонка не найдена")
+            if test_borrowed(r['Attr'].get('name'), 'attribute'):
+                fail(f"{c}: колонка заимствованного реквизита — её свойства задаёт исходная форма")
+            assert_set_keys(props, COL_KEY_TAGS, c, f'{{ "rename": "{t}", "to": "НовоеИмя" }}')
+            for k, v in props:
+                if k.lower() == 'type' and (v is None or str(v) == ''):
+                    fail(f"{c}: тип обязателен — укажи новый")
+
+            def col_probe(h, x):
+                h['name'] = x['Col']
+                return get_column_probe(new_dsl_spec(h), x['Attr'])
+            set_section_node(r['Column'], props, COL_KEY_TAGS, col_probe, {'Col': r['Column'].get('name'), 'Attr': r['Attr'].get('name')}, t, c)
+            continue
+        node = find_section_item('Attributes', 'Attribute', t)
+        if node is None:
+            fail(f"{c}: реквизит не найден в форме")
+        name = node.get('name')
+        if test_borrowed(name, 'attribute'):
+            fail(f"{c}: заимствованный реквизит — его свойства задаёт исходная форма")
+        for k, _ in props:
+            if k.lower() in ('columns', 'additionalcolumns'):
+                fail(f'{c}: колонки задаются путём: {{ "name": "{name}.Колонка", … }} — добавить, {{ "set": "{name}.Колонка", … }} — изменить, {{ "remove": "{name}.Колонка" }} — удалить')
+            if k.lower() == 'main':
+                fail(f"{c}: основной реквизит через set не назначается")
+        assert_set_keys(props, ATTR_KEY_TAGS, c, f'{{ "rename": "{name}", "to": "НовоеИмя" }}')
+        kind = get_attr_kind(node)
+        is_main = test_main_attribute(node)
+        settings_op = [(k, v) for k, v in props if k.lower() == 'settings']
+        rest = [(k, v) for k, v in props if k.lower() != 'settings']
+        for k, v in rest:
+            tag = ATTR_KEY_TAGS[k]
+            if k.lower() == 'type':
+                if v is None or str(v) == '':
+                    fail(f"{c}: тип обязателен — укажи новый")
+                if is_main:
+                    fail(f"{c}: тип основного реквизита не меняется — он задаёт, что редактирует форма")
+            if tag == 'Settings' and kind == 'dynlist':
+                fail(f"{c}: '{k}' к динамическому списку не применимо — его настройки меняет settings")
+        ind = get_node_indent(node)
+        if rest:
+            type_op = [v for k, v in rest if k.lower() == 'type']
+            if type_op:
+                pt = get_attr_probe(new_dsl_spec({'name': name, 'title': '', 'type': type_op[0]}), ind)
+                nk = get_attr_kind(pt)
+                if nk != kind:
+                    what = {'table': 'таблица значений/дерево', 'dynlist': 'динамический список', 'scalar': 'значение'}
+                    fail(f"{c}: тип меняет вид реквизита ({what[kind]} → {what[nk]}) — колонки, настройки и привязанные элементы не переносятся; такой реквизит удаляют и добавляют заново")
+
+            def attr_probe(h, x):
+                h['name'] = x['Name']
+                if '#auto' in h:
+                    del h['#auto']
+                elif not any(k.lower() == 'title' for k in h):
+                    h['title'] = ''
+                return get_attr_probe(new_dsl_spec(h), x['Ind'])
+            set_section_node(node, rest, ATTR_KEY_TAGS, attr_probe, {'Name': name, 'Ind': ind, 'AutoTitle': not is_main}, name, c)
+        if settings_op:
+            set_dyn_list_settings(node, settings_op[0][1], ind, c)
+
+
+# Настройки динамического списка: перевыпускаются только переданные части (запрос, основная таблица,
+# поля…); остальное — в том числе пользовательские настройки списка — остаётся
+def set_dyn_list_settings(node, v, ind, c):
+    global section_changed
+    name = node.get('name')
+    if get_attr_kind(node) != 'dynlist':
+        fail(f"{c}: settings — настройки динамического списка, а '{name}' не динамический список")
+    if not isinstance(v, dict) or not v:
+        fail(f'{c}: settings — объект с меняемыми настройками, напр. {{ "query": "…" }}')
+    keys = list(v.keys())
+    for k in keys:
+        if k not in DL_KEY_TAGS and k not in DL_LIST_PARTS:
+            allowed = sorted(list(DL_KEY_TAGS.keys()) + list(DL_LIST_PARTS.keys()), key=str.lower)
+            fail(f"{c}: settings — неизвестный ключ '{k}'; допустимы: {', '.join(allowed)}")
+    parts = [k for k in keys if k in DL_LIST_PARTS]
+    has_ls = any(k.lower() == 'listsettings' for k in keys)
+    if parts and has_ls:
+        fail(f"{c}: settings — listSettings целиком или {', '.join(parts)} по частям, не вместе")
+    target = None
+    for s in node.findall("f:Settings", NS):
+        if s.get(f"{{{XSI_NS}}}type") == 'DynamicList':
+            target = s
+            break
+    if target is None:
+        fail(f"{c}: у '{name}' нет настроек динамического списка")
+    with_ = get_attr_probe(new_dsl_spec({'name': name, 'title': '', 'settings': v}), ind).find("f:Settings", NS)
+    without = get_attr_probe(new_dsl_spec({'name': name, 'title': '', 'settings': {'_': None}}), ind).find("f:Settings", NS)
+    # Теги — по ключам (значение, равное умолчанию, тоже записывается) и всё, что проба меняет помимо
+    # них; пользовательские настройки списка — только переданными частями
+    d = get_probe_diff(without, with_)
+    tags = []
+    for k in keys:
+        if k in DL_KEY_TAGS:
+            tags.extend(DL_KEY_TAGS[k])
+    for t in d['Tags']:
+        if t != 'ListSettings' or has_ls:
+            tags.append(t)
+    tags = list(dict.fromkeys(tags))
+    labels = list(tags)
+    if tags:
+        set_section_tags(target, with_, tags)
+    if parts:
+        tls = target.find("f:ListSettings", NS)
+        pls = with_.find("f:ListSettings", NS)
+        if tls is None or get_first_element_child(tls) is None:
+            set_section_tags(target, with_, ['ListSettings'])
+            labels.append('ListSettings')
+        else:
+            ci = get_child_indent(tls)
+            for k in parts:
+                ln = DL_LIST_PARTS[k]
+                for x in list(tls.findall(f"dcsset:{ln}", NS)):
+                    remove_node_with_ws(x)
+                for pn in list(pls.findall(f"dcsset:{ln}", NS)):
+                    old = get_node_indent(pn)
+                    remove_node_with_ws(pn)
+                    insert_section_child(tls, pn, ci)
+                    set_subtree_indent(pn, old, ci)
+                labels.append(f"ListSettings/{ln}")
+    change_log.append(f"  ~ {name}: settings.{', settings.'.join(keys)} → {', '.join(labels)}")
+    section_changed += 1
+
+
+# Новый реквизит формы — как в form-compile; id — из пула формы
+def add_form_attribute(attr, idx):
+    ctx = f"attributes[{idx}] '{attr.get('name')}'"
+    assert_op_keys(attr, ATTR_KEYS, ctx)
+    cols_in = attr.get('columns')
+    for col in (cols_in if isinstance(cols_in, list) else ([cols_in] if cols_in else [])):
+        if isinstance(col, dict):
+            assert_op_keys(col, COL_KEYS, f"{ctx} column '{col.get('name')}'")
+    add_in = attr.get('additionalColumns')
+    for g in (add_in if isinstance(add_in, list) else ([add_in] if add_in else [])):
+        if not isinstance(g, dict):
+            continue
+        assert_op_keys(g, ['table', 'columns'], f"{ctx} additionalColumns")
+        gc = g.get('columns')
+        for col in (gc if isinstance(gc, list) else ([gc] if gc else [])):
+            if isinstance(col, dict):
+                assert_op_keys(col, COL_KEYS, f"{ctx} additionalColumns '{g.get('table')}' column '{col.get('name')}'")
+    attrs_section = get_or_create_root_section('Attributes')
+    if attr.get("columns"):
+        dsl_col_names = set()
+        for col in attr["columns"]:
+            _assert_edit_unique(str(col["name"]), dsl_col_names, f"column name of '{attr['name']}'")
+    for a in attrs_section.findall("f:Attribute", NS):
+        if (a.get('name') or '').lower() == str(attr['name']).lower():
+            print(f"[ERROR] Attribute '{attr['name']}' already exists in form — attribute names must be unique; to change it: {{ \"set\": \"{attr['name']}\", … }}")
+            sys.exit(1)
+    if get_dsl_bool(attr, ['main'], False):
+        for m in attrs_section.findall("f:Attribute/f:MainAttribute", NS):
+            if (m.text or '').strip() == 'true':
+                fail(f"attributes: '{attr['name']}' — у формы уже есть основной реквизит '{m.getparent().get('name')}'")
+    attr_child_indent = get_child_indent(attrs_section)
+    # Реквизиты пишет эмиттер form-compile (все его ключи); id — из пулов формы
+    wrap = invoke_section_emit(lambda lines: emit_attributes(lines, [attr], '\t'), normalize=True)[0]
+    for node in list(wrap.findall("f:Attribute", NS)):
+        attr_id = new_attr_id()
+        node.set('id', str(attr_id))
+        col_id = 1
+        for col in node.iterfind(".//f:Column", NS):
+            col.set('id', str(col_id))
+            col_id += 1
+        wrap.remove(node)
+        node.tail = None
+        # Условное оформление — последнее в Attributes: реквизит встаёт перед ним
+        ca_node = attrs_section.find("f:ConditionalAppearance", NS)
+        if ca_node is not None:
+            insert_node_at(attrs_section, node, ca_node, attr_child_indent)
+        else:
+            insert_into_container(attrs_section, node, None, attr_child_indent)
+        added_attrs.append(f"  + {node.get('name')}: {format_type_node(node.find('f:Type', NS))} (id={attr_id})")
+        add_attr_collision_warnings(node.get('name'))
+
+
+# Новая колонка существующего реквизита: { "name": "Таблица.Колонка" } / { "name": "Объект.ТЧ.Колонка" }.
+# id — следующий за наибольшим id колонок реквизита: Конфигуратор нумерует колонки внутри реквизита.
+def add_attr_column(op, idx):
+    path = str(op.get('name'))
+    c = f"attributes[{idx}] '{path}'"
+    assert_op_keys(op, [k for k in COL_KEYS if k != 'useAlways'], c)
+    if not op.get('type'):
+        fail(f"{c}: укажи тип колонки (type)")
+    r = resolve_column_path(path, c)
+    if r['Column'] is not None:
+        fail(f'{c}: колонка уже есть; изменить: {{ "set": "{path}", … }}')
+    if test_borrowed(r['Attr'].get('name'), 'attribute'):
+        fail(f"{c}: заимствованный реквизит — его колонки задаёт исходная форма")
+    attr = r['Attr']
+    cols = r['Columns']
+    if cols is None:
+        cols = etree.Element(f"{{{FORM_NS}}}Columns")
+        insert_section_child(attr, cols)
+    container = r['Container']
+    if container is None and r['Table'] is not None:
+        assert_additional_table(r, c)
+        container = etree.Element(f"{{{FORM_NS}}}AdditionalColumns")
+        container.set('table', r['Table'])
+        insert_node_at(cols, container, None, get_child_indent(cols))
+    h = {k: v for k, v in op.items()}
+    h['name'] = r['Name']
+    col = get_column_probe(new_dsl_spec(h), attr.get('name'))
+    mx = 0
+    for x in attr.iterfind(".//f:Column", NS):
+        try:
+            n = int(x.get('id') or '')
+        except ValueError:
+            continue
+        if n > mx:
+            mx = n
+    col.set('id', str(mx + 1))
+    old = get_node_indent(col)
+    remove_node_with_ws(col)
+    if container is None:
+        # Своя колонка — перед группами доп. колонок
+        ref = cols.find("f:AdditionalColumns", NS)
+        insert_node_at(cols, col, ref, get_child_indent(cols))
+    else:
+        insert_node_at(container, col, None, get_child_indent(container))
+    set_subtree_indent(col, old, get_node_indent(col))
+    added_attrs.append(f"  + {path}: {format_type_node(col.find('f:Type', NS))} (id={mx + 1})")
+
+
+# Удаление колонки: элементы на ней — ошибка, как у реквизита; её поля в сохранении и «всегда
+# использовать» реквизита уходят вместе с ней (иначе платформа не загрузит форму)
+def remove_attr_column(path, idx):
+    global removed_count
+    c = f"attributes[{idx}] remove '{path}'"
+    r = resolve_column_path(path, c)
+    if r['Column'] is None:
+        fail(f"{c}: колонка не найдена")
+    attr_name = r['Attr'].get('name')
+    if test_borrowed(attr_name, 'attribute'):
+        fail(f"{c}: колонка заимствованного реквизита — платформа не даёт удалять её в расширении")
+    full = f"{r['Table']}.{r['Name']}" if r['Table'] is not None else f"{attr_name}.{r['Name']}"
+
+    def is_path(t):
+        return t.lower() == full.lower() or t.lower().startswith(full.lower() + ".")
+
+    users = []
+    for s in get_element_scopes():
+        for t in s.iterdescendants():
+            if _is_el(t) and local_name(t).endswith('DataPath') and is_path(_text(t)):
+                o = get_owner_element(t)
+                if o is not None:
+                    users.append(f"{o.get('name')} ({local_name(t)})")
+    ca = _form_ca()
+    if ca is not None:
+        for t in ca.iterdescendants():
+            if not _is_el(t) or etree.QName(t.tag).namespace != DCSSET_NS or local_name(t) not in ('left', 'right'):
+                continue
+            xt = t.get(f"{{{XSI_NS}}}type") or ""
+            if xt.endswith(':Field') and is_path(_text(t)):
+                users.append(f"условное оформление (отбор по {_text(t)})")
+    if users:
+        fail(f"{c}: к колонке привязаны: {'; '.join(_uniq(users))} — удали или перепривяжи их раньше (elements выполняются до attributes)")
+    # Вложенные доп. колонки колонки-таблицы уходят вместе с ней (элементы на них — уже в проверке выше)
+    for g in list(r['Attr'].findall("f:Columns/f:AdditionalColumns", NS)):
+        gt = g.get('table') or ''
+        if is_path(gt):
+            remove_node_with_ws(g)
+            remove_log.append(f"  - доп. колонки {gt}")
+    for f in list(r['Attr'].findall("f:Save/f:Field", NS)) + list(r['Attr'].findall("f:UseAlways/f:Field", NS)):
+        if is_path(_text(f).lstrip('~')):
+            box = f.getparent()
+            remove_node_with_ws(f)
+            if get_first_element_child(box) is None:
+                remove_node_with_ws(box)
+            remove_log.append(f"  - {local_name(box)}/Field {_text(f)}")
+    container = r['Column'].getparent()
+    remove_node_with_ws(r['Column'])
+    if get_first_element_child(container) is None:
+        if local_name(container) == 'Columns':
+            remove_node_with_ws(container)
+        else:
+            for ch in list(container):
+                container.remove(ch)
+            container.text = None
+    remove_log.append(f"  - колонка {path}")
+    removed_count += 1
+    add_module_candidates(f"column '{path}' removed — Module.bsl may still refer to it, check these lines:", rf"\.\s*{re.escape(r['Name'])}(?![\wА-Яа-яЁё])")
+
+
+# Строки модуля, где возможно обращение (к колонке — через строку таблицы, надёжно не найти): в отчёт
+def add_module_candidates(header, pattern):
+    scan = get_module_scan()
+    if not scan["Exists"]:
+        return
+    hits = [i + 1 for i, l in enumerate(scan["Code"]) if re.search(pattern, l, re.I)]
+    if not hits:
+        return
+    warn_log.append(f"[WARN] {header}")
+    for l in hits:
+        warn_log.append(f"  {format_module_line(l)}")
+
+
+def format_module_line(l):
+    global module_outline
+    scan = get_module_scan()
+    if module_outline is None:
+        module_outline = get_module_outline(scan["Code"])
+    m = ''
+    for p in module_outline['procs']:
+        if p['start'] <= l <= p['end']:
+            m = f" [{p['name']}]"
+            break
+    return f"Module.bsl:{l}{m}: {scan['Lines'][l - 1].strip()}"
+
+
+def invoke_cmd_set(op, idx):
+    ctx = f"commands[{idx}] set"
+    targets = _set_targets(op)
+    if not targets:
+        fail(f"{ctx}: укажи имя команды или список имён")
+    props = [(k, v) for k, v in op.items() if k.lower() != 'set']
+    if not props:
+        fail(f"{ctx}: не указано, что менять")
+    for t in targets:
+        c = f"{ctx} '{t}'"
+        node = find_section_item('Commands', 'Command', t)
+        if node is None:
+            fail(f"{c}: команда не найдена в форме")
+        name = node.get('name')
+        assert_set_keys(props, CMD_KEY_TAGS, c, f'{{ "rename": "{name}", "to": "НовоеИмя" }}')
+        names = [k.lower() for k, _ in props]
+        if 'calltype' in names and not ('action' in names or 'actions' in names):
+            fail(f"{c}: callType задаётся вместе с action")
+        if 'loadtransparent' in names and 'picture' not in names:
+            fail(f"{c}: loadTransparent задаётся вместе с picture")
+        if 'action' in names or 'actions' in names:
+            old_acts = [(a.text or '').strip() for a in node.findall("f:Action", NS)]
+            acts = op.get('actions')
+            acts = acts if isinstance(acts, list) else ([acts] if acts else [])
+            new_acts = [str(x) for x in [op.get('action')] + [a.get('handler') if isinstance(a, dict) else None for a in acts] if x]
+            add_left_handlers([a for a in old_acts if a not in new_acts])
+
+        def cmd_probe(h, x):
+            h['name'] = x['Name']
+            if '#auto' in h:
+                del h['#auto']
+            elif not any(k.lower() == 'title' for k in h):
+                h['title'] = ''
+            return get_command_probe(new_dsl_spec(h))
+        # В расширении новый обработчик без callType — с видом вызова прежнего (иначе эмиттер поставит Before)
+        tp = list(props)
+        if is_extension and 'action' in names and 'calltype' not in names:
+            acts = node.findall("f:Action", NS)
+            if len(acts) == 1 and acts[0].get('callType') is not None:
+                tp.append(('callType', acts[0].get('callType')))
+        set_section_node(node, tp, CMD_KEY_TAGS, cmd_probe, {'Name': name, 'AutoTitle': True}, f"команда {name}", c)
+
+
+def invoke_param_set(op, idx):
+    ctx = f"parameters[{idx}] set"
+    targets = _set_targets(op)
+    if not targets:
+        fail(f"{ctx}: укажи имя параметра или список имён")
+    props = [(k, v) for k, v in op.items() if k.lower() != 'set']
+    if not props:
+        fail(f"{ctx}: не указано, что менять")
+    for t in targets:
+        c = f"{ctx} '{t}'"
+        node = find_section_item('Parameters', 'Parameter', t)
+        if node is None:
+            fail(f"{c}: параметр не найден в форме")
+        name = node.get('name')
+        if test_borrowed(name, 'parameter'):
+            fail(f"{c}: заимствованный параметр — его задаёт исходная форма")
+        assert_set_keys(props, PARAM_KEY_TAGS, c, f'{{ "rename": "{name}", "to": "НовоеИмя" }}')
+        for k, v in props:
+            if k.lower() == 'type' and (v is None or str(v) == ''):
+                fail(f"{c}: тип обязателен — укажи новый")
+
+        def param_probe(h, x):
+            h['name'] = x['Name']
+            return get_parameter_probe(new_dsl_spec(h))
+        set_section_node(node, props, PARAM_KEY_TAGS, param_probe, {'Name': name}, f"параметр {name}", c)
+
+
+# ── 9g. Переименование: ссылки в форме, модуль, коллизии имён ──
+
+module_methods = None
+module_dirty = False
+module_log = []
+NO_CTX_DIRECTIVE = r'^\s*&\s*(НаСервереБезКонтекста|НаКлиентеНаСервереБезКонтекста|AtServerNoContext|AtClientAtServerNoContext)(?!\w)'
+
+
+# Методы модуля: границы, без контекста ли (реквизиты формы там не видны), параметры
+def get_module_methods():
+    global module_methods
+    if module_methods is not None:
+        return module_methods
+    scan = get_module_scan()
+    m = {'Mask': scan['Mask'], 'Lits': [x for x in scan['Literals'] if x['Col'] >= 0]}
+    outline = get_module_outline(m['Mask'])
+    methods = []
+    for p in outline['procs']:
+        no_ctx = False
+        hdr = p['start'] - 1
+        for k in range(p['start'] - 1, p['end']):
+            l = m['Mask'][k]
+            if re.match(r'^\s*&', l):
+                if re.search(NO_CTX_DIRECTIVE, l, re.I):
+                    no_ctx = True
+                continue
+            hdr = k
+            break
+        sig = ''
+        k = hdr
+        while k < p['end']:
+            sig += ' ' + m['Mask'][k]
+            if ')' in sig:
+                break
+            k += 1
+        params = []
+        mm = re.search(r'\(([^)]*)\)', sig)
+        if mm:
+            for x in mm.group(1).split(','):
+                x = re.sub(r'^\s*(Знач|Val)\s+', '', x, flags=re.I).split('=')[0].strip()
+                if x:
+                    params.append(x)
+        methods.append({'name': p['name'], 'start': p['start'], 'end': p['end'], 'header': hdr + 1, 'noCtx': no_ctx, 'params': params})
+    module_methods = {'Mask': m['Mask'], 'Lits': m['Lits'], 'Methods': methods, 'Vars': None}
+    return module_methods
+
+
+def get_method_at(mm, line):
+    for x in mm['Methods']:
+        if x['start'] <= line <= x['end']:
+            return x
+    return None
+
+
+# Обращения к имени в модуле — с позициями для правки. Реквизит: имя не после точки или после
+# ЭтаФорма./ЭтотОбъект. (в методах без контекста реквизитов нет); строкой — в известных вызовах.
+# Команда и параметр: Команды.Имя / Параметры.Имя.
+def find_module_spans(name, kind):
+    scan = get_module_scan()
+    if not scan["Exists"]:
+        return []
+    mm = get_module_methods()
+    n = re.escape(name)
+    # Метод, где имя объявлено локально (Перем, параметр), — там это не реквизит. Команды./Параметры. —
+    # коллекции формы только в методе с контекстом, где это слово не локальное
+    local_names = find_module_decl(name)['Locals'] if kind == 'attribute' else {}
+    coll_words = ['Команды', 'Commands'] if kind == 'command' else ['Параметры', 'Parameters']
+    coll_local = set()
+    if kind != 'attribute':
+        for w in coll_words:
+            d = find_module_decl(w)
+            coll_local.update(d['Locals'].keys())
+            for l in d['Assigns']:
+                mt = get_method_at(mm, l)
+                if mt is not None:
+                    coll_local.add(mt['name'])
+    spans = []
+    for i, code in enumerate(mm['Mask']):
+        if name.lower() not in code.lower():
+            continue
+        meth = get_method_at(mm, i + 1)
+        if kind == 'attribute':
+            if meth is not None and meth['noCtx']:
+                continue
+            for m in re.finditer(rf"(?<!\w){n}(?!\w)", code, re.I):
+                before = code[:m.start()]
+                qual = False
+                if re.search(r'\.\s*$', before):
+                    if not re.search(r'(?<![\w.])(ЭтаФорма|ЭтотОбъект|ThisForm|ThisObject)\s*\.\s*$', before, re.I):
+                        continue
+                    qual = True
+                if not qual and meth is not None and meth['name'] in local_names:
+                    continue
+                spans.append({'Line': i + 1, 'Col': m.start(), 'Len': m.end() - m.start(), 'Method': meth, 'Qualified': qual, 'Doubtful': False})
+        else:
+            coll = '|'.join(coll_words)
+            doubt = meth is not None and (meth['noCtx'] or meth['name'] in coll_local)
+            for m in re.finditer(rf"(?<!\w)(?:{coll})\s*\.\s*({n})(?!\w)", code, re.I):
+                spans.append({'Line': i + 1, 'Col': m.start(1), 'Len': m.end(1) - m.start(1), 'Method': meth, 'Qualified': True, 'Doubtful': doubt})
+    if kind == 'attribute':
+        for lit in mm['Lits']:
+            t = lit['Text']
+            if (t.lower() == name.lower() or t.lower().startswith(name.lower() + '.')) and re.search(ATTR_LITERAL_CONTEXT, lit['Prefix'], re.I):
+                lm = get_method_at(mm, lit['Line'])
+                spans.append({'Line': lit['Line'], 'Col': lit['Col'], 'Len': len(name), 'Method': lm, 'Qualified': True, 'Doubtful': lm is not None and lm['noCtx']})
+    return spans
+
+
+# Объявления Перем по операторам (в строке их может быть несколько, оператор — на несколько строк):
+# имя и строка, где оно стоит
+def get_var_declarations(mask):
+    text = '\n'.join(mask)
+    starts = []
+    acc = 0
+    for l in mask:
+        starts.append(acc)
+        acc += len(l) + 1
+    out = []
+    for m in re.finditer(r'(?:^|;)\s*(?:&[^\s;]+\s+)*(?:Перем|Var)\s+([^;]*)', text, re.I | re.M):
+        off = m.start(1)
+        for part in m.group(1).split(','):
+            nm = re.sub(r'\s+(Экспорт|Export)\s*$', '', part, flags=re.I).strip()
+            if nm:
+                pos = off + part.index(nm)
+                out.append({'Name': nm, 'Line': bisect.bisect_right(starts, pos)})
+            off += len(part) + 1
+    return out
+
+
+# Где имя объявлено в модуле: переменная модуля, локальная (Перем, параметр) — по методам;
+# присваивание без объявления в методе с контекстом (при реквизите с этим именем пишет в него)
+def find_module_decl(name):
+    r = {'ModuleVars': [], 'Locals': {}, 'Assigns': []}
+    scan = get_module_scan()
+    if not scan["Exists"]:
+        return r
+    mm = get_module_methods()
+    n = re.escape(name)
+    for x in mm['Methods']:
+        if name.lower() in [p.lower() for p in x['params']]:
+            r['Locals'][x['name']] = x['header']
+    if mm['Vars'] is None:
+        mm['Vars'] = get_var_declarations(mm['Mask'])
+    for v in mm['Vars']:
+        if v['Name'].lower() != name.lower():
+            continue
+        meth = get_method_at(mm, v['Line'])
+        if meth is None:
+            r['ModuleVars'].append(v['Line'])
+        elif meth['name'] not in r['Locals']:
+            r['Locals'][meth['name']] = v['Line']
+    for i, code in enumerate(mm['Mask']):
+        if not re.search(rf"(^|;)\s*{n}\s*=", code, re.I):
+            continue
+        meth = get_method_at(mm, i + 1)
+        if meth is None or meth['noCtx'] or meth['name'] in r['Locals']:
+            continue
+        r['Assigns'].append(i + 1)
+    return r
+
+
+# Новое имя реквизита против модуля: переменная модуля с тем же именем — модуль не скомпилируется;
+# присваивание без объявления начнёт писать в реквизит
+def add_attr_collision_warnings(name):
+    d = find_module_decl(name)
+    for l in d['ModuleVars']:
+        warn_log.append(f"[WARN] module variable '{name}' has the same name as the form attribute — the module will not compile (\"Переменная с указанным именем уже определена\"); rename the variable:")
+        warn_log.append(f"  {format_module_line(l)}")
+    if d['Assigns']:
+        warn_log.append(f"[WARN] '{name}' is assigned without declaration — it was a local variable, now these lines write to the form attribute; declare it (Перем) or rename it if that is not intended:")
+        for l in d['Assigns']:
+            warn_log.append(f"  {format_module_line(l)}")
+    return d
+
+
+def test_module_utf8():
+    path = os.path.join(os.path.dirname(resolved_form_path), "Form", "Module.bsl")
+    try:
+        with open(path, 'rb') as fh:
+            fh.read().decode('utf-8')
+        return True
+    except UnicodeDecodeError:
+        return False
+
+
+# Правка модуля в памяти: вхождения заменяются по позициям; записывается после Form.xml
+def edit_module_spans(spans, new):
+    global module_methods, module_outline, module_dirty
+    scan = get_module_scan()
+    by_line = {}
+    for s in spans:
+        by_line.setdefault(s['Line'], []).append(s)
+    for line, group in by_line.items():
+        i = line - 1
+        raw = scan['RawLines'][i]
+        cr = raw.endswith('\r')
+        text = raw.rstrip('\r')
+        seen = set()
+        for s in sorted(group, key=lambda x: x['Col'], reverse=True):
+            if s['Col'] in seen:
+                continue
+            seen.add(s['Col'])
+            text = text[:s['Col']] + new + text[s['Col'] + s['Len']:]
+        module_log.append(f"  {format_module_line(i + 1)} → {text.strip()}")
+        scan['RawLines'][i] = text + ('\r' if cr else '')
+    scan['Raw'] = '\n'.join(scan['RawLines'])
+    bsl = get_bsl_scan(scan['Raw'])
+    scan['Lines'] = bsl['Lines']
+    scan['Code'] = bsl['Code']
+    scan['Mask'] = bsl['Mask']
+    scan['Literals'] = bsl['Literals']
+    module_methods = None
+    module_outline = None
+    module_dirty = True
+
+
+def save_module_edits():
+    if not module_dirty:
+        return
+    path = os.path.join(os.path.dirname(resolved_form_path), "Form", "Module.bsl")
+    with open(path, 'rb') as fh:
+        bom = fh.read(3) == b'\xef\xbb\xbf'
+    with open(path, 'w', encoding='utf-8-sig' if bom else 'utf-8', newline='') as fh:
+        fh.write(_module_scan['Raw'])
+
+
+# Обращения из модуля к переименованному: с renameInModule — переписать, без — перечислить
+def rename_in_module(old, new, kind, in_module):
+    scan = get_module_scan()
+    if not scan["Exists"]:
+        return
+    spans = find_module_spans(old, kind)
+    doubt = [s for s in spans if s['Doubtful']]
+    spans = [s for s in spans if not s['Doubtful']]
+    skipped = []
+    if kind == 'attribute':
+        decl = add_attr_collision_warnings(new)
+        # В методе, где новое имя — локальное, обращение по нему означало бы локальную
+        if decl['Locals']:
+            def is_skip(s):
+                return not s['Qualified'] and s['Method'] is not None and s['Method']['name'] in decl['Locals']
+            skipped = [s for s in spans if is_skip(s)]
+            spans = [s for s in spans if not is_skip(s)]
+    if spans and in_module and not test_module_utf8():
+        warn_log.append("[WARN] Form module is not UTF-8 — references were not rewritten")
+        in_module = False
+    if spans:
+        if in_module:
+            edit_module_spans(spans, new)
+        else:
+            warn_log.append(f"[WARN] Module.bsl still refers to {kind} '{old}' — rename these to '{new}' (or add \"renameInModule\": true):")
+            for l in sorted(set(s['Line'] for s in spans)):
+                warn_log.append(f"  {format_module_line(l)}")
+    if skipped:
+        warn_log.append(f"[WARN] '{new}' is a local name in these methods — a renamed reference would point to the local; left as is: qualify it as ЭтаФорма.{new} or rename the local:")
+        for l in sorted(set(s['Line'] for s in skipped)):
+            warn_log.append(f"  {format_module_line(l)}")
+    if doubt and kind != 'attribute':
+        w = 'Команды' if kind == 'command' else 'Параметры'
+        warn_log.append(f"[WARN] not rewritten — in these methods {w} is not the form's (no form context, or a local of that name); check these lines:")
+        for l in sorted(set(s['Line'] for s in doubt)):
+            warn_log.append(f"  {format_module_line(l)}")
+    if kind == 'attribute':
+        # Без контекста реквизит доступен только через переданную форму — не переписываем, показываем
+        mm = get_module_methods()
+        cand = []
+        for i, code in enumerate(mm['Mask']):
+            if old.lower() not in code.lower():
+                continue
+            meth = get_method_at(mm, i + 1)
+            if meth is None or not meth['noCtx']:
+                continue
+            if re.search(rf"\.\s*{re.escape(old)}(?!\w)", code, re.I):
+                cand.append(i + 1)
+        # строкой — тоже не переписываем: без контекста это обычно поле списка, не реквизит
+        cand = sorted(set(cand + [s['Line'] for s in doubt]))
+        if cand:
+            warn_log.append("[WARN] methods without form context were not rewritten — the form may be passed there as a parameter; check these lines:")
+            for l in cand:
+                warn_log.append(f"  {format_module_line(l)}")
+
+
+# Путь от переименованного: Старое / Старое.X (и ~Старое…) → Новое…; не от него — None
+def rename_path_text(t, old, new):
+    pre = ''
+    if t.startswith('~'):
+        pre = '~'
+        t = t[1:]
+    if t.lower() == old.lower():
+        return pre + new
+    if t.lower().startswith(old.lower() + '.'):
+        return pre + new + t[len(old):]
+    return None
+
+
+# Ссылки формы на путь: данные элементов, условное оформление, командный интерфейс, сохранение и
+# «всегда использовать» реквизита, таблицы его доп. колонок
+def rename_form_paths(old, new, attr_node):
+    cnt = {}
+
+    def hit(k):
+        cnt[k] = cnt.get(k, 0) + 1
+
+    for s in get_element_scopes():
+        for t in list(s.iterdescendants()):
+            if not _is_el(t) or not local_name(t).endswith('DataPath') or any(_is_el(c) for c in t):
+                continue
+            r = rename_path_text(_text(t), old, new)
+            if r is not None:
+                t.text = r
+                hit(local_name(t))
+    ca = _form_ca()
+    if ca is not None:
+        for t in list(ca.iterdescendants()):
+            if not _is_el(t) or etree.QName(t.tag).namespace != DCSSET_NS or local_name(t) not in ('left', 'right'):
+                continue
+            if not (t.get(f"{{{XSI_NS}}}type") or '').endswith(':Field'):
+                continue
+            r = rename_path_text(_text(t), old, new)
+            if r is not None:
+                t.text = r
+                hit('ConditionalAppearance')
+    for t in root.findall("f:CommandInterface//f:Item/f:Attribute", NS):
+        r = rename_path_text(_text(t), old, new)
+        if r is not None:
+            t.text = r
+            hit('CommandInterface')
+    for t in list(attr_node.findall("f:Save/f:Field", NS)) + list(attr_node.findall("f:UseAlways/f:Field", NS)):
+        r = rename_path_text(_text(t), old, new)
+        if r is not None:
+            t.text = r
+            hit(local_name(t.getparent()))
+    for g in attr_node.findall("f:Columns/f:AdditionalColumns", NS):
+        r = rename_path_text(g.get('table') or '', old, new)
+        if r is not None:
+            g.set('table', r)
+            hit('AdditionalColumns')
+    if not cnt:
+        return 'ссылок в форме нет'
+    return 'перепривязано: ' + ', '.join(f"{k} ×{v}" for k, v in cnt.items())
+
+
+# Заголовок, выведенный из имени (только ru, совпадает с выводом из старого имени), — следует за именем,
+# как в Конфигураторе; свой заголовок остаётся
+def update_auto_title(node, old, new, label):
+    t = node.find("f:Title", NS)
+    if t is None:
+        return
+    items = t.findall("v8:item", NS)
+    if len(items) != 1:
+        return
+    lang = items[0].find("v8:lang", NS)
+    content = items[0].find("v8:content", NS)
+    if lang is None or (lang.text or '').lower() != 'ru' or content is None:
+        return
+    if (content.text or '') != title_from_name(old):
+        return
+    nt = title_from_name(new)
+    change_log.append(f"  ~ {label}: title \"{content.text or ''}\" → \"{nt}\"")
+    content.text = nt
+
+
+# Общее у rename: ключи, новое имя, флаг модуля
+def get_rename_args(op, section, idx):
+    c = f"{section}[{idx}] rename '{op.get('rename')}'"
+    assert_op_keys(op, ['rename', 'to', 'renameInModule'], c)
+    new = '' if op.get('to') is None else str(op.get('to'))
+    if not new:
+        fail(f"{c}: укажи новое имя — to")
+    if not re.match(r'^[^\W\d]\w*$', new):
+        fail(f"{c}: '{new}' — не имя: буквы, цифры и _, первая не цифра")
+    in_module = False
+    if 'renameInModule' in op:
+        in_module = to_dsl_bool(op.get('renameInModule'), f"{c}: renameInModule", False)
+    return {'C': c, 'Old': str(op.get('rename')), 'New': new, 'InModule': in_module}
+
+
+def invoke_attr_rename(op, idx):
+    global section_changed
+    a = get_rename_args(op, 'attributes', idx)
+    c = a['C']
+    new = a['New']
+    if '.' in a['Old']:
+        r = resolve_column_path(a['Old'], c)
+        if r['Column'] is None:
+            fail(f"{c}: колонка не найдена")
+        attr_name = r['Attr'].get('name')
+        if test_borrowed(attr_name, 'attribute'):
+            fail(f"{c}: колонка заимствованного реквизита — имя задаёт исходная форма")
+        old = r['Column'].get('name')
+        for x in r['Container'].findall("f:Column", NS):
+            if (x.get('name') or '').lower() == new.lower() and x is not r['Column']:
+                fail(f"{c}: колонка '{new}' уже есть")
+        base = r['Table'] if r['Table'] is not None else attr_name
+        summary = rename_form_paths(f"{base}.{old}", f"{base}.{new}", r['Attr'])
+        r['Column'].set('name', new)
+        change_log.append(f"  ~ {base}.{old} → {base}.{new}: {summary}")
+        update_auto_title(r['Column'], old, new, f"{base}.{new}")
+        section_changed += 1
+        # Колонку в коде достают через строку таблицы — к какой таблице относится строка, не понять
+        add_module_candidates(f"column '{base}.{old}' renamed to '{new}' — columns are referenced through table rows, so code is not rewritten; check these lines:", rf"\.\s*{re.escape(old)}(?![\wА-Яа-яЁё])")
+        return
+    node = find_section_item('Attributes', 'Attribute', a['Old'])
+    if node is None:
+        fail(f"{c}: реквизит не найден в форме")
+    old = node.get('name')
+    if test_borrowed(old, 'attribute'):
+        fail(f"{c}: заимствованный реквизит — имя задаёт исходная форма")
+    if test_main_attribute(node):
+        fail(f"{c}: основной реквизит не переименовывается — от его имени идут пути всей формы")
+    other = find_section_item('Attributes', 'Attribute', new)
+    if other is not None and other is not node:
+        fail(f"{c}: реквизит '{new}' уже есть в форме")
+    summary = rename_form_paths(old, new, node)
+    node.set('name', new)
+    change_log.append(f"  ~ {old} → {new}: {summary}")
+    update_auto_title(node, old, new, new)
+    section_changed += 1
+    rename_in_module(old, new, 'attribute', a['InModule'])
+
+
+def invoke_cmd_rename(op, idx):
+    global section_changed
+    a = get_rename_args(op, 'commands', idx)
+    c = a['C']
+    new = a['New']
+    node = find_section_item('Commands', 'Command', a['Old'])
+    if node is None:
+        fail(f"{c}: команда не найдена в форме")
+    old = node.get('name')
+    if test_borrowed(old, 'command'):
+        fail(f"{c}: заимствованная команда — имя задаёт исходная форма")
+    other = find_section_item('Commands', 'Command', new)
+    if other is not None and other is not node:
+        fail(f"{c}: команда '{new}' уже есть в форме")
+    n = 0
+    refs = []
+    for s in get_element_scopes():
+        refs.extend(s.iterfind(".//f:CommandName", NS))
+    refs.extend(root.findall("f:CommandInterface//f:Item/f:Command", NS))
+    for t in refs:
+        if _text(t).lower() == f"form.command.{old}".lower():
+            t.text = f"Form.Command.{new}"
+            n += 1
+    node.set('name', new)
+    change_log.append(f"  ~ команда {old} → {new}: {'перепривязано кнопок и пунктов интерфейса: ' + str(n) if n > 0 else 'ссылок в форме нет'}")
+    update_auto_title(node, old, new, f"команда {new}")
+    section_changed += 1
+    rename_in_module(old, new, 'command', a['InModule'])
+
+
+def invoke_param_rename(op, idx):
+    global section_changed
+    a = get_rename_args(op, 'parameters', idx)
+    c = a['C']
+    new = a['New']
+    node = find_section_item('Parameters', 'Parameter', a['Old'])
+    if node is None:
+        fail(f"{c}: параметр не найден в форме")
+    old = node.get('name')
+    if test_borrowed(old, 'parameter'):
+        fail(f"{c}: заимствованный параметр — имя задаёт исходная форма")
+    other = find_section_item('Parameters', 'Parameter', new)
+    if other is not None and other is not node:
+        fail(f"{c}: параметр '{new}' уже есть в форме")
+    node.set('name', new)
+    change_log.append(f"  ~ параметр {old} → {new}")
+    section_changed += 1
+    rename_in_module(old, new, 'parameter', a['InModule'])
+
 
 # ── 10. Elements: добавление, перенос, изменение, удаление — по порядку ──
 
@@ -8198,12 +10552,10 @@ if elements_list:
             invoke_add(op, op_kinds[i], i)
     companion_count = (next_elem_id - start_elem_id) - added_count
 
-# ── 11. Add attributes ──────────────────────────────────────
+# ── 11. Attributes: удаление, изменение, колонки по пути, добавление — по порядку ──
 
 added_attrs = []
 
-# Удаления (запись с ключом remove) — по порядку, до добавлений
-attrs_list = []
 _attr_ops = defn.get("attributes") or []
 if not isinstance(_attr_ops, list):
     _attr_ops = [_attr_ops]
@@ -8211,58 +10563,23 @@ for _i, _op in enumerate(_attr_ops):
     if isinstance(_op, dict) and "remove" in _op:
         assert_op_keys(_op, ['remove'], f"attributes[{_i}] remove")
         for _rn in _names_of(_op.get("remove")):
-            remove_form_attribute({"remove": _rn}, _i)
+            if '.' in _rn:
+                remove_attr_column(_rn, _i)
+            else:
+                remove_form_attribute({"remove": _rn}, _i)
+    elif isinstance(_op, dict) and "set" in _op:
+        invoke_attr_set(_op, _i)
+    elif isinstance(_op, dict) and "rename" in _op:
+        invoke_attr_rename(_op, _i)
+    elif '.' in str(_op.get("name")):
+        add_attr_column(_op, _i)
     else:
-        attrs_list.append(_op)
-if attrs_list:
-    attrs_section = get_or_create_root_section('Attributes')
-    attr_child_indent = get_child_indent(attrs_section)
+        add_form_attribute(_op, _i)
 
-    # Уникальность имён реквизитов: внутри JSON-определения (+ колонки в пределах реквизита) и
-    # против уже существующих реквизитов формы.
-    dsl_attr_names = set()
-    for attr in attrs_list:
-        _assert_edit_unique(str(attr["name"]), dsl_attr_names, "attribute name")
-        if attr.get("columns"):
-            dsl_col_names = set()
-            for col in attr["columns"]:
-                _assert_edit_unique(str(col["name"]), dsl_col_names, f"column name of '{attr['name']}'")
-        for a in attrs_section.findall("f:Attribute", NS):
-            if (a.get('name') or '').lower() == str(attr['name']).lower():
-                print(f"[ERROR] Attribute '{attr['name']}' already exists in form — attribute names must be unique")
-                sys.exit(1)
-        if attr.get("main") is True:
-            for m in attrs_section.findall("f:Attribute/f:MainAttribute", NS):
-                if (m.text or '').strip() == 'true':
-                    fail(f"attributes: '{attr['name']}' — у формы уже есть основной реквизит '{m.getparent().get('name')}'")
-
-    # Реквизиты пишет эмиттер form-compile (все его ключи); id — из пулов формы
-    wrap = invoke_section_emit(lambda lines: emit_attributes(lines, attrs_list, '\t'))[0]
-    for node in list(wrap.findall("f:Attribute", NS)):
-        attr_id = new_attr_id()
-        node.set('id', str(attr_id))
-        col_id = 1
-        for col in node.iterfind(".//f:Column", NS):
-            col.set('id', str(col_id))
-            col_id += 1
-        wrap.remove(node)
-        node.tail = None
-        # Условное оформление — последнее в Attributes: реквизит встаёт перед ним
-        ca_node = attrs_section.find("f:ConditionalAppearance", NS)
-        if ca_node is not None:
-            insert_node_at(attrs_section, node, ca_node, attr_child_indent)
-        else:
-            insert_into_container(attrs_section, node, None, attr_child_indent)
-        t = node.find("f:Type/v8:Type", NS)
-        type_str = t.text if t is not None else "(no type)"
-        added_attrs.append(f"  + {node.get('name')}: {type_str} (id={attr_id})")
-
-# ── 12. Add commands ────────────────────────────────────────
+# ── 12. Commands: удаление, изменение, добавление — по порядку ──
 
 added_cmds = []
 
-# Удаления (запись с ключом remove) — по порядку, до добавлений
-cmds_list = []
 _cmd_ops = defn.get("commands") or []
 if not isinstance(_cmd_ops, list):
     _cmd_ops = [_cmd_ops]
@@ -8271,29 +10588,27 @@ for _i, _op in enumerate(_cmd_ops):
         assert_op_keys(_op, ['remove'], f"commands[{_i}] remove")
         for _rn in _names_of(_op.get("remove")):
             remove_form_command({"remove": _rn}, _i)
-    else:
-        cmds_list.append(_op)
-if cmds_list:
+        continue
+    if isinstance(_op, dict) and "set" in _op:
+        invoke_cmd_set(_op, _i)
+        continue
+    if isinstance(_op, dict) and "rename" in _op:
+        invoke_cmd_rename(_op, _i)
+        continue
+    assert_op_keys(_op, CMD_KEYS, f"commands[{_i}] '{_op.get('name')}'")
     cmds_section = get_or_create_root_section('Commands')
-    cmd_child_indent = get_child_indent(cmds_section)
-
-    # Уникальность имён команд: внутри JSON-определения и против существующих команд формы.
-    dsl_cmd_names = set()
-    for cmd in cmds_list:
-        _assert_edit_unique(str(cmd["name"]), dsl_cmd_names, "command name")
-        for c in cmds_section.findall("f:Command", NS):
-            if (c.get('name') or '').lower() == str(cmd['name']).lower():
-                print(f"[ERROR] Command '{cmd['name']}' already exists in form — command names must be unique")
-                sys.exit(1)
-
+    for c in cmds_section.findall("f:Command", NS):
+        if (c.get('name') or '').lower() == str(_op['name']).lower():
+            print(f"[ERROR] Command '{_op['name']}' already exists in form — command names must be unique; to change it: {{ \"set\": \"{_op['name']}\", … }}")
+            sys.exit(1)
     # Команды пишет эмиттер form-compile (все его ключи); id — из пула формы
-    wrap = invoke_section_emit(lambda lines: emit_commands(lines, cmds_list, '\t'))[0]
+    wrap = invoke_section_emit(lambda lines: emit_commands(lines, [_op], '\t'), normalize=True)[0]
     for node in list(wrap.findall("f:Command", NS)):
         cmd_id = new_cmd_id()
         node.set('id', str(cmd_id))
         wrap.remove(node)
         node.tail = None
-        insert_into_container(cmds_section, node, None, cmd_child_indent)
+        insert_into_container(cmds_section, node, None, get_child_indent(cmds_section))
         acts = node.findall("f:Action", NS)
         if len(acts) == 1:
             action_str = f" -> {acts[0].text or ''}"
@@ -8334,6 +10649,7 @@ if form_events_list:
         X(f'{evt_child_indent}<Event name="{fe_name}"{call_type_attr}>{fe_handler}</Event>')
         ct_str = f"[{fe['callType']}]" if fe.get("callType") else ""
         added_form_events.append(f"  + {fe_name}{ct_str} -> {fe_handler}")
+        register_handler(fe_handler, 'form', 'Form', fe_name)
     X("</_F>")
 
     frag_text = "\n".join(xml_lines)
@@ -8387,6 +10703,8 @@ if elem_events_list:
 
         ct_str = f"[{ee['callType']}]" if ee.get("callType") else ""
         added_elem_events.append(f"  + {target_name}.{ee_name}{ct_str} -> {ee_handler}")
+        tbl = get_nearest_table(target_el, True)
+        register_handler(ee_handler, 'element', local_name(target_el), ee_name, tbl.get('name') if tbl is not None else '')
 
 # ── 12d. Форма: заголовок, свойства, события, исключённые команды, параметры, оформление, интерфейс ──
 
@@ -8467,6 +10785,8 @@ if not is_extension:
 
 # ── 13. Save ────────────────────────────────────────────────
 
+report_unknown_events()
+
 # Round-trip: определить стиль исходного файла (на диске он ещё не перезаписан).
 try:
     _fe_raw = open(resolved_form_path, "rb").read()
@@ -8483,6 +10803,18 @@ else:
     _fe_bom, _fe_crlf, _fe_enc, _fe_final_nl = True, False, "utf-8", True
 
 xml_bytes = etree.tostring(tree, xml_declaration=True, encoding="UTF-8")
+# Добавленные dcssch:-узлы в форме, где корень dcssch не объявляет (режим совместимости ниже 8.3.19),
+# сериализатор снабжает локальным xmlns:dcssch. Платформа объявляет его только в корне — переносим туда,
+# на место по алфавиту (перед dcsset). Зеркало блока в ps1.
+_dcssch_decl = b' xmlns:dcssch="http://v8.1c.ru/8.1/data-composition-system/schema"'
+_root_start = xml_bytes.find(b'<Form ')
+_root_end = xml_bytes.find(b'>', _root_start) if _root_start >= 0 else -1
+if _root_end >= 0 and xml_bytes.find(_dcssch_decl, _root_end) >= 0:
+    _head = xml_bytes[:_root_end]
+    if _dcssch_decl not in _head:
+        _head = (_head.replace(b' xmlns:dcsset=', _dcssch_decl + b' xmlns:dcsset=', 1)
+                 if b' xmlns:dcsset=' in _head else _head + _dcssch_decl)
+    xml_bytes = _head + xml_bytes[_root_end:].replace(_dcssch_decl, b'')
 # Восстановить регистр encoding как в оригинале.
 xml_bytes = xml_bytes.replace(
     b"<?xml version='1.0' encoding='UTF-8'?>",
@@ -8502,6 +10834,8 @@ with open(resolved_form_path, "wb") as f:
     if _fe_bom:
         f.write(b'\xef\xbb\xbf')
     f.write(xml_bytes)
+save_module_edits()
+handler_report = update_form_module(resolved_form_path, form_path)
 
 # ── 14. Summary ─────────────────────────────────────────────
 
@@ -8533,6 +10867,7 @@ if remove_log:
         print(line)
     print()
 
+resolve_unbound_handlers()
 if left_handlers:
     print("Handlers left in module (delete if unused):")
     for h in left_handlers:
@@ -8545,6 +10880,12 @@ if form_log:
         print(line)
     print()
 
+if change_log:
+    print("Changed attributes, commands, parameters:")
+    for line in change_log:
+        print(line)
+    print()
+
 if added_attrs:
     print("Added attributes:")
     for line in added_attrs:
@@ -8554,6 +10895,23 @@ if added_attrs:
 if added_cmds:
     print("Added commands:")
     for line in added_cmds:
+        print(line)
+    print()
+
+if handler_report:
+    for line in handler_report:
+        print(line)
+    print()
+
+if module_log:
+    print("Module.bsl — references renamed (code outside the form module is not checked):")
+    for line in module_log:
+        print(line)
+    print()
+
+# Предупреждения — последним блоком: их должно быть видно
+if warn_log:
+    for line in warn_log:
         print(line)
     print()
 
@@ -8572,6 +10930,8 @@ if changed_count > 0:
     total_parts.append(f"{changed_count} property change(s)")
 if removed_count > 0:
     total_parts.append(f"{removed_count} removed")
+if section_changed > 0:
+    total_parts.append(f"{section_changed} attribute/command/parameter change(s)")
 if added_attrs:
     total_parts.append(f"{len(added_attrs)} attribute(s)")
 if added_cmds:

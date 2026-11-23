@@ -1,4 +1,4 @@
-// web-test cli/commands/start v1.1
+// web-test cli/commands/start v1.3
 // Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 import http from 'http';
 import { writeFileSync } from 'fs';
@@ -7,16 +7,17 @@ import { out, die } from '../util.mjs';
 import { SESSION_FILE, cleanup } from '../session.mjs';
 import { handleRequest } from '../server.mjs';
 import { SESSION_TOKEN, writeSessionFile, armIdleStop, idleMinutes } from '../keepalive.mjs';  // OpenCode
+import { connectWeb } from '../../engine/web/pages.mjs';
 
-export async function cmdStart(url) {
-  if (!url) die('Usage: node src/run.mjs start <url>');
+export async function cmdStart(url, { user, password } = {}, web = null) {
+  if (!url) die('Usage: node src/run.mjs start <url> [--user=<name> [--password=<pwd>]]');
 
   // A startup blocker (no free 1C licence, publication asking for credentials) is a diagnosis,
   // not a crash — connect() already released the seance and closed the browser, so print the
   // message and leave instead of dumping a stack trace that reads like an engine failure.
   let state;
   try {
-    state = await browser.connect(url);
+    state = web ? await connectWeb(url, web) : await browser.connect(url, { user, password });
   } catch (e) {
     die(e.message);
   }
@@ -34,7 +35,8 @@ export async function cmdStart(url) {
     };
     writeSessionFile(SESSION_FILE, session);
     armIdleStop(async () => { await browser.disconnect(); cleanup(); });
-    out({ ok: true, message: 'Browser ready', port, ...state });
+    // The session file and this reply carry the user, never the password.
+    out({ ok: true, message: 'Browser ready', port, ...(user ? { user } : {}), ...state });
   });
 
   process.on('SIGINT', async () => {

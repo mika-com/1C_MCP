@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# meta-edit v1.65 — Edit existing 1C metadata object XML
+# meta-edit v1.77 — Edit existing 1C metadata object XML
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 
 import argparse
@@ -10,6 +10,42 @@ import subprocess
 import sys
 import uuid
 from lxml import etree
+
+# --- Булевы флаги DSL: прощающий ввод ---
+# Флаг строкой или числом — однозначная ошибка автора JSON: true|да|истина|1 / false|нет|ложь|0 (без
+# регистра; 1/0 — и числом) приводим к bool молча. Иное — ошибка без записи: молчаливое «false» из «yes»
+# хуже отказа. Без общего читателя порты расходились: PS (-eq) принимал "false", py (is) — нет.
+def to_dsl_bool(value, key, default):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        t = value.strip().lower()
+        if t in ('true', 'да', 'истина', '1'):
+            return True
+        if t in ('false', 'нет', 'ложь', '0'):
+            return False
+    elif isinstance(value, (int, float)):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+    shown = f'"{value}"' if isinstance(value, str) else f"{value}"
+    print(f"[ERROR] {key} = {shown}: expected true or false", file=sys.stderr)
+    sys.exit(1)
+
+
+def get_dsl_bool(obj, keys, default):
+    """Первый найденный ключ из keys (синонимы, без регистра) → to_dsl_bool; не dict / нет ключа → default."""
+    if not isinstance(obj, dict):
+        return default
+    for k in keys:
+        for actual in obj:
+            if isinstance(actual, str) and actual.lower() == k.lower():
+                return to_dsl_bool(obj[actual], k, default)
+    return default
+
 
 # Регистронезависимый ввод — паритет с PS1: в PowerShell имена параметров и [ValidateSet]
 # регистр не различают, в argparse совпадение точное.
@@ -182,15 +218,19 @@ def _sg_find_v8project(start_dir):
 
 def _sg_get_edit_mode(cfg_dir):
     try:
-        pj = _sg_find_v8project(os.getcwd()) or _sg_find_v8project(cfg_dir)
+        pj = _sg_find_v8project(os.getcwd()) or _sg_find_v8project(os.path.abspath(cfg_dir))
         if not pj:
             return "deny"
         proj = json.loads(open(pj, encoding="utf-8-sig").read())
-        cfg_full = os.path.normcase(os.path.abspath(cfg_dir)).rstrip("\\/")
+        # configSrc — от каталога .v8-project.json, а не от рабочего каталога: иначе из подкаталога
+        # проекта база не сопоставляется и берётся правило проекта. Пути — настоящие (realpath):
+        # на macOS /var — ссылка на /private/var, и getcwd с путём аргумента иначе не совпадут.
+        proj_dir = os.path.dirname(pj)
+        cfg_full = os.path.normcase(os.path.realpath(cfg_dir)).rstrip("\\/")
         for db in proj.get("databases", []):
             src = db.get("configSrc")
             if src:
-                src_full = os.path.normcase(os.path.abspath(src)).rstrip("\\/")
+                src_full = os.path.normcase(os.path.realpath(os.path.join(proj_dir, src))).rstrip("\\/")
                 if cfg_full == src_full or cfg_full.startswith(src_full + os.sep):
                     if db.get("editingAllowedCheck"):
                         return db["editingAllowedCheck"]
@@ -688,7 +728,7 @@ type_synonyms = {
     # который является авторитетом. Расхождение держит tests/skills/check-type-synonyms.mjs.
     "время": "Time",
     "time": "Time",
-    "base64binary": "ValueStorage",
+    "base64binary": "BinaryData",
     "binarydata": "BinaryData",
     "двоичныеданные": "BinaryData",
     "хранилищезначений": "ValueStorage",
@@ -776,6 +816,69 @@ def resolve_type_str(type_str):
     if resolved:
         return resolved
     return type_str
+# Разбор примитивного типа DSL: Number / String / Date / DateTime / Time — с синонимами
+# (decimal, numeric, Число, Строка, Дата …), в любом регистре, с пробелами в скобках.
+# Тело общее у всех навыков-компиляторов (семья в check-inline-drift); умолчание для голого типа
+# зависит от места (хранимый реквизит — 10,0 и 10, СКД — без ограничения) и приходит аргументами.
+# Возврат: None — не примитив (ссылки, Boolean, …); {'error'} — база примитива узнана, а
+# параметры нет (вызывающий сообщает ошибку своим способом); иначе описание квалификаторов.
+def parse_primitive_type(type_str, def_digits, def_fraction, def_length):
+    m = re.match(r'^\s*([^\s(]+)\s*(\(.*)?$', type_str or '')
+    if not m:
+        return None
+    rest = m.group(2) or ''
+    kind = {
+        'number': 'Number', 'decimal': 'Number', 'numeric': 'Number', 'число': 'Number',
+        'string': 'String', 'строка': 'String',
+        'date': 'Date', 'дата': 'Date', 'datetime': 'DateTime', 'датавремя': 'DateTime',
+        'time': 'Time', 'время': 'Time',
+    }.get(m.group(1).lower())
+    if not kind:
+        return None
+    bad = {'error': (f"Invalid type '{type_str}'. Expected Number, Number(D), Number(D,F), Number(D,F,nonneg), "
+                     "String, String(N), String(N,fixed), Date, DateTime, Time")}
+    parts = []
+    if rest:
+        m2 = re.match(r'^\((.*)\)\s*$', rest)
+        if not m2:
+            return bad
+        parts = [p.strip().lower() for p in m2.group(1).split(',')]
+    if kind == 'Number':
+        sign = 'Any'
+        if parts and (parts[-1] == 'nonneg' or parts[-1] == 'any'):
+            if parts[-1] == 'nonneg':
+                sign = 'Nonnegative'
+            parts = parts[:-1]
+        if len(parts) > 2:
+            return bad
+        for p in parts:
+            if not re.match(r'^[0-9]{1,9}$', p):
+                return bad
+        d = int(parts[0]) if len(parts) >= 1 else def_digits
+        f = int(parts[1]) if len(parts) >= 2 else (0 if len(parts) == 1 else def_fraction)
+        # Дробная часть у числа без ограничения (0,F) платформа молча обнуляет — это ошибка ввода
+        if d > 38 or f > d:
+            return bad
+        return {'kind': 'Number', 'digits': d, 'fraction': f, 'sign': sign}
+    if kind == 'String':
+        allowed = 'Variable'
+        if len(parts) == 2:
+            if parts[1] == 'fixed' or parts[1] == 'fix':
+                allowed = 'Fixed'
+            elif parts[1] != 'variable':
+                return bad
+        if len(parts) > 2 or (len(parts) >= 1 and not re.match(r'^[0-9]{1,9}$', parts[0])):
+            return bad
+        length = int(parts[0]) if len(parts) >= 1 else def_length
+        # Фиксированную длину у неограниченной строки платформа молча снимает — это ошибка ввода
+        if allowed == 'Fixed' and length == 0:
+            return bad
+        return {'kind': 'String', 'length': length, 'allowed': allowed}
+    if parts:
+        return bad
+    return {'kind': 'Date', 'fractions': kind}
+
+
 def build_type_content_xml(indent, type_str):
     if not type_str:
         return ""
@@ -798,67 +901,36 @@ def build_type_content_xml(indent, type_str):
         lines.append(f"{indent}<v8:Type>xs:boolean</v8:Type>")
         return "\r\n".join(lines)
 
-    # ValueStorage
+    # ValueStorage (ХранилищеЗначения) — v8:ValueStorage. xs:base64Binary платформа читает как ДвоичныеДанные.
     if type_str == "ValueStorage":
-        lines.append(f"{indent}<v8:Type>xs:base64Binary</v8:Type>")
+        lines.append(f"{indent}<v8:Type>v8:ValueStorage</v8:Type>")
         return "\r\n".join(lines)
 
-    # String or String(N)
-    m = re.match(r"^String(\((\d+)\))?$", type_str)
-    if m:
-        length = m.group(2) if m.group(2) else "10"
-        lines.append(f"{indent}<v8:Type>xs:string</v8:Type>")
-        lines.append(f"{indent}<v8:StringQualifiers>")
-        lines.append(f"{indent}\t<v8:Length>{length}</v8:Length>")
-        lines.append(f"{indent}\t<v8:AllowedLength>Variable</v8:AllowedLength>")
-        lines.append(f"{indent}</v8:StringQualifiers>")
-        return "\r\n".join(lines)
-
-    # Number(D,F) or Number(D,F,nonneg)
-    m = re.match(r"^Number\((\d+),(\d+)(,nonneg)?\)$", type_str)
-    if m:
-        digits = m.group(1)
-        fraction = m.group(2)
-        sign = "Nonnegative" if m.group(3) else "Any"
-        lines.append(f"{indent}<v8:Type>xs:decimal</v8:Type>")
-        lines.append(f"{indent}<v8:NumberQualifiers>")
-        lines.append(f"{indent}\t<v8:Digits>{digits}</v8:Digits>")
-        lines.append(f"{indent}\t<v8:FractionDigits>{fraction}</v8:FractionDigits>")
-        lines.append(f"{indent}\t<v8:AllowedSign>{sign}</v8:AllowedSign>")
-        lines.append(f"{indent}</v8:NumberQualifiers>")
-        return "\r\n".join(lines)
-
-    # Number without params -> Number(10,0)
-    if type_str == "Number":
-        lines.append(f"{indent}<v8:Type>xs:decimal</v8:Type>")
-        lines.append(f"{indent}<v8:NumberQualifiers>")
-        lines.append(f"{indent}\t<v8:Digits>10</v8:Digits>")
-        lines.append(f"{indent}\t<v8:FractionDigits>0</v8:FractionDigits>")
-        lines.append(f"{indent}\t<v8:AllowedSign>Any</v8:AllowedSign>")
-        lines.append(f"{indent}</v8:NumberQualifiers>")
-        return "\r\n".join(lines)
-
-    # Date / DateTime
-    if type_str == "Date":
-        lines.append(f"{indent}<v8:Type>xs:dateTime</v8:Type>")
-        lines.append(f"{indent}<v8:DateQualifiers>")
-        lines.append(f"{indent}\t<v8:DateFractions>Date</v8:DateFractions>")
-        lines.append(f"{indent}</v8:DateQualifiers>")
-        return "\r\n".join(lines)
-
-    if type_str == "DateTime":
-        lines.append(f"{indent}<v8:Type>xs:dateTime</v8:Type>")
-        lines.append(f"{indent}<v8:DateQualifiers>")
-        lines.append(f"{indent}\t<v8:DateFractions>DateTime</v8:DateFractions>")
-        lines.append(f"{indent}</v8:DateQualifiers>")
-        return "\r\n".join(lines)
-
-    # Time — третья доля даты, наравне с Date/DateTime.
-    if type_str == "Time":
-        lines.append(f"{indent}<v8:Type>xs:dateTime</v8:Type>")
-        lines.append(f"{indent}<v8:DateQualifiers>")
-        lines.append(f"{indent}\t<v8:DateFractions>Time</v8:DateFractions>")
-        lines.append(f"{indent}</v8:DateQualifiers>")
+    # Примитивы: String / Number / Date / DateTime / Time. Голый тип хранимого реквизита — String(10)
+    # и Number(10,0), как в meta-compile.
+    prim = parse_primitive_type(type_str, 10, 0, 10)
+    if prim:
+        if prim.get('error'):
+            print(prim['error'], file=sys.stderr)
+            sys.exit(1)
+        if prim['kind'] == 'String':
+            lines.append(f"{indent}<v8:Type>xs:string</v8:Type>")
+            lines.append(f"{indent}<v8:StringQualifiers>")
+            lines.append(f"{indent}\t<v8:Length>{prim['length']}</v8:Length>")
+            lines.append(f"{indent}\t<v8:AllowedLength>{prim['allowed']}</v8:AllowedLength>")
+            lines.append(f"{indent}</v8:StringQualifiers>")
+        elif prim['kind'] == 'Number':
+            lines.append(f"{indent}<v8:Type>xs:decimal</v8:Type>")
+            lines.append(f"{indent}<v8:NumberQualifiers>")
+            lines.append(f"{indent}\t<v8:Digits>{prim['digits']}</v8:Digits>")
+            lines.append(f"{indent}\t<v8:FractionDigits>{prim['fraction']}</v8:FractionDigits>")
+            lines.append(f"{indent}\t<v8:AllowedSign>{prim['sign']}</v8:AllowedSign>")
+            lines.append(f"{indent}</v8:NumberQualifiers>")
+        else:
+            lines.append(f"{indent}<v8:Type>xs:dateTime</v8:Type>")
+            lines.append(f"{indent}<v8:DateQualifiers>")
+            lines.append(f"{indent}\t<v8:DateFractions>{prim['fractions']}</v8:DateFractions>")
+            lines.append(f"{indent}</v8:DateQualifiers>")
         return "\r\n".join(lines)
 
     # UUID
@@ -952,16 +1024,24 @@ def build_fill_value_xml(indent, type_str):
 
 
 def build_mltext_xml(indent, tag, text):
-    if not text:
+    # Строка → один язык (ru); словарь { "ru": ..., "en": ... } → по элементу на язык.
+    if isinstance(text, dict):
+        pairs = [(str(k), str(v)) for k, v in text.items()]
+    elif text is not None and str(text):
+        pairs = [("ru", str(text))]
+    else:
+        pairs = []
+    if not pairs:
         return f"{indent}<{tag}/>"
-    lines = [
-        f"{indent}<{tag}>",
-        f"{indent}\t<v8:item>",
-        f"{indent}\t\t<v8:lang>ru</v8:lang>",
-        f"{indent}\t\t<v8:content>{esc_xml_text(text)}</v8:content>",
-        f"{indent}\t</v8:item>",
-        f"{indent}</{tag}>",
-    ]
+    lines = [f"{indent}<{tag}>"]
+    for lang, content in pairs:
+        lines += [
+            f"{indent}\t<v8:item>",
+            f"{indent}\t\t<v8:lang>{lang}</v8:lang>",
+            f"{indent}\t\t<v8:content>{esc_xml_text(content)}</v8:content>",
+            f"{indent}\t</v8:item>",
+        ]
+    lines.append(f"{indent}</{tag}>")
     return "\r\n".join(lines)
 
 
@@ -1084,21 +1164,6 @@ def find_element_by_name(container, elem_local_name, name_value):
     return None
 
 
-def find_last_element_of_type(container, local_name):
-    last = None
-    for child in container:
-        if localname(child) == local_name:
-            last = child
-    return last
-
-
-def find_first_element_of_type(container, local_name):
-    for child in container:
-        if localname(child) == local_name:
-            return child
-    return None
-
-
 def ensure_child_objects_open():
     """Ensure ChildObjects element exists and is open (not self-closing empty)."""
     global child_objects_el
@@ -1166,6 +1231,16 @@ def collapse_child_objects_if_empty():
 # ============================================================
 
 
+# Флаг nonneg — то же, что хвост ,nonneg у числового типа; к нечисловому типу не применяется.
+def add_nonneg_flag(type_str, flags):
+    if not type_str or 'nonneg' not in [str(f).lower() for f in (flags or [])]:
+        return type_str
+    prim = parse_primitive_type(resolve_type_str(type_str), 10, 0, 10)
+    if prim and prim.get('kind') == 'Number':
+        return f"Number({prim['digits']},{prim['fraction']},nonneg)"
+    return type_str
+
+
 def parse_attribute_shorthand(val):
     """Parse attribute definition from string shorthand or dict object."""
     if isinstance(val, str):
@@ -1198,6 +1273,7 @@ def parse_attribute_shorthand(val):
         parsed["name"] = colon_parts[0].strip()
         if len(colon_parts) > 1:
             parsed["type"] = colon_parts[1].strip()
+        parsed["type"] = add_nonneg_flag(parsed["type"], parsed["flags"])
 
         parsed["synonym"] = split_camel_case(parsed["name"])
         return parsed
@@ -1216,10 +1292,11 @@ def parse_attribute_shorthand(val):
         "before": str(val.get("before", "")),
         # Поле таблицы внешнего источника (контекст eds-field).
         "nameInDataSource": str(val.get("nameInDataSource", "")),
-        "readOnly": val.get("readOnly") is True,
-        "allowNull": val.get("allowNull") is True,
+        "readOnly": get_dsl_bool(val, ['readOnly'], False),
+        "allowNull": get_dsl_bool(val, ['allowNull'], False),
     }
     # Map flags to properties
+    result["type"] = add_nonneg_flag(result["type"], result["flags"])
     if "req" in result["flags"] and not result["fillChecking"]:
         result["fillChecking"] = "ShowError"
     if "index" in result["flags"] and not result["indexing"]:
@@ -1285,6 +1362,33 @@ RESERVED_ATTR_NAMES_RU = {
     'Счет', 'ТипЗначения', 'ПериодДействияБазовый',
 }
 
+
+def reserved_command_names():
+    """Имена стандартных команд вида — англ. и рус., в нижнем регистре: команда объекта с таким именем
+    не загрузится («Имя команды не может совпадать с именем стандартной команды»; регистр не важен, от
+    UseStandardCommands не зависит — замер 8.3.24/8.3.27). Вида нет в карте — ограничения нет
+    (перечисление, план обмена; критерий отбора и таблица внешнего источника не замерены)."""
+    open_list = {"openlist", "открытьсписок"}
+    create = {"create", "создать"}
+    folder = {"createfolder", "создатьгруппу"}
+    by_value = {"openbyvalue", "открытьпозначению"}
+    based_on = {"createbasedon", "создатьнаосновании"}
+    return {
+        "Catalog":                    open_list | create | folder | by_value | based_on,
+        "ChartOfCharacteristicTypes": open_list | create | folder | based_on,
+        "Task":                       open_list | create | by_value | based_on,
+        "Document":                   open_list | create | based_on,
+        "BusinessProcess":            open_list | create | based_on,
+        "ChartOfAccounts":            open_list | create | based_on,
+        "ChartOfCalculationTypes":    open_list | create | based_on,
+        "InformationRegister":        open_list | create | by_value,
+        "AccumulationRegister":       open_list,
+        "AccountingRegister":         open_list,
+        "CalculationRegister":        open_list,
+        "DocumentJournal":            open_list,
+        "DataProcessor":              {"open", "открыть"},
+        "Report":                     {"open", "открыть"},
+    }
 
 # Стандартные реквизиты по типу объекта (EN + RU). Совпадение имени реквизита с ними платформа
 # не позволит — жёсткий отказ. Контексты вне карты → предупреждение по плоскому списку.
@@ -1384,9 +1488,9 @@ def build_attribute_fragment(parsed, context, indent, elem_tag="Attribute"):
         lines.append(f"{indent}\t\t<ChoiceForm/>")
         nids = parsed.get("nameInDataSource") or parsed["name"]
         lines.append(f"{indent}\t\t<NameInDataSource>{esc_xml_text(str(nids))}</NameInDataSource>")
-        ro = "true" if (parsed.get("readOnly") is True or "readonly" in parsed["flags"]) else "false"
+        ro = "true" if (get_dsl_bool(parsed, ['readOnly'], False) or "readonly" in parsed["flags"]) else "false"
         lines.append(f"{indent}\t\t<ReadOnly>{ro}</ReadOnly>")
-        an = "true" if (parsed.get("allowNull") is True or "nullable" in parsed["flags"]) else "false"
+        an = "true" if (get_dsl_bool(parsed, ['allowNull'], False) or "nullable" in parsed["flags"]) else "false"
         lines.append(f"{indent}\t\t<AllowNull>{an}</AllowNull>")
 
     # Use -- catalog only
@@ -1808,13 +1912,58 @@ valid_child_types = {
     "Table": ["fields", "forms", "templates", "commands"],
 }
 
-# Canonical child order in ChildObjects
-child_order = [
-    "Resource", "Dimension", "Attribute", "TabularSection", "Field", "Table", "Function",
-    "AccountingFlag", "ExtDimensionAccountingFlag",
-    "EnumValue", "Column", "AddressingAttribute", "Recalculation",
-    "Form", "Template", "Command",
-]
+def object_child_order():
+    """Порядок групп в <ChildObjects> объекта по виду. Это xs:sequence <Вид>ChildObjects из MDClasses XSD,
+    сверенный выгрузкой платформы: выгрузка сама ставит группы в этот порядок, так что вставка не на место
+    даёт дифф при следующей выгрузке. Единого порядка нет — у документа Form стоит до TabularSection."""
+    return {
+        "Catalog":                    ["Attribute", "TabularSection", "Form", "Template", "Command"],
+        "Document":                   ["Attribute", "Form", "TabularSection", "Template", "Command"],
+        "ExchangePlan":               ["Attribute", "TabularSection", "Form", "Template", "Command"],
+        "ChartOfCharacteristicTypes": ["Attribute", "TabularSection", "Form", "Template", "Command"],
+        "ChartOfAccounts":            ["Attribute", "TabularSection", "AccountingFlag", "ExtDimensionAccountingFlag", "Form", "Template", "Command"],
+        "ChartOfCalculationTypes":    ["Attribute", "TabularSection", "Form", "Template", "Command"],
+        "BusinessProcess":            ["Attribute", "TabularSection", "Form", "Template", "Command"],
+        "Task":                       ["Attribute", "TabularSection", "Form", "Template", "AddressingAttribute", "Command"],
+        "DataProcessor":              ["Attribute", "TabularSection", "Form", "Template", "Command"],
+        "Report":                     ["Attribute", "TabularSection", "Form", "Template", "Command"],
+        "ExternalDataProcessor":      ["Attribute", "TabularSection", "Form", "Template"],
+        "ExternalReport":             ["Attribute", "TabularSection", "Form", "Template"],
+        "Enum":                       ["EnumValue", "Form", "Template", "Command"],
+        "InformationRegister":        ["Resource", "Attribute", "Dimension", "Form", "Template", "Command"],
+        "AccumulationRegister":       ["Resource", "Attribute", "Dimension", "Form", "Template", "Command"],
+        "AccountingRegister":         ["Dimension", "Resource", "Attribute", "Form", "Template", "Command"],
+        "CalculationRegister":        ["Resource", "Attribute", "Dimension", "Recalculation", "Form", "Template", "Command"],
+        "DocumentJournal":            ["Column", "Form", "Template", "Command"],
+        "Table":                      ["Field", "Form", "Command", "Template"],
+        "ExternalDataSource":         ["Table", "Cube", "Function"],
+        "Cube":                       ["DimensionTable", "Dimension", "Resource", "Form", "Command", "Template"],
+        "DimensionTable":             ["Field", "Form", "Command", "Template"],
+        "FilterCriterion":            ["Form", "Command"],
+        "SettingsStorage":            ["Form", "Template"],
+        "TabularSection":             ["Attribute"],
+    }
+
+
+def find_child_anchor(container, tag, obj_type):
+    """Элемент <ChildObjects>, ПЕРЕД которым встаёт новый <tag>; None — дописать в конец.
+    Сразу за последним элементом своего тега, иначе перед первым элементом группы, идущей
+    по канону вида позже. Вид или тег вне канона — None, как раньше."""
+    children = [c for c in container if isinstance(c.tag, str)]
+    last_idx = -1
+    for i, c in enumerate(children):
+        if c.tag.rsplit('}', 1)[-1] == tag:
+            last_idx = i
+    if last_idx >= 0:
+        return children[last_idx + 1] if last_idx + 1 < len(children) else None
+    order = object_child_order().get(obj_type)
+    if not order or tag not in order:
+        return None
+    later = order[order.index(tag) + 1:]
+    for c in children:
+        if c.tag.rsplit('}', 1)[-1] in later:
+            return c
+    return None
 
 # Map from DSL child type to XML element name
 child_type_to_xml_tag = {
@@ -1942,7 +2091,7 @@ def emit_eds_function(indent, fn_name, val, type_xml):
         expr = str(val.get('expression') or val.get('expressionInDataSource') or '')
         returns = str(val.get('returns') or val.get('returnType') or '')
         if val.get('returnValue') is not None:
-            return_value = val.get('returnValue') is True
+            return_value = get_dsl_bool(val, ['returnValue'], False)
         fn_synonym = val.get('synonym')
         fn_comment = str(val['comment']) if val.get('comment') else ''
     if not expr:
@@ -1965,6 +2114,7 @@ def emit_eds_function(indent, fn_name, val, type_xml):
     X(f'{indent}\t\t<ExpressionInDataSource>{esc_xml_text(expr)}</ExpressionInDataSource>')
     X(f'{indent}\t</Properties>')
     X(f'{indent}</Function>')
+
 
 def emit_eds_table_properties(indent, src_name, table_name, t, char_xml, default_forms_xml):
     """Свойства таблицы: 38 узлов в порядке выгрузки платформы.
@@ -2013,8 +2163,8 @@ def emit_eds_table_properties(indent, src_name, table_name, t, char_xml, default
     else:
         X(f'{i}<Characteristics/>')
 
-    X(f'{i}<UseStandardCommands>{"false" if t.get("useStandardCommands") is False else "true"}</UseStandardCommands>')
-    X(f'{i}<QuickChoice>{"true" if t.get("quickChoice") is True else "false"}</QuickChoice>')
+    X(f'{i}<UseStandardCommands>{"false" if (not get_dsl_bool(t, ["useStandardCommands"], True)) else "true"}</UseStandardCommands>')
+    X(f'{i}<QuickChoice>{"true" if get_dsl_bool(t, ["quickChoice"], False) else "false"}</QuickChoice>')
     # Ввод по строке: ключа нет → выводим из поля представления (так делает платформа при загрузке).
     # Явный список, в том числе пустой, уважаем как есть — отсюда presence-aware проверка.
     if 'inputByString' in t:
@@ -2039,14 +2189,15 @@ def emit_eds_table_properties(indent, src_name, table_name, t, char_xml, default
                      'ExtendedRecordPresentation', 'ListPresentation', 'ExtendedListPresentation', 'Explanation'):
         key = pres_tag[0].lower() + pres_tag[1:]
         emit_mltext(i, pres_tag, t.get(key))
-    X(f'{i}<IncludeHelpInContents>{"true" if t.get("includeHelpInContents") is True else "false"}</IncludeHelpInContents>')
-    X(f'{i}<ReadOnly>{"true" if t.get("readOnly") is True else "false"}</ReadOnly>')
+    X(f'{i}<IncludeHelpInContents>{"true" if get_dsl_bool(t, ["includeHelpInContents"], False) else "false"}</IncludeHelpInContents>')
+    X(f'{i}<ReadOnly>{"true" if get_dsl_bool(t, ["readOnly"], False) else "false"}</ReadOnly>')
     X(f'{i}<TransactionsIsolationLevel>{normalize_enum_value("TransactionsIsolationLevel", str(t["transactionsIsolationLevel"])) if t.get("transactionsIsolationLevel") else "Auto"}</TransactionsIsolationLevel>')
     emit_eds_field_ref_scalar(i, 'DataVersionField', t.get('dataVersionField'), src_name, table_name)
     X(f'{i}<EditType>{get_enum_field(t, "editType", "EditType") or "InDialog"}</EditType>')
     emit_md_ref_list(i, 'BasedOn', t.get('basedOn'))
     emit_eds_field_ref_list(i, 'DataLockFields', t.get('dataLockFields'), src_name, table_name)
     X(f'{i}<DataLockControlMode>{t.get("dataLockControlMode") or "Automatic"}</DataLockControlMode>')
+
 
 EDS_TABLE_GENERATED_TYPES = (
     ('ExternalDataSourceTableManager', 'Manager'),
@@ -2329,8 +2480,9 @@ def convert_inline_to_definition(operation, value):
 # ============================================================
 
 
-def find_insertion_point(xml_tag, parsed):
-    """Find reference node for insertion. Returns element or None (meaning append)."""
+def find_insertion_point(xml_tag, parsed, kind=None):
+    """Find reference node for insertion. Returns element or None (meaning append).
+    kind — вид владельца контейнера для канона (по умолчанию вид объекта; для ТЧ — TabularSection)."""
     if child_objects_el is None:
         return None
 
@@ -2341,44 +2493,23 @@ def find_insertion_point(xml_tag, parsed):
     if after_name:
         after_el = find_element_by_name(child_objects_el, xml_tag, after_name)
         if after_el is not None:
-            # Insert after = insert before the next element sibling
+            # Insert after = insert before the next element sibling, какого бы вида он ни был:
+            # за последним элементом группы идёт уже следующая группа, а не конец ChildObjects
             nxt = after_el.getnext()
             while nxt is not None and not isinstance(nxt.tag, str):
                 nxt = nxt.getnext()
-            if nxt is not None and localname(nxt) == xml_tag:
-                return nxt
-            return None  # append
+            return nxt
         else:
-            warn(f"after='{after_name}': element '{after_name}' not found in {xml_tag}, appending")
+            warn(f"after='{after_name}': element '{after_name}' not found in {xml_tag}, using default position")
 
     if before_name:
         before_el = find_element_by_name(child_objects_el, xml_tag, before_name)
         if before_el is not None:
             return before_el
-        warn(f"before='{before_name}': element '{before_name}' not found in {xml_tag}, appending")
+        warn(f"before='{before_name}': element '{before_name}' not found in {xml_tag}, using default position")
 
-    # Default: after last element of this type, or in canonical position
-    last_of_type = find_last_element_of_type(child_objects_el, xml_tag)
-    if last_of_type is not None:
-        nxt = last_of_type.getnext()
-        while nxt is not None and not isinstance(nxt.tag, str):
-            nxt = nxt.getnext()
-        return nxt  # None means append (correct: after last of type)
-
-    # No elements of this type yet -- find canonical position
-    if xml_tag in child_order:
-        tag_idx = child_order.index(xml_tag)
-    else:
-        return None
-
-    # Find first element of any type that comes AFTER in the canonical order
-    for i in range(tag_idx + 1, len(child_order)):
-        next_tag = child_order[i]
-        first_of_next = find_first_element_of_type(child_objects_el, next_tag)
-        if first_of_next is not None:
-            return first_of_next
-
-    return None  # append at end
+    # Default: after last element of this type, or in canonical position of the owner kind
+    return find_child_anchor(child_objects_el, xml_tag, kind or obj_type)
 
 
 def process_add(add_def):
@@ -2605,6 +2736,8 @@ def process_add(add_def):
                 if item_name in existing_names:
                     warn(f"Command '{item_name}' already exists, skipping")
                     continue
+                if item_name.lower() in reserved_command_names().get(obj_type, set()):
+                    die(f"meta-edit: имя команды '{item_name}' совпадает со стандартной командой объекта '{obj_type}'. Выберите другое имя.")
                 # У команды есть модуль обработчика (Commands/<Имя>/Ext/CommandModule.bsl) — в корпусе
                 # он есть у всех команд без исключения. Пишем ту же заготовку, что и meta-compile.
                 cmd_ext_dir = os.path.join(os.path.dirname(resolved_path), obj_name, "Commands", item_name, "Ext")
@@ -2702,6 +2835,20 @@ def modify_properties(props_def):
             else:
                 die(f"Property '{prop_name}': could not create element")
 
+        # Многоязычная строка (синоним, представления, пояснение…): простой текст в таком теге платформа
+        # не загружает. Узел заменяется целиком — и пустой, и уже заполненный.
+        if prop_name in local_string_object_props:
+            ml_nodes = import_fragment(build_mltext_xml(get_child_indent(properties_el), prop_name, prop_value))
+            if ml_nodes:
+                idx = list(properties_el).index(prop_el)
+                ml_nodes[0].tail = prop_el.tail
+                properties_el.insert(idx + 1, ml_nodes[0])
+                remove_node_with_whitespace(prop_el)
+                shown = '; '.join(f"{k}: {v}" for k, v in prop_value.items()) if isinstance(prop_value, dict) else str(prop_value)
+                info(f"Modified property: {prop_name} = {shown}")
+                modify_count += 1
+            continue
+
         # Handle boolean values
         value_str = str(prop_value)
         if isinstance(prop_value, bool):
@@ -2765,7 +2912,13 @@ def modify_child_elements(modify_def, child_type):
     for elem_name, changes in modify_def.items():
         el = find_element_by_name(child_objects_el, xml_tag, elem_name)
         if el is None:
-            die(f"{xml_tag} '{elem_name}' not found for modify")
+            # ТЧ заимствованного объекта появляется в расширении только заимствованием — подсказать как
+            hint = ""
+            belonging = find_property_element("ObjectBelonging")
+            if xml_tag == "TabularSection" and belonging is not None and (belonging.text or "") == "Adopted":
+                hint = (f" — in an extension, borrow it first: cfe-borrow -Object "
+                        f"{obj_type}.{obj_name}.TabularSection.{elem_name}")
+            die(f"{xml_tag} '{elem_name}' not found for modify{hint}")
 
         # Find Properties inside the element
         props_el = None
@@ -2808,7 +2961,7 @@ def modify_child_elements(modify_def, child_type):
                         nodes = import_fragment(fragment_xml)
                         saved_co = child_objects_el
                         child_objects_el = ts_child_obj_el
-                        ref_node = find_insertion_point("Attribute", parsed)
+                        ref_node = find_insertion_point("Attribute", parsed, "TabularSection")
                         child_objects_el = saved_co
                         for node in nodes:
                             insert_before_element(ts_child_obj_el, node, ref_node, ts_attr_indent)
@@ -2850,6 +3003,8 @@ def modify_child_elements(modify_def, child_type):
                 if name_el is not None:
                     old_name = (name_el.text or "").strip()
                     new_name = str(change_value)
+                    if xml_tag == "Command" and new_name.lower() in reserved_command_names().get(obj_type, set()):
+                        die(f"meta-edit: имя команды '{new_name}' совпадает со стандартной командой объекта '{obj_type}'. Выберите другое имя.")
                     name_el.text = new_name
 
                     # Update Synonym if it was auto-generated
@@ -3128,6 +3283,13 @@ child_modify_keys = [
     "add", "remove", "modify", "name", "type", "synonym", "Format", "EditFormat", "ToolTip", "ChoiceForm", "MinValue",
     "MaxValue", "LinkByType", "ChoiceParameterLinks", "ChoiceParameters", "FillValue",
 ]
+
+# Свойства объекта типа LocalStringType (XSD MDClasses) — modify-property пишет их многоязычной строкой.
+local_string_object_props = {
+    'Synonym', 'ToolTip', 'Explanation', 'ObjectPresentation', 'ExtendedObjectPresentation', 'ListPresentation',
+    'ExtendedListPresentation', 'RecordPresentation', 'ExtendedRecordPresentation', 'ExtendedPresentation',
+    'Format', 'EditFormat',
+}
 
 known_child_props = {
     'AccountingFlag', 'Balance', 'BaseDimension', 'ChoiceFoldersAndItems', 'ChoiceForm', 'ChoiceHistoryOnInput',
@@ -3498,19 +3660,19 @@ def esc_xml_text(s):
 
 def get_fill_type_category(type_str):
     if not type_str:
-        return 'String'
+        return 'String'          # реквизит без типа → неквалифиц. строка
     if '+' in type_str:
-        return 'Other'
+        return 'Other'           # составной тип → nil-дефолт
     t = resolve_type_str(type_str)
     if re.match(r'^Boolean$', t):
         return 'Boolean'
-    if re.match(r'^String(\(|$)', t):
-        return 'String'
-    if re.match(r'^Number(\(|$)', t):
-        return 'Number'
-    if re.match(r'^(Date|DateTime)$', t):
-        return 'Date'
-    return 'Other'
+    prim = parse_primitive_type(t, 10, 0, 10)
+    if prim and not prim.get('error'):
+        if prim['kind'] != 'Date':
+            return prim['kind']
+        if prim['fractions'] != 'Time':
+            return 'Date'
+    return 'Other'               # ссылки, TypeSet, ValueStorage, … → nil-дефолт
 
 
 def expand_fill_short_ref(s, type_str):
@@ -3598,9 +3760,9 @@ def build_fill_value_explicit_xml(type_str, spec):
         return f'<FillValue xsi:type="xs:boolean">{"true" if spec else "false"}</FillValue>'
     if isinstance(spec, (int, float)):
         return f'<FillValue xsi:type="xs:decimal">{format_fill_num(spec)}</FillValue>'
-    if get_ch_el_prop(spec, ['nil']) is True:
+    if to_dsl_bool(get_ch_el_prop(spec, ['nil']), 'nil', False):
         return '<FillValue xsi:nil="true"/>'
-    if get_ch_el_prop(spec, ['emptyRef', 'пустаяссылка']) is True:
+    if to_dsl_bool(get_ch_el_prop(spec, ['emptyRef', 'пустаяссылка']), 'emptyRef', False):
         return '<FillValue xsi:type="xr:DesignTimeRef"/>'
     r = resolve_fill_value_spec(str(spec), type_str)
     if r['Text'] == '' and r['XsiType'] == 'xs:string':
@@ -3890,7 +4052,7 @@ def resolve_predef_item(val):
     has_desc = isinstance(val, dict) and ('description' in val or 'наименование' in val)
     desc_v = gv(val, ['description', 'наименование'])
     desc = str(desc_v) if has_desc else split_camel_case(name)
-    is_folder = gv(val, ['isFolder', 'группа']) is True
+    is_folder = to_dsl_bool(gv(val, ['isFolder', 'группа']), 'isFolder', False)
     subs = gv(val, ['childItems', 'подчиненные'])
     return {'name': name, 'code': code, 'desc': desc if desc is not None else '',
             'isFolder': is_folder, 'children': list(subs) if subs else []}

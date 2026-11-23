@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-# role-compile v1.45 — Compile 1C role from JSON
+# role-compile v1.51 — Compile 1C role from JSON
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 import argparse
 import json
@@ -10,6 +10,42 @@ import uuid
 import xml.etree.ElementTree as ET
 
 from lxml import etree
+
+# --- Булевы флаги DSL: прощающий ввод ---
+# Флаг строкой или числом — однозначная ошибка автора JSON: true|да|истина|1 / false|нет|ложь|0 (без
+# регистра; 1/0 — и числом) приводим к bool молча. Иное — ошибка без записи: молчаливое «false» из «yes»
+# хуже отказа. Без общего читателя порты расходились: PS (-eq) принимал "false", py (is) — нет.
+def to_dsl_bool(value, key, default):
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        t = value.strip().lower()
+        if t in ('true', 'да', 'истина', '1'):
+            return True
+        if t in ('false', 'нет', 'ложь', '0'):
+            return False
+    elif isinstance(value, (int, float)):
+        if value == 1:
+            return True
+        if value == 0:
+            return False
+    shown = f'"{value}"' if isinstance(value, str) else f"{value}"
+    print(f"[ERROR] {key} = {shown}: expected true or false", file=sys.stderr)
+    sys.exit(1)
+
+
+def get_dsl_bool(obj, keys, default):
+    """Первый найденный ключ из keys (синонимы, без регистра) → to_dsl_bool; не dict / нет ключа → default."""
+    if not isinstance(obj, dict):
+        return default
+    for k in keys:
+        for actual in obj:
+            if isinstance(actual, str) and actual.lower() == k.lower():
+                return to_dsl_bool(obj[actual], k, default)
+    return default
+
 
 # Регистронезависимый ввод — паритет с PS1: в PowerShell имена параметров и [ValidateSet]
 # регистр не различают, в argparse совпадение точное.
@@ -182,15 +218,19 @@ def _sg_find_v8project(start_dir):
 
 def _sg_get_edit_mode(cfg_dir):
     try:
-        pj = _sg_find_v8project(os.getcwd()) or _sg_find_v8project(cfg_dir)
+        pj = _sg_find_v8project(os.getcwd()) or _sg_find_v8project(os.path.abspath(cfg_dir))
         if not pj:
             return "deny"
         proj = json.loads(open(pj, encoding="utf-8-sig").read())
-        cfg_full = os.path.normcase(os.path.abspath(cfg_dir)).rstrip("\\/")
+        # configSrc — от каталога .v8-project.json, а не от рабочего каталога: иначе из подкаталога
+        # проекта база не сопоставляется и берётся правило проекта. Пути — настоящие (realpath):
+        # на macOS /var — ссылка на /private/var, и getcwd с путём аргумента иначе не совпадут.
+        proj_dir = os.path.dirname(pj)
+        cfg_full = os.path.normcase(os.path.realpath(cfg_dir)).rstrip("\\/")
         for db in proj.get("databases", []):
             src = db.get("configSrc")
             if src:
-                src_full = os.path.normcase(os.path.abspath(src)).rstrip("\\/")
+                src_full = os.path.normcase(os.path.realpath(os.path.join(proj_dir, src))).rstrip("\\/")
                 if cfg_full == src_full or cfg_full.startswith(src_full + os.sep):
                     if db.get("editingAllowedCheck"):
                         return db["editingAllowedCheck"]
@@ -1454,7 +1494,7 @@ def parse_object_entry(entry):
             for p_name, p_value in entry['rights'].items():
                 r_name = translate_right_name(p_name)
                 validate_right_name(obj_name, r_name)
-                bool_val = 'true' if p_value is True or str(p_value) == 'True' else 'false'
+                bool_val = 'true' if to_dsl_bool(p_value, p_name, False) else 'false'
                 if r_name not in rights_map:
                     rights_order.append(r_name)
                 rights_map[r_name] = {'Value': bool_val, 'Condition': None}
@@ -1498,11 +1538,12 @@ def get_new_object_position(cfg_dir):
             return "end"
         proj = json.loads(open(pj, encoding="utf-8-sig").read())
         proj_dir = os.path.dirname(pj)
-        cfg_full = os.path.normcase(os.path.abspath(cfg_dir or ".")).rstrip("\\/")
+        # Пути — настоящие (realpath): на macOS /var — ссылка на /private/var
+        cfg_full = os.path.normcase(os.path.realpath(cfg_dir or ".")).rstrip("\\/")
         for db in proj.get("databases", []):
             src = db.get("configSrc")
             if src and db.get("newObjectPosition"):
-                src_full = os.path.normcase(os.path.abspath(os.path.join(proj_dir, src))).rstrip("\\/")
+                src_full = os.path.normcase(os.path.realpath(os.path.join(proj_dir, src))).rstrip("\\/")
                 if cfg_full == src_full or cfg_full.startswith(src_full + os.sep):
                     return "byName" if str(db["newObjectPosition"]).lower() == "byname" else "end"
         if str(proj.get("newObjectPosition") or "").lower() == "byname":

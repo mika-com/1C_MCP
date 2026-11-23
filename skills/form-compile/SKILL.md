@@ -10,9 +10,17 @@ argument-hint: <JsonPath> <OutputPath> | -FromObject <OutputPath>
 
 Два режима:
 1. **JSON DSL** — из JSON-определения формы
-2. **From object** (`-FromObject`) — автоматически из метаданных объекта 1С по пресету ERP
+2. **From object** (`-FromObject`) — заготовка формы объекта конфигурации по его метаданным: поля объекта в стиле ЕРП/УТ, служебные убраны; событий, команд, связей полей и итогов в ней нет
 
-> **При проектировании формы с нуля (5+ элементов или нечёткие требования)** — вызовите `/form-patterns` для загрузки справочника. Для простых форм (1–3 поля) — не нужно.
+## С чего начать
+
+- содержимое формы уже есть — `/form-edit`;
+- форма описана в задаче целиком (текстом или эскизом) — JSON по описанию;
+- описана часть формы (поля, блок, поведение) — для формы объекта, списка, выбора, группы или записи заготовка `-EmitDsl`, впишите в неё описанное, сборка `-JsonPath`; для остальных форм — JSON;
+- форма по образцу другой формы конфигурации («как у ЗаказКлиента») — изучите образец через `/form-info`; для этих же форм разложите по нему заготовку `-EmitDsl`, для остальных — JSON; обработчики образца переносите только вместе с кодом;
+- о форме ничего не сказано — для этих же форм `-FromObject`, для остальных — JSON.
+
+> Если раскладка формы не задана в задаче и заготовки нет — архетип формы, имена групп и ширины полей в `references/layout-patterns.md`. В заготовке `-FromObject` / `-EmitDsl` раскладка уже как в типовых.
 
 ## Параметры
 
@@ -21,6 +29,8 @@ argument-hint: <JsonPath> <OutputPath> | -FromObject <OutputPath>
 | JsonPath   | режим 1      | Путь к JSON-определению формы   |
 | OutputPath | да           | Путь к выходному Form.xml       |
 | FromObject | режим 2      | Флаг (без значения) — генерация по метаданным объекта |
+| Purpose    | нет          | Назначение, если основная форма объекта названа нестандартно |
+| EmitDsl    | нет          | Сохранить сгенерированное JSON-определение в файл |
 
 ## Команда
 
@@ -28,8 +38,11 @@ argument-hint: <JsonPath> <OutputPath> | -FromObject <OutputPath>
 # Режим JSON DSL
 powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/form-compile.ps1" -JsonPath "<json>" -OutputPath "<Form.xml>"
 
-# Режим from-object (объект и purpose выводятся из OutputPath; Document и Catalog)
-powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/form-compile.ps1" -FromObject -OutputPath "<.../TypePlural/ObjectName/Forms/FormName/Ext/Form.xml>"
+# Режим from-object: объект и назначение берутся из пути формы
+powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/form-compile.ps1" -FromObject -OutputPath "<.../Documents/ИмяОбъекта/Forms/ФормаДокумента/Ext/Form.xml>"
+
+# Заготовка для доработки: сохранить JSON, доработать, собрать режимом JSON DSL
+powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/form-compile.ps1" -FromObject -OutputPath "<Form.xml>" -EmitDsl "<form.json>"
 ```
 
 ## JSON DSL
@@ -40,7 +53,7 @@ powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/form-compile.ps1" -FromObje
 {
   "title": "Заголовок формы",
   "properties": { "windowOpeningMode": "LockOwnerWindow" },
-  "events": { "OnCreateAtServer": "ПриСозданииНаСервере" },
+  "events": { ... },
   "elements": [ ... ],
   "attributes": [ ... ],
   "commands": [ ... ],
@@ -50,7 +63,7 @@ powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/form-compile.ps1" -FromObje
 
 - `title` — заголовок формы (строка или `{ru, en}`)
 - `properties` — свойства формы: `windowOpeningMode`, `commandBarLocation`, `width`, `height` и др. (полный список — `references/form-properties.md`)
-- `events` — обработчики событий формы: `{ "ИмяСобытия": "ИмяПроцедуры" }`
+- `events` — обработчики событий формы: `{ "ИмяСобытия": "ИмяПроцедуры" }`; имена по конвенции — списком: `["OnCreateAtServer", "OnOpen"]` → `ПриСозданииНаСервере`, `ПриОткрытии`
 - `excludedCommands` — убрать стандартные команды формы: `["Reread", "Copy"]`
 
 ### Элементы (ключ определяет тип)
@@ -88,7 +101,7 @@ powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/form-compile.ps1" -FromObje
 | `width` / `height` | Размер |
 | `horizontalStretch` / `verticalStretch` | Растягивать |
 | `autoMaxWidth: false` | Снять предел ширины (поле тянется на всю доступную ширину) |
-| `events` | Обработчики: `{ "OnChange": "ИмяОбработчика" }`; `null` вместо имени — имя по шаблону `<Элемент><Событие>` |
+| `events` | Обработчики: `{ "OnChange": "ИмяОбработчика" }`; имена по конвенции — списком: `["OnChange", "StartChoice"]` (элемент списка может задать имя сам: `{ "event": "Clearing", "handler": "Имя" }`) |
 
 > **Неизвестное событие (OpenCode).** Имени нет в списках ниже — `form-compile` пишет `[ERROR]` и завершается с кодом 1, Form.xml не создаёт. Платформа иначе сохраняет событие и никогда его не вызывает. Расшифровка отчёта — `DetailProcessing` у поля табличного документа, не выдуманное имя. Незнакомое событие сначала проверь в `1c-help`. Обход: `FORM_COMPILE_ALLOW_UNKNOWN_EVENTS=1` (только предупреждение).
 
@@ -96,19 +109,21 @@ powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/form-compile.ps1" -FromObje
 
 Имена регистрозависимы.
 
-**Форма:** `OnCreateAtServer`, `OnOpen`, `BeforeClose`, `OnClose`, `NotificationProcessing`, `ChoiceProcessing`, `OnReadAtServer`, `BeforeWriteAtServer`, `OnWriteAtServer`, `AfterWriteAtServer`, `BeforeWrite`, `AfterWrite`, `FillCheckProcessingAtServer`, `BeforeLoadDataFromSettingsAtServer`, `OnLoadDataFromSettingsAtServer`, `ExternalEvent`, `Opening`
+Частые:
 
-**input:** `OnChange`, `StartChoice`, `ChoiceProcessing`, `AutoComplete`, `TextEditEnd`, `Clearing`, `Creating`, `EditTextChange`
-**picField:** `OnChange`, `StartChoice`, `ChoiceProcessing`, `Click`, `Clearing`
+**Форма:** `OnCreateAtServer`, `OnOpen`, `NotificationProcessing`, `BeforeClose`, `OnClose`, `ChoiceProcessing`, `FillCheckProcessingAtServer`, `OnLoadDataFromSettingsAtServer`; у формы объекта или записи — `OnReadAtServer`, `BeforeWrite`, `BeforeWriteAtServer`, `AfterWrite`, `AfterWriteAtServer`
+**input:** `OnChange`, `StartChoice`, `ChoiceProcessing`, `Clearing`, `AutoComplete`, `TextEditEnd`
 **check / radio:** `OnChange`
-**table:** `OnStartEdit`, `OnEditEnd`, `OnChange`, `Selection`, `ValueChoice`, `BeforeAddRow`, `BeforeDeleteRow`, `AfterDeleteRow`, `BeforeRowChange`, `BeforeEditEnd`, `OnActivateRow`, `OnActivateCell`, `Drag`, `DragStart`, `DragCheck`, `DragEnd`
-**label:** `Click`, `URLProcessing`
-**picture:** `Click`
-**labelField:** `OnChange`, `StartChoice`, `ChoiceProcessing`, `Click`, `URLProcessing`, `Clearing`
-**button:** `Click`
+**table:** `Selection`, `OnActivateRow`, `BeforeAddRow`, `BeforeDeleteRow`, `AfterDeleteRow`, `BeforeRowChange`, `OnStartEdit`, `OnEditEnd`, `BeforeEditEnd`, `OnChange`, `OnActivateCell`, `ChoiceProcessing`, `Drag`; только у таблицы динамического списка — `OnGetDataAtServer`, `BeforeLoadUserSettingsAtServer`, `OnUpdateUserSettingSetAtServer`
+**label / labelField:** `Click`, `URLProcessing`
+**picture / picField:** `Click`
 **pages:** `OnCurrentPageChange`
 **spreadsheet (поле табличного документа):** `DetailProcessing`, `AdditionalDetailProcessing`, `OnChangeAreaContent`, `OnActivate`, `Selection`
 **форма отчёта (СКД), дополнительно:** `OnComposeResult`, `OnSaveVariantAtServer`, `BeforeLoadVariantAtServer`, `OnLoadVariantAtServer`, `OnSaveUserSettingsAtServer`, `BeforeLoadUserSettingsAtServer`, `OnLoadUserSettingsAtServer`, `OnSaveDataInSettingsAtServer`, `OnReopen`
+**spreadsheet:** `Selection`, `OnChangeAreaContent`, `OnActivate`, `DetailProcessing`
+**html:** `OnClick`, `DocumentComplete`
+
+Остальные события этих и других полей (календарь, планировщик, диаграммы, документы) — `references/events.md`. У кнопки, страницы, группы колонок, командной панели и подменю событий нет.
 
 ### Поле ввода (input)
 
@@ -150,7 +165,7 @@ powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/form-compile.ps1" -FromObje
 | Ключ | Описание |
 |------|----------|
 | `behavior` | `collapsible` — сворачиваемая, `popup` — всплывающая; не указан — обычная |
-| `showTitle: true` | Показывать заголовок |
+| `showTitle: true` | Показывать заголовок (без ключа у обычной группы показан, если задан `title` или `titleDataPath`, иначе скрыт; у сворачиваемой и всплывающей — показан) |
 | `representation` | `none` / `normal` / `weak` / `strong` — рамка группы |
 | `united: false` | Выравнивать поля только внутри группы, а не вместе с соседними |
 | `children` | Вложенные элементы |
@@ -168,6 +183,7 @@ powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/form-compile.ps1" -FromObje
 | `changeRowSet: true` / `changeRowOrder: true` | Разрешить добавлять/удалять / перемещать строки |
 | `header: false` | Без шапки |
 | `heightInTableRows` | Высота в строках |
+| `commandBar` | Кнопки командной панели таблицы — сюда команды строк («Отметить все», «Снять отметки», «Заполнить», «Подбор»), а не в панель формы или группу на форме: `[ { "button": "ЦеныОтметитьВсе", "command": "ОтметитьВсе" } ]` (`references/buttons-commands.md`) |
 | `commandBarLocation` | `None` / `Top` / `Bottom` / `Auto` |
 | `searchStringLocation` | `None` / `Top` / `Bottom` / `CommandBar` / `Auto` |
 | `choiceMode: true` | Таблица выбора (форма выбора) |
@@ -208,9 +224,9 @@ powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/form-compile.ps1" -FromObje
     { "button": "Загрузить", "command": "Загрузить", "defaultButton": true },
     { "popup": "Печать", "title": "Печать", "children": [
         { "button": "ПечатьСчета", "command": "ПечатьСчета" } ] },
-    { "buttonGroup": "ГруппаПеремещение", "children": [
-        { "button": "Вверх", "command": "Вверх" },
-        { "button": "Вниз", "command": "Вниз" } ] }
+    { "buttonGroup": "ГруппаНавигация", "children": [
+        { "button": "Назад", "command": "Назад" },
+        { "button": "Далее", "command": "Далее" } ] }
 ] }
 ```
 
@@ -308,18 +324,17 @@ powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/form-compile.ps1" -FromObje
 ```json
 {
   "title": "Загрузка из файла",
-  "events": { "OnCreateAtServer": "ПриСозданииНаСервере" },
   "elements": [
+    { "autoCmdBar": "ФормаКоманднаяПанель", "children": [
+      { "button": "Загрузить", "command": "Загрузить", "defaultButton": true },
+      { "button": "Закрыть", "stdCommand": "Close" }
+    ]},
     { "group": "horizontal", "name": "ГруппаФайл", "children": [
       { "input": "ИмяФайла", "path": "ИмяФайла", "title": "Файл", "inputHint": "Выберите файл...",
         "choiceButton": true, "events": { "StartChoice": "ИмяФайлаНачалоВыбора" } },
       { "check": "ПерваяСтрокаЗаголовок", "path": "ПерваяСтрокаЗаголовок" }
     ]},
-    { "input": "Результат", "path": "Результат", "multiLine": true, "height": 8, "readOnly": true, "title": "Лог" },
-    { "autoCmdBar": "ФормаКоманднаяПанель", "children": [
-      { "button": "Загрузить", "command": "Загрузить", "defaultButton": true },
-      { "button": "Закрыть", "stdCommand": "Close" }
-    ]}
+    { "input": "Результат", "path": "Результат", "multiLine": true, "height": 8, "readOnly": true, "title": "Лог" }
   ],
   "attributes": [
     { "name": "Объект", "type": "ExternalDataProcessorObject.ЗагрузкаИзФайла", "main": true },
@@ -341,6 +356,7 @@ powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/form-compile.ps1" -FromObje
 
 | Задача | Справочник |
 |--------|-----------|
+| Раскладка формы, не заданной в задаче: архетипы документа, списка, обработки, диалога, мастера; имена групп и элементов; ширины полей | `layout-patterns.md` |
 | Список выбора, быстрый выбор, своя форма выбора, маска, формат числа, пароль, выключатель/тумблер, кнопки открытия и создания, поле составного типа | `input-fields.md` |
 | Ограничить выбор отбором, связать поле с другим полем, связь по типу | `choice-params.md` |
 | Свёрнутая группа, интервалы и ширины колонок в группе, заголовок группы или страницы из данных, значок закладки, мастер по шагам (страницы без закладок) | `groups-pages.md` |
@@ -359,12 +375,14 @@ powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/form-compile.ps1" -FromObje
 | Видимость и доступ по ролям | `roles-access.md` |
 | Командный интерфейс формы (переходы, важные команды) | `command-interface.md` |
 | Выравнивание, предел размера, фокус по умолчанию, узкие экраны | `layout-advanced.md` |
+| Какие события есть у элемента или формы, имена обработчиков, с какой платформы | `events.md` |
 | Наборы и составные типы | `type-system-advanced.md` |
+| Изменить, как `-FromObject` раскладывает формы во всём проекте (стиль проекта) | `../presets/README.md` |
 
 ## Workflow
 
 1. **Каркас**: `/form-add` создаёт метаданные формы, `Module.bsl` и регистрирует форму у объекта.
-2. **Компиляция**: `/form-compile` наполняет `Form.xml`.
+2. **Компиляция**: `/form-compile` наполняет `Form.xml`; для обработчиков событий и команд, которых ещё нет в модуле, добавляет в `Module.bsl` пустые процедуры с нужной сигнатурой — остаётся написать тело.
 3. **Проверка**: `/form-validate`, `/form-info`.
 
 ## Внешние обработки (EPF)

@@ -1,4 +1,4 @@
-﻿# cf-validate v1.12 — Validate 1C configuration root structure
+﻿# cf-validate v1.14 — Validate 1C configuration root structure
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 [CmdletBinding(PositionalBinding=$false)]
 param(
@@ -25,7 +25,7 @@ $ErrorActionPreference = "Stop"
 
 # --- Resolve path ---
 if (-not [System.IO.Path]::IsPathRooted($ConfigPath)) {
-	$ConfigPath = Join-Path (Get-Location).Path $ConfigPath
+	$ConfigPath = Join-Path (Get-Location).ProviderPath $ConfigPath
 }
 
 if (Test-Path $ConfigPath -PathType Container) {
@@ -43,7 +43,7 @@ if (-not (Test-Path $ConfigPath)) {
 	exit 1
 }
 
-$resolvedPath = (Resolve-Path $ConfigPath).Path
+$resolvedPath = (Resolve-Path $ConfigPath).ProviderPath
 $configDir = Split-Path $resolvedPath -Parent
 
 # --- Output infrastructure ---
@@ -85,6 +85,7 @@ $finalize = {
 		$result = "=== Validation OK: Configuration.$objName ($checks checks) ==="
 	} else {
 		Out-Line ""
+		if ($script:stopped -and $script:errors -ge $MaxErrors) { Out-Line "Stopped after $MaxErrors errors. Fix and re-run." }
 		Out-Line "=== Result: $($script:errors) errors, $($script:warnings) warnings ($checks checks) ==="
 		$result = $script:output.ToString()
 	}

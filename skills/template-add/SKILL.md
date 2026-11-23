@@ -82,5 +82,5 @@ powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/add-template.ps1" -ObjectNa
 
 ## Что модифицируется
 
-- `<SrcDir>/<ObjectName>.xml` — добавляется `<Template>` в конец `ChildObjects`
+- `<SrcDir>/<ObjectName>.xml` — добавляется `<Template>` в `ChildObjects`
 - Для ExternalReport/Report: может обновляться `MainDataCompositionSchema`

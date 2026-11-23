@@ -1,4 +1,4 @@
-﻿# role-validate v1.7 — Validate 1C role structure
+﻿# role-validate v1.10 — Validate 1C role structure
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 [CmdletBinding(PositionalBinding=$false)]
 param(
@@ -195,9 +195,9 @@ $script:kindOwners = @{
 
 # Подсказка формата для каждого вида сервиса: {0} подставляется как `Тип.Имя` из роли.
 $script:serviceLeafHints = @{
-	"WebService"         = "{0}.Operation.<Операция>"
-	"HTTPService"        = "{0}.URLTemplate.<Шаблон>.Method.<Метод>"
-	"IntegrationService" = "{0}.IntegrationServiceChannel.<Канал>"
+	"WebService"         = "{0}.Operation.<Operation>"
+	"HTTPService"        = "{0}.URLTemplate.<Template>.Method.<Method>"
+	"IntegrationService" = "{0}.IntegrationServiceChannel.<Channel>"
 }
 
 # Один и тот же вид под разными родителями имеет разный набор: измерение регистра —
@@ -288,11 +288,11 @@ function Get-NestedRights {
 function Format-TypeError {
 	param([string]$objName, [string]$objectType)
 	if ($script:noRightsTypes -contains $objectType) {
-		return "${objName}: тип '$objectType' не имеет прав в роли — блок нужно удалить"
+		return "${objName}: type '$objectType' has no rights in roles — remove the block"
 	}
 	$similar = Find-Similar -needle $objectType -haystack @($script:knownRights.Keys)
-	$sug = if ($similar.Count -gt 0) { " Возможно: $($similar -join ', ')?" } else { "" }
-	return "${objName}: неизвестный тип объекта '$objectType'.$sug"
+	$sug = if ($similar.Count -gt 0) { " Did you mean: $($similar -join ', ')?" } else { "" }
+	return "${objName}: unknown object type '$objectType'.$sug"
 }
 
 function Find-Similar {
@@ -361,7 +361,7 @@ function Get-ExtBodyOwner([string]$bodyPath) {
 
 # --- Resolve path ---
 if (-not [System.IO.Path]::IsPathRooted($RightsPath)) {
-	$RightsPath = Join-Path (Get-Location).Path $RightsPath
+	$RightsPath = Join-Path (Get-Location).ProviderPath $RightsPath
 }
 # A: Directory → Ext/Rights.xml
 if (Test-Path $RightsPath -PathType Container) {
@@ -383,7 +383,7 @@ if (-not (Test-Path $RightsPath)) {
 	$result = $script:output.ToString()
 	Write-Host $result
 	if ($OutFile) {
-		$outPath = if ([System.IO.Path]::IsPathRooted($OutFile)) { $OutFile } else { Join-Path (Get-Location) $OutFile }
+		$outPath = if ([System.IO.Path]::IsPathRooted($OutFile)) { $OutFile } else { Join-Path (Get-Location).ProviderPath $OutFile }
 		$outDir = [System.IO.Path]::GetDirectoryName($outPath)
 		if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
 		$utf8Bom = New-Object System.Text.UTF8Encoding $true
@@ -394,7 +394,7 @@ if (-not (Test-Path $RightsPath)) {
 }
 
 # Auto-detect metadata: Roles/Name/Ext/Rights.xml → Roles/Name.xml
-$resolvedRights = (Resolve-Path $RightsPath).Path
+$resolvedRights = (Resolve-Path $RightsPath).ProviderPath
 $extDir = Split-Path $resolvedRights -Parent
 $roleDir = Split-Path $extDir -Parent
 $rolesDir = Split-Path $roleDir -Parent
@@ -410,7 +410,7 @@ try {
 	$result = $script:output.ToString()
 	Write-Host $result
 	if ($OutFile) {
-		$outPath = if ([System.IO.Path]::IsPathRooted($OutFile)) { $OutFile } else { Join-Path (Get-Location) $OutFile }
+		$outPath = if ([System.IO.Path]::IsPathRooted($OutFile)) { $OutFile } else { Join-Path (Get-Location).ProviderPath $OutFile }
 		$outDir = [System.IO.Path]::GetDirectoryName($outPath)
 		if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
 		$utf8Bom = New-Object System.Text.UTF8Encoding $true
@@ -458,6 +458,7 @@ $rightCount = 0
 $rlsCount = 0
 
 foreach ($obj in $objects) {
+	if ($script:stopped) { break }
 	$objName = ""
 	foreach ($child in $obj.ChildNodes) {
 		if ($child.LocalName -eq "name") {
@@ -481,19 +482,20 @@ foreach ($obj in $objects) {
 	if (-not $typeKnown) {
 		Report-Error (Format-TypeError $objName $objectType)
 	} elseif ($isNested -and $script:kindOwners.ContainsKey($nestedKind) -and $objectType -ne $script:kindOwners[$nestedKind]) {
-		Report-Error "${objName}: вид '$nestedKind' бывает только у $($script:kindOwners[$nestedKind])"
+		Report-Error "${objName}: kind '$nestedKind' exists only under $($script:kindOwners[$nestedKind])"
 	} elseif ($isNested -and $null -eq (Get-NestedRights $objectType $nestedKind)) {
-		Report-Error "${objName}: неизвестный вид вложенности '$nestedKind'"
+		Report-Error "${objName}: unknown nested kind '$nestedKind'"
 	} elseif (-not $isNested -and $script:serviceLeafHints.ContainsKey($objectType)) {
 		# Право на сервис целиком платформа игнорирует: проверяется лист (метод шаблона URL,
 		# операция, канал). Роль формально валидна и молча не работает — 403 на всех
 		# маршрутах, причина по симптому не читается. В Конфигураторе галки на корне сервиса
 		# нет вовсе, так что это недостижимое состояние, а не стилистика.
-		Report-Error "${objName}: право на сервис целиком не действует — назначайте права на вложенные объекты: $($script:serviceLeafHints[$objectType] -f $objName)"
+		Report-Error "${objName}: a right on the whole service has no effect — grant rights on nested objects: $($script:serviceLeafHints[$objectType] -f $objName)"
 	}
 
 	# Check rights
 	foreach ($child in $obj.ChildNodes) {
+		if ($script:stopped) { break }
 		if ($child.LocalName -ne "right") { continue }
 
 		$rName = ""
@@ -535,27 +537,30 @@ foreach ($obj in $objects) {
 		} elseif ($isNested) {
 			$validNested = Get-NestedRights $objectType $nestedKind
 			if ($null -ne $validNested -and $rName -notin $validNested) {
-				Report-Error "${objName}: право '$rName' недопустимо для вида '$nestedKind' (допустимо: $($validNested -join ', '))"
+				Report-Error "${objName}: right '$rName' is not allowed for kind '$nestedKind' (allowed: $($validNested -join ', '))"
 			}
 		} else {
 			$validRights = $script:knownRights[$objectType]
 			if ($rName -notin $validRights) {
 				$similar = Find-Similar -needle $rName -haystack $validRights
-				$sugStr = if ($similar.Count -gt 0) { " Возможно: $($similar -join ', ')?" } else { "" }
-				Report-Error "${objName}: право '$rName' не существует у типа '$objectType'.$sugStr"
+				$sugStr = if ($similar.Count -gt 0) { " Did you mean: $($similar -join ', ')?" } else { "" }
+				Report-Error "${objName}: right '$rName' does not exist for type '$objectType'.$sugStr"
 			}
 		}
 	}
 }
 
-Report-OK "$objCount objects, $rightCount rights"
-if ($rlsCount -gt 0) {
-	Report-OK "$rlsCount RLS restrictions"
+# После остановки счётчики частичные — сводку не печатаем, чтобы не выдавать её за полную.
+if (-not $script:stopped) {
+	Report-OK "$objCount objects, $rightCount rights"
+	if ($rlsCount -gt 0) {
+		Report-OK "$rlsCount RLS restrictions"
+	}
 }
 
 # 3e. Templates
 $templates = $root.GetElementsByTagName("restrictionTemplate", $rightsNs)
-if ($templates.Count -gt 0) {
+if (-not $script:stopped -and $templates.Count -gt 0) {
 	$tplNames = @()
 	foreach ($tpl in $templates) {
 		$tName = ""
@@ -580,7 +585,7 @@ if ($templates.Count -gt 0) {
 
 # --- 4. Validate metadata ---
 
-if (Test-Path $MetadataPath) {
+if (-not $script:stopped -and (Test-Path $MetadataPath)) {
 	Out-Line ""
 	try {
 		[xml]$metaXml = Get-Content -Path $MetadataPath -Encoding UTF8
@@ -620,7 +625,7 @@ if (Test-Path $MetadataPath) {
 # роль может расходиться — платформа такое грузит, это лишь неоднородность выгрузки (типично после
 # мержа веток, выгруженных разными платформами).
 $rightsVer = $root.GetAttribute("version")
-if ($rightsVer) {
+if (-not $script:stopped -and $rightsVer) {
 	$ownerPath = Get-ExtBodyOwner $resolvedRights
 	$ownerVer = if ($ownerPath) { Get-RootVersion $ownerPath } else { $null }
 	$dumpAnchor = Find-DumpAnchor (Split-Path $resolvedRights -Parent)
@@ -651,7 +656,7 @@ if (Test-Path $MetadataPath) {
 	} catch { }
 }
 
-if (Test-Path $configXmlPath) {
+if (-not $script:stopped -and (Test-Path $configXmlPath)) {
 	Out-Line ""
 	try {
 		[xml]$cfgXml = Get-Content -Path $configXmlPath -Encoding UTF8
@@ -688,13 +693,14 @@ if ($script:errors -eq 0 -and $script:warnings -eq 0 -and -not $Detailed) {
 	$result = "=== Validation OK: Role.$inferredRoleName ($checks checks) ==="
 } else {
 	Out-Line ""
+	if ($script:stopped) { Out-Line "Stopped after $MaxErrors errors. Fix and re-run." }
 	Out-Line "=== Result: $($script:errors) errors, $($script:warnings) warnings ($checks checks) ==="
 	$result = $script:output.ToString()
 }
 Write-Host $result
 
 if ($OutFile) {
-	$outPath = if ([System.IO.Path]::IsPathRooted($OutFile)) { $OutFile } else { Join-Path (Get-Location) $OutFile }
+	$outPath = if ([System.IO.Path]::IsPathRooted($OutFile)) { $OutFile } else { Join-Path (Get-Location).ProviderPath $OutFile }
 	$outDir = [System.IO.Path]::GetDirectoryName($outPath)
 	if (-not (Test-Path $outDir)) {
 		New-Item -ItemType Directory -Path $outDir -Force | Out-Null

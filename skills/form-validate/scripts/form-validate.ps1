@@ -1,4 +1,4 @@
-﻿# form-validate v1.24 — Validate 1C managed form
+﻿# form-validate v1.41 — Validate 1C managed form
 # Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 [CmdletBinding(PositionalBinding=$false)]
 param(
@@ -52,7 +52,7 @@ if (-not (Test-Path $FormPath)) {
 $xmlDoc = New-Object System.Xml.XmlDocument
 $xmlDoc.PreserveWhitespace = $false
 try {
-	$xmlDoc.Load((Resolve-Path $FormPath).Path)
+	$xmlDoc.Load((Resolve-Path $FormPath).ProviderPath)
 } catch {
 	Write-Host "[ERROR] XML parse error: $($_.Exception.Message)"
 	Write-Host ""
@@ -128,7 +128,7 @@ function Get-ExtBodyOwner([string]$bodyPath) {
 # обработка/отчёт. Ближайший побеждает: автономная обработка остаётся автономной, даже если её
 # исходники лежат внутри дерева с Configuration.xml (типовая раскладка проекта: src/cf рядом с
 # src/epf). Иначе её собственные External*-типы считались бы ошибкой.
-$script:dumpAnchor = Find-DumpAnchor (Split-Path (Resolve-Path $FormPath) -Parent)
+$script:dumpAnchor = Find-DumpAnchor (Split-Path (Resolve-Path $FormPath).ProviderPath -Parent)
 $script:isConfigContext = [bool]($script:dumpAnchor -and [System.IO.Path]::GetFileName($script:dumpAnchor) -eq "Configuration.xml")
 
 # --- Counters ---
@@ -137,6 +137,15 @@ $errors = 0
 $warnings = 0
 $stopped = $false
 $script:okCount = 0
+
+# Шапка — перед первой строкой вывода: сразу с -Detailed, иначе при первом ERROR/WARN
+$script:headerShown = $false
+function Write-Header {
+	if ($script:headerShown) { return }
+	$script:headerShown = $true
+	Write-Host "=== Validation: Form.$formName ==="
+	Write-Host ""
+}
 
 function Report-OK {
 	param([string]$msg)
@@ -147,6 +156,7 @@ function Report-OK {
 function Report-Error {
 	param([string]$msg)
 	$script:errors++
+	Write-Header
 	Write-Host "[ERROR] $msg"
 	if ($script:errors -ge $MaxErrors) {
 		$script:stopped = $true
@@ -156,6 +166,7 @@ function Report-Error {
 function Report-Warn {
 	param([string]$msg)
 	$script:warnings++
+	Write-Header
 	Write-Host "[WARN]  $msg"
 }
 
@@ -184,10 +195,7 @@ if ($parentDir) {
 	}
 }
 
-if ($Detailed) {
-	Write-Host "=== Validation: $formName ==="
-	Write-Host ""
-}
+if ($Detailed) { Write-Header }
 
 # Early BaseForm detection (used in Check 5 to skip base element DataPath validation)
 $hasBaseForm = ($root.SelectSingleNode("f:BaseForm", $nsMgr) -ne $null)
@@ -461,11 +469,28 @@ if (-not $stopped) {
 if (-not $stopped) {
 	$pathErrors = 0
 	$pathChecked = 0
-	$pathBaseSkipped = 0
+	# Пути, о которых уже сказано поэлементно, — проход по прочим привязкам ниже их не повторяет
+	$reportedPaths = @{}
 
 	# All data-binding tags whose value is an attribute path (root must exist in <Attributes>).
 	$bindingTags = @('DataPath','TitleDataPath','FooterDataPath','HeaderDataPath',
 		'MultipleValueDataPath','MultipleValuePresentDataPath','RowPictureDataPath','MultipleValuePictureDataPath')
+
+	# Заимствованная форма без основного реквизита: путь Объект.* на ней — ровно этот случай. Подсказка —
+	# только к корню, который и был бы основным реквизитом: имя из <BaseForm>, а нет его там — обычные
+	# имена основного реквизита. Опечатке в корне или чужому реквизиту она не нужна.
+	$mainRootNames = @()
+	if ($hasBaseForm) {
+		$mainRootNames = @('Объект', 'Список', 'Запись', 'Отчет', 'НаборЗаписей', 'НаборКонстант',
+			'Object', 'List', 'Record', 'Report', 'RecordSet', 'ConstantsSet')
+		$mainBase = $root.SelectSingleNode("f:BaseForm/f:Attributes/f:Attribute[f:MainAttribute='true']", $nsMgr)
+		if ($mainBase -and $mainBase.GetAttribute("name")) { $mainRootNames = @($mainBase.GetAttribute("name")) }
+		foreach ($attr in $attrNodes) {
+			$maNode = $attr.SelectSingleNode("f:MainAttribute", $nsMgr)
+			if ($maNode -and $maNode.InnerText.Trim() -eq "true") { $mainRootNames = @(); break }
+		}
+	}
+	$noMainHint = { param($r) if ($r -in $mainRootNames) { " (the borrowed form declares no MainAttribute)" } else { "" } }
 
 	foreach ($el in $allElements) {
 		if ($stopped) { break }
@@ -478,11 +503,8 @@ if (-not $stopped) {
 			continue
 		}
 
-		# In borrowed forms, skip DataPath check for base elements (id < 1000000)
-		if ($hasBaseForm -and $el.Id) {
-			try { if ([int]$el.Id -lt 1000000) { $pathBaseSkipped++; continue } } catch {}
-		}
-
+		# Базовые элементы заимствованной формы (id < 1000000) проверяются так же: висячую привязку
+		# платформа отвергает и на них — «Неверный путь к данным».
 		foreach ($bTag in $bindingTags) {
 			if ($stopped) { break }
 			$dpNode = $node.SelectSingleNode("f:$bTag", $nsMgr)
@@ -491,10 +513,9 @@ if (-not $stopped) {
 			$dataPath = $dpNode.InnerText.Trim()
 			if (-not $dataPath) { continue }
 
-			# Opaque platform-internal shapes — not validatable from Form.xml alone:
-			#   - bare numeric (e.g. "10", "1000003") — internal index
-			#   - "N/M:<uuid>" — metadata reference by UUID
-			if ($dataPath -match '^\d+$' -or $dataPath -match '^\d+/\d+:[0-9a-fA-F-]+$') {
+			# Ссылки, которые Конфигуратор пишет номерами, по Form.xml не разрешить: «10», «1/0:<uuid>»,
+			# «306:<uuid>/8:<uuid>», «1/-5». Имя реквизита с цифры не начинается.
+			if ($dataPath -match '^\d') {
 				continue
 			}
 
@@ -549,20 +570,38 @@ if (-not $stopped) {
 			if ($itemsBroken) { continue }
 
 			if (-not $attrMap.ContainsKey($rootAttr)) {
-				Report-Error "[$tag] '$elName': $bTag='$dataPath' — attribute '$rootAttr' not found"
+				Report-Error "[$tag] '$elName': $bTag='$dataPath' — attribute '$rootAttr' not found$(& $noMainHint $rootAttr)"
 				$pathErrors++
+				$reportedPaths[$dataPath] = $true
 			}
 		}
 	}
 
-	$pathMsg = ""
-	if ($pathChecked -gt 0) { $pathMsg = "$pathChecked paths checked" }
-	if ($pathBaseSkipped -gt 0) {
-		$skipNote = "$pathBaseSkipped base skipped"
-		$pathMsg = if ($pathMsg) { "$pathMsg, $skipNote" } else { $skipNote }
+	# Прочие привязки — <xr:DataPath> в <ChoiceParameterLinks>/<TypeLink> и любой *DataPath вне тегов
+	# выше: корень тоже должен быть реквизитом формы. Только своя часть: <BaseForm> — снимок исходной
+	# формы, его платформа разрешает по конфигурации. Items.* и номерные ссылки — как выше.
+	$ownText = ([System.IO.File]::ReadAllText((Resolve-Path -LiteralPath $FormPath).ProviderPath, [System.Text.Encoding]::UTF8) -split '<BaseForm', 2)[0]
+	# Порядок корней — как в файле: одинаков в обоих портах
+	$undeclared = New-Object System.Collections.Specialized.OrderedDictionary ([StringComparer]::OrdinalIgnoreCase)
+	foreach ($m in [regex]::Matches($ownText, '<(?:\w+:)?\w*DataPath[^>]*>([^<]+)</(?:\w+:)?\w*DataPath>')) {
+		$dp = $m.Groups[1].Value.Trim()
+		if (-not $dp -or $dp -match '^\d' -or $reportedPaths.ContainsKey($dp)) { continue }
+		$rootAttr = ((($dp -replace '\[\d+\]', '') -replace '^~', '') -split '\.', 2)[0]
+		if ($rootAttr -eq 'Items' -or $attrMap.ContainsKey($rootAttr)) { continue }
+		if (-not $undeclared.Contains($rootAttr)) { $undeclared[$rootAttr] = New-Object System.Collections.Generic.List[string] }
+		if (-not $undeclared[$rootAttr].Contains($dp)) { $undeclared[$rootAttr].Add($dp) }
 	}
-	if ($pathErrors -eq 0 -and $pathMsg) {
-		Report-OK "Data bindings: $pathMsg"
+	foreach ($rootAttr in @($undeclared.Keys)) {
+		if ($stopped) { break }
+		$shown = $undeclared[$rootAttr]
+		$sample = ($shown | Select-Object -First 3) -join ", "
+		$suffix = if ($shown.Count -gt 3) { " (and $($shown.Count - 3) more)" } else { "" }
+		Report-Error "Path(s) rooted at '${rootAttr}' — attribute '${rootAttr}' not found$(& $noMainHint $rootAttr): $sample$suffix"
+		$pathErrors++
+	}
+
+	if ($pathErrors -eq 0 -and $pathChecked -gt 0) {
+		Report-OK "Data bindings: $pathChecked paths checked"
 	} elseif ($pathErrors -eq 0) {
 		Report-OK "Data bindings: none"
 	}
@@ -839,41 +878,6 @@ if (-not $stopped -and $isExtension) {
 			Report-OK "Extension ID ranges: $extAttrCount attr(s), $extCmdCount cmd(s) — all >= 1000000"
 		}
 	}
-
-	# 11d. Пути на основной реквизит, которого форма не объявляет.
-	# Check 5 такое пропускает: у заимствованной формы он не проверяет базовые элементы (id < 1000000),
-	# а привязки в <xr:Link> вообще вне его списка тегов. Между тем это ровно тот случай, на котором
-	# платформа отвергает загрузку: «Неверный путь к полю - Объект.X». Правило: если основной реквизит
-	# не объявлен в <Attributes> формы, любой путь с его корнем не разрешится.
-	# Корень берётся из основного реквизита BaseForm: «Объект» он только у формы объекта, у формы
-	# списка это «Список», у формы записи регистра «Запись». С зашитым «Объект» проверка на таких
-	# формах молча не срабатывала — валидатор рапортовал «чисто» на форме, которую платформа не примет.
-	$mainAttrDeclared = $false
-	foreach ($attr in $attrNodes) {
-		$maNode = $attr.SelectSingleNode("f:MainAttribute", $nsMgr)
-		if ($maNode -and $maNode.InnerText.Trim() -eq "true") { $mainAttrDeclared = $true; break }
-	}
-
-	if (-not $mainAttrDeclared) {
-		# Значения привязок ищем текстом: интересуют и обычные теги, и <xr:DataPath> внутри
-		# <ChoiceParameterLinks>, а те живут в чужом пространстве имён.
-		$rawForm = [System.IO.File]::ReadAllText($FormPath, [System.Text.Encoding]::UTF8)
-		$mainBase = $baseFormNode.SelectSingleNode("f:Attributes/f:Attribute[f:MainAttribute='true']", $bfNs)
-		$rootName = if ($mainBase -and $mainBase.GetAttribute("name")) { $mainBase.GetAttribute("name") } else { "Объект" }
-		$rootPat = [regex]::Escape($rootName)
-		$danglingPaths = @{}
-		foreach ($m in [regex]::Matches($rawForm, "<(?:\w+:)?\w*DataPath[^>]*>(${rootPat}\.[^<]+)</(?:\w+:)?\w*DataPath>")) {
-			$danglingPaths[$m.Groups[1].Value] = $true
-		}
-		if ($danglingPaths.Count -gt 0) {
-			$shown = @($danglingPaths.Keys | Sort-Object)
-			$sample = ($shown | Select-Object -First 3) -join ", "
-			$suffix = if ($shown.Count -gt 3) { " (и ещё $($shown.Count - 3))" } else { "" }
-			Report-Error "Path(s) rooted at '${rootName}' but the form declares no MainAttribute: $sample$suffix"
-		} elseif ($mainBase) {
-			Report-OK "Object paths: none dangling (MainAttribute not declared)"
-		}
-	}
 }
 
 # Check callType without BaseForm (structural warning)
@@ -938,29 +942,30 @@ if (-not $stopped) {
 	$typeNodes = $root.SelectNodes("//v8:Type", $nsMgr)
 	$typeOk = $true
 	$typeChecked = 0
-	$typeInvalid = 0
+	# Имена типов XDTO регистрозависимы: сравнение везде с учётом регистра (-cin/-ceq/-cmatch)
 	foreach ($tn in $typeNodes) {
+		if ($stopped) { break }
 		$tv = $tn.InnerText.Trim()
 		if (-not $tv) { continue }
 		$typeChecked++
-		if ($tv -in $knownInvalidTypes) {
+		if ($tv -cin $knownInvalidTypes) {
 			Report-Error "12. Type '$tv': invalid runtime/UI type (not valid in XDTO schema)"
-			$typeOk = $false; $typeInvalid++
+			$typeOk = $false
 			continue
 		}
-		if ($tv -in $validClosedTypes) { continue }
-		if ($tv -match '^cfg:(.+)$') {
+		if ($tv -cin $validClosedTypes) { continue }
+		if ($tv -cmatch '^cfg:(.+)$') {
 			$cfgVal = $Matches[1]
 			# Тип без имени объекта: динамический список, набор констант, любой отчёт — ровно те три,
 			# что встречаются в формах корпуса (УТ, ERP, БП, УНФ); иное без имени — вероятная опечатка
 			if ($cfgVal -cin @("DynamicList", "ConstantsSet", "ReportObject")) { continue }
-			if ($cfgVal -match '^([^.]+)\.') {
+			if ($cfgVal -cmatch '^([^.]+)\.') {
 				$pfx = $Matches[1]
-				if ($pfx -in $validCfgPrefixes) {
+				if ($pfx -cin $validCfgPrefixes) {
 					# ExternalDataProcessorObject/ExternalReportObject valid only for EPF/ERF, not config
-					if ($script:isConfigContext -and ($pfx -eq "ExternalDataProcessorObject" -or $pfx -eq "ExternalReportObject")) {
+					if ($script:isConfigContext -and ($pfx -ceq "ExternalDataProcessorObject" -or $pfx -ceq "ExternalReportObject")) {
 						Report-Error "12. Type '$tv': External* type in configuration context (use DataProcessorObject/ReportObject instead)"
-						$typeOk = $false; $typeInvalid++
+						$typeOk = $false
 					}
 					continue
 				}
@@ -1034,7 +1039,7 @@ if (-not $stopped) {
 
 if (-not $stopped) {
 	$formVer = $root.GetAttribute("version")
-	$formFull = (Resolve-Path $FormPath).Path
+	$formFull = (Resolve-Path $FormPath).ProviderPath
 	$ownerPath = Get-ExtBodyOwner $formFull
 	$ownerVer = if ($ownerPath) { Get-RootVersion $ownerPath } else { $null }
 	$dumpVer = if ($script:dumpAnchor) { Get-RootVersion $script:dumpAnchor } else { $null }
@@ -1063,6 +1068,7 @@ if (-not $stopped) {
 # Источник — XSD xcf-logform 2.10–2.21, сверено с корпусом БП/ERP 8.3.24 (17036 форм, расхождений нет)
 # и загрузкой в 8.3.24. Перегенерировать: python debug/form-dsl-revision/gen_enum_table.py
 $script:validEnumValues = @{
+	"ActionPurpose" = @("Usual","Create","Finish")
 	"AppearanceInCard" = @("Auto","Extended")
 	"AppearanceMode" = @("Auto","CommandBar","UsualGroup")
 	"AutoAddIncomplete" = @("true","false","auto")
@@ -1107,6 +1113,7 @@ $script:validEnumValues = @{
 	"ControlRepresentation" = @("TitleHyperlink","Picture","Button","ButtonInParentElement")
 	"ConversationsRepresentation" = @("Auto","Show","DontShow")
 	"CreateButton" = @("true","false","auto")
+	"Command.CurrentRowUse" = @("Use","DontUse","Auto")
 	"Pages.CurrentRowUse" = @("Use","DontUse","Auto")
 	"Table.CurrentRowUse" = @("Auto","Choice","SelectionPresentation","SelectionPresentationAndChoice")
 	"UsualGroup.CurrentRowUse" = @("Use","DontUse","Auto")
@@ -1120,6 +1127,7 @@ $script:validEnumValues = @{
 	"EqualItemsWidth" = @("true","false","auto")
 	"ExtendedEdit" = @("true","false","auto")
 	"FileDragMode" = @("AsFile","AsFileRef")
+	"FillCheck" = @("DontCheck","ShowError")
 	"FixInCard" = @("true","false","auto")
 	"FixingInTable" = @("None","Left","Right")
 	"FooterHorizontalAlign" = @("Left","Center","Right","Auto")
@@ -1144,6 +1152,7 @@ $script:validEnumValues = @{
 	"ColumnGroup.HorizontalStretch" = @("true","false","auto")
 	"CommandBar.HorizontalStretch" = @("true","false","auto")
 	"ContextMenu.HorizontalStretch" = @("true","false","auto")
+	"ExtendedTooltip.HorizontalStretch" = @("true","false","auto")
 	"InputField.HorizontalStretch" = @("true","false","auto")
 	"LabelDecoration.HorizontalStretch" = @("true","false","auto")
 	"LabelField.HorizontalStretch" = @("true","false","auto")
@@ -1152,13 +1161,17 @@ $script:validEnumValues = @{
 	"PictureDecoration.HorizontalStretch" = @("true","false","auto")
 	"Popup.HorizontalStretch" = @("true","false","auto")
 	"RadioButtonField.HorizontalStretch" = @("true","false","auto")
+	"SearchControlAddition.HorizontalStretch" = @("true","false","auto")
+	"SearchStringAddition.HorizontalStretch" = @("true","false","auto")
 	"UsualGroup.HorizontalStretch" = @("true","false","auto")
+	"ViewStatusAddition.HorizontalStretch" = @("true","false","auto")
 	"Importance" = @("Main","Normal","Supplementary")
 	"IncompleteChoiceMode" = @("OnEnterPressed","OnActivate")
 	"InitialListView" = @("Beginning","End","Auto")
 	"InitialRowActivation" = @("Auto","Activate","NoActivate")
 	"InitialTreeView" = @("NoExpand","ExpandTopLevel","ExpandAllLevels")
 	"IntervalsSelectionMode" = @("Auto","Multiple","Single","None")
+	"KeyType" = @("Auto","FieldValue","RowKey","RowNumber")
 	"LocationInCommandBar" = @("Auto","InAdditionalSubmenu","InCommandBar","InCommandBarAndInAdditionalSubmenu")
 	"MarkNegatives" = @("true","false","auto")
 	"MarkRequiredComplete" = @("true","false","auto")
@@ -1187,6 +1200,7 @@ $script:validEnumValues = @{
 	"ReportResultViewMode" = @("Auto","Default","Compact")
 	"Button.Representation" = @("Text","Picture","PictureAndText","Auto")
 	"ButtonGroup.Representation" = @("Auto","Usual","Compact")
+	"Command.Representation" = @("Text","Picture","TextPicture","Auto")
 	"Popup.Representation" = @("Text","Picture","PictureAndText","Auto")
 	"ProgressBarField.Representation" = @("Smooth","Broken","BrokenTilt")
 	"Table.Representation" = @("List","HierarchicalList","Tree")
@@ -1204,6 +1218,7 @@ $script:validEnumValues = @{
 	"SearchControlLocation" = @("Auto","None","CommandBar")
 	"SearchOnInput" = @("Use","DontUse","Auto")
 	"SearchStringLocation" = @("Auto","None","CommandBar","Top","Bottom","FormCaption","PullFromTop")
+	"SelectedRowsUse" = @("Use","DontUse","Auto")
 	"CalendarField.SelectionMode" = @("Single","Multiple","Interval")
 	"Table.SelectionMode" = @("SingleRow","MultiRow")
 	"SelectionShowMode" = @("WhenActive","Always","DontShow","WhenMultipleCellsSelected","WhenMultipleCellsSelectedWhenActive")
@@ -1230,7 +1245,7 @@ $script:validEnumValues = @{
 	"TitleLocation" = @("None","Auto","Left","Top","Right","Bottom")
 	"ToolTipRepresentation" = @("Auto","None","Balloon","Button","ShowAuto","ShowTop","ShowLeft","ShowBottom","ShowRight")
 	"TumblerRepresentation" = @("Text","Picture","Auto")
-	"Type" = @("CommandBarButton","UsualButton","Hyperlink","CommandBarHyperlink")
+	"Button.Type" = @("CommandBarButton","UsualButton","Hyperlink","CommandBarHyperlink")
 	"UpdateOnDataChange" = @("Auto","DontUpdate")
 	"UseAlternationRowColorBWA" = @("true","false","auto")
 	"UseCopy" = @("true","false","auto")
@@ -1247,6 +1262,7 @@ $script:validEnumValues = @{
 	"ColumnGroup.VerticalStretch" = @("true","false","auto")
 	"CommandBar.VerticalStretch" = @("true","false","auto")
 	"ContextMenu.VerticalStretch" = @("true","false","auto")
+	"ExtendedTooltip.VerticalStretch" = @("true","false","auto")
 	"InputField.VerticalStretch" = @("true","false","auto")
 	"LabelDecoration.VerticalStretch" = @("true","false","auto")
 	"LabelField.VerticalStretch" = @("true","false","auto")
@@ -1276,6 +1292,7 @@ $script:enumValueAliases = @{
 # Умолчания: значение, которое платформа у этого типа не пишет (выброшено при загрузке-выгрузке 8.3.24
 # и ни разу не встречается в корпусе) — тег с ним не пишется
 $script:enumDefaultValues = @{
+	"Attribute.FillCheck" = "DontCheck"
 	"AutoCommandBar.GroupHorizontalAlign" = "Auto"
 	"AutoCommandBar.GroupVerticalAlign" = "Auto"
 	"AutoCommandBar.HorizontalAlign" = "Left"
@@ -1342,6 +1359,7 @@ $script:enumDefaultValues = @{
 	"CheckBoxField.ToolTipRepresentation" = "Auto"
 	"CheckBoxField.VerticalAlign" = "Auto"
 	"CheckBoxField.WarningOnEditRepresentation" = "Auto"
+	"Column.FillCheck" = "DontCheck"
 	"ColumnGroup.FixingInTable" = "None"
 	"ColumnGroup.Group" = "Vertical"
 	"ColumnGroup.GroupHorizontalAlign" = "Auto"
@@ -1350,6 +1368,8 @@ $script:enumDefaultValues = @{
 	"ColumnGroup.HorizontalStretch" = "auto"
 	"ColumnGroup.ToolTipRepresentation" = "Auto"
 	"ColumnGroup.VerticalStretch" = "auto"
+	"Command.CurrentRowUse" = "Auto"
+	"Command.Representation" = "Auto"
 	"CommandBar.GroupHorizontalAlign" = "Auto"
 	"CommandBar.GroupVerticalAlign" = "Auto"
 	"CommandBar.HorizontalLocation" = "Left"
@@ -1361,6 +1381,15 @@ $script:enumDefaultValues = @{
 	"ContextMenu.HorizontalStretch" = "auto"
 	"ContextMenu.ToolTipRepresentation" = "Auto"
 	"ContextMenu.VerticalStretch" = "auto"
+	"ExtendedTooltip.GroupHorizontalAlign" = "Auto"
+	"ExtendedTooltip.GroupVerticalAlign" = "Auto"
+	"ExtendedTooltip.HorizontalAlign" = "Left"
+	"ExtendedTooltip.HorizontalStretch" = "auto"
+	"ExtendedTooltip.OnMainServerUnavalableBehavior" = "Auto"
+	"ExtendedTooltip.SkipOnInput" = "auto"
+	"ExtendedTooltip.ToolTipRepresentation" = "Auto"
+	"ExtendedTooltip.VerticalAlign" = "Auto"
+	"ExtendedTooltip.VerticalStretch" = "auto"
 	"Form.AutoSaveDataInSettings" = "DontUse"
 	"Form.ChildItemsWidth" = "Auto"
 	"Form.ChildrenAlign" = "Auto"
@@ -1599,6 +1628,17 @@ $script:enumDefaultValues = @{
 	"RadioButtonField.ToolTipRepresentation" = "Auto"
 	"RadioButtonField.VerticalAlign" = "Auto"
 	"RadioButtonField.WarningOnEditRepresentation" = "Auto"
+	"SearchControlAddition.GroupHorizontalAlign" = "Auto"
+	"SearchControlAddition.GroupVerticalAlign" = "Auto"
+	"SearchControlAddition.HorizontalStretch" = "auto"
+	"SearchControlAddition.PlacementArea" = "userCmds"
+	"SearchControlAddition.ToolTipRepresentation" = "Auto"
+	"SearchStringAddition.GroupHorizontalAlign" = "Auto"
+	"SearchStringAddition.GroupVerticalAlign" = "Auto"
+	"SearchStringAddition.HorizontalStretch" = "auto"
+	"SearchStringAddition.PlacementArea" = "userCmds"
+	"SearchStringAddition.ToolTipRepresentation" = "Auto"
+	"Settings.KeyType" = "Auto"
 	"SpreadSheetDocumentField.DrawingSelectionShowMode" = "Auto"
 	"SpreadSheetDocumentField.EditMode" = "Enter"
 	"SpreadSheetDocumentField.FixingInTable" = "None"
@@ -1690,6 +1730,62 @@ $script:enumDefaultValues = @{
 	"UsualGroup.VerticalAlign" = "Auto"
 	"UsualGroup.VerticalSpacing" = "Auto"
 	"UsualGroup.VerticalStretch" = "auto"
+	"ViewStatusAddition.GroupHorizontalAlign" = "Auto"
+	"ViewStatusAddition.GroupVerticalAlign" = "Auto"
+	"ViewStatusAddition.HorizontalLocation" = "Auto"
+	"ViewStatusAddition.HorizontalStretch" = "auto"
+	"ViewStatusAddition.PlacementArea" = "userCmds"
+	"ViewStatusAddition.ToolTipRepresentation" = "Auto"
+}
+# Узлы, у которых проверяются и приводятся значения перечислений (тег узла)
+$script:enumScopeTypes = @{
+	'Attribute' = $true
+	'AutoCommandBar' = $true
+	'Button' = $true
+	'ButtonGroup' = $true
+	'CalendarField' = $true
+	'ChartField' = $true
+	'CheckBoxField' = $true
+	'Column' = $true
+	'ColumnGroup' = $true
+	'Command' = $true
+	'CommandBar' = $true
+	'ContextMenu' = $true
+	'ExtendedTooltip' = $true
+	'Form' = $true
+	'FormattedDocumentField' = $true
+	'GanttChartField' = $true
+	'GraphicalSchemaField' = $true
+	'HTMLDocumentField' = $true
+	'InputField' = $true
+	'LabelDecoration' = $true
+	'LabelField' = $true
+	'Page' = $true
+	'Pages' = $true
+	'PeriodField' = $true
+	'PictureDecoration' = $true
+	'PictureField' = $true
+	'PlannerField' = $true
+	'Popup' = $true
+	'ProgressBarField' = $true
+	'RadioButtonField' = $true
+	'SearchControlAddition' = $true
+	'SearchStringAddition' = $true
+	'Settings' = $true
+	'SpreadSheetDocumentField' = $true
+	'Table' = $true
+	'TextDocumentField' = $true
+	'TrackBarField' = $true
+	'UsualGroup' = $true
+	'ViewStatusAddition' = $true
+}
+# Значение из соседнего перечисления того же свойства → значение этого типа (ввод DSL; в XML — ошибка)
+$script:enumInputSynonyms = @{
+	"Command.Representation" = @{ "PictureAndText" = "TextPicture" }
+	"Button.Representation" = @{ "TextPicture" = "PictureAndText" }
+	"Popup.Representation" = @{ "TextPicture" = "PictureAndText" }
+	"Table.SelectionMode" = @{ "Single" = "SingleRow"; "Multiple" = "MultiRow" }
+	"CalendarField.SelectionMode" = @{ "SingleRow" = "Single"; "MultiRow" = "Multiple" }
 }
 # --- /Перечисления свойств формы ---
 
@@ -1723,7 +1819,7 @@ $script:childTagOrder = @{
 	'Table' = 'Representation Visible UserVisible TitleLocation CommandBarLocation Autofill Enabled TitleHeight ReadOnly SkipOnInput DefaultItem ChangeRowSet ChangeRowOrder Width AutoMaxWidth MaxWidth Height AutoMaxHeight MaxHeight HeightInTableRows HeightControlVariant AutoMaxRowsCount MaxRowsCount ChoiceMode MultipleChoice RowInputMode SelectionMode RowSelectionMode Header FooterHeight HeaderHeight Footer HorizontalScrollBar VerticalScrollBar HorizontalLines VerticalLines UseAlternationRowColor AutoInsertNewRow AutoAddIncomplete AutoMarkIncomplete SearchOnInput InitialListView InitialTreeView HorizontalStretch Output VerticalStretch EnableStartDrag EnableDrag FileDragMode DataPath Font RowPictureDataPath RowsPicture BackColor BorderColor TextColor Title BehaviorOnHorizontalCompression GroupVerticalAlign Shortcut TitleTextColor TitleFont CommandSet ToolTip ToolTipRepresentation SearchStringLocation ViewStatusLocation SearchControlLocation GroupHorizontalAlign CurrentRowUse RefreshRequest AutoRefresh AutoRefreshPeriod Period ChoiceFoldersAndItems RestoreCurrentRow RowFilter TopLevelParent ShowRoot AllowRootChoice UpdateOnDataChange UserSettingsGroup AllowGettingCurrentRowURL ViewMode SettingsNamedItemDetailedRepresentation ContextMenu AutoCommandBar ExtendedTooltip SearchStringAddition ViewStatusAddition SearchControlAddition Events ChildItems'
 	'TextDocumentField' = 'DataPath DefaultItem ReadOnly Title TitleFont TitleLocation EditMode ToolTip Width AutoMaxWidth Font MaxWidth Height AutoMaxHeight ContextMenu ExtendedTooltip Events'
 	'TrackBarField' = 'DataPath Title TitleLocation HorizontalAlign ToolTip ToolTipRepresentation Width AutoMaxWidth HorizontalStretch MaxWidth Height AutoMaxHeight MinValue MarkingAppearance MaxValue LargeStep Step MarkingStep ContextMenu ExtendedTooltip Events'
-	'UsualGroup' = 'UserVisible Visible Enabled ReadOnly EnableContentChange Title TitleTextColor TitleFont ToolTip ToolTipRepresentation Shortcut Width Height HorizontalStretch VerticalStretch GroupHorizontalAlign GroupVerticalAlign Group ChildrenAlign HorizontalSpacing VerticalSpacing HorizontalAlign VerticalAlign Behavior CollapsedRepresentationTitle Collapsed ControlRepresentation Representation CurrentRowUse Format ShowLeftMargin United ChildItemsWidth ShowTitle BackColor ThroughAlign TitleDataPath ExtendedTooltip ChildItems'
+	'UsualGroup' = 'UserVisible Visible Enabled ReadOnly EnableContentChange Title TitleTextColor TitleFont ToolTip ToolTipRepresentation Shortcut Width Height HorizontalStretch VerticalStretch GroupHorizontalAlign GroupVerticalAlign Group ChildrenAlign HorizontalSpacing VerticalSpacing HorizontalAlign VerticalAlign Behavior CollapsedRepresentationTitle Collapsed ControlRepresentation Representation CurrentRowUse Format ShowLeftMargin United ChildItemsWidth ShowTitle BackColor ThroughAlign TitleDataPath ExtendedTooltip Events ChildItems'
 }
 $script:childRank = $null
 
@@ -1745,14 +1841,17 @@ function Get-ChildRank([string]$parentTag, [string]$childTag) {
 # переставляются целыми блоками строк, содержимое блоков не меняется. Незнакомый тег идёт за
 # предыдущим знакомым.
 
-# Элементы формы, которые сверяются: корень и элементы известных типов (вне <BaseForm> — его пишет платформа)
-function Get-EnumCheckNodes {
-	$out = @(@{ Node = $root; Type = 'Form' })
-	foreach ($n in $root.SelectNodes("//*[@name]")) {
+# Узлы формы с типом из $scope (вне <BaseForm> — его пишет платформа): корень, именованные узлы и
+# настройки динамического списка (без имени — подпись по реквизиту; Settings у ValueList/Planner/Chart —
+# не список). Перечисления проверяются по enumScopeTypes, порядок — по childTagOrder.
+function Get-EnumCheckNodes([hashtable]$scope) {
+	$out = @(@{ Node = $root; Type = 'Form'; Label = 'Form' })
+	foreach ($n in $root.SelectNodes("//*[@name] | //*[local-name()='Settings'][@*[local-name()='type']='DynamicList']")) {
 		if ($n.NamespaceURI -ne 'http://v8.1c.ru/8.3/xcf/logform') { continue }
-		if (-not $script:childTagOrder.ContainsKey($n.LocalName)) { continue }
+		if (-not $scope.ContainsKey($n.LocalName)) { continue }
 		if ($null -ne $n.SelectSingleNode("ancestor::*[local-name()='BaseForm']")) { continue }
-		$out += @{ Node = $n; Type = $n.LocalName }
+		$label = if ($n.HasAttribute('name')) { "$($n.LocalName) '$($n.GetAttribute('name'))'" } else { "$($n.LocalName) of $($n.ParentNode.LocalName) '$($n.ParentNode.GetAttribute('name'))'" }
+		$out += @{ Node = $n; Type = $n.LocalName; Label = $label }
 	}
 	return $out
 }
@@ -1763,9 +1862,9 @@ function Get-EnumCheckNodes {
 if (-not $stopped) {
 	$enumChecked = 0
 	$check15Ok = $true
-	foreach ($it in (Get-EnumCheckNodes)) {
+	foreach ($it in (Get-EnumCheckNodes $script:enumScopeTypes)) {
 		if ($stopped) { break }
-		$label = if ($it.Type -eq 'Form') { 'Form' } else { "$($it.Type) '$($it.Node.GetAttribute('name'))'" }
+		$label = $it.Label
 		foreach ($c in $it.Node.ChildNodes) {
 			if ($c.NodeType -ne 'Element' -or $c.NamespaceURI -ne 'http://v8.1c.ru/8.3/xcf/logform') { continue }
 			if ($c.SelectSingleNode("*") -or -not $c.InnerText) { continue }
@@ -1782,7 +1881,14 @@ if (-not $stopped) {
 				if ($hint.Count -gt 0) {
 					Report-Error "15. $label`: $prop '$val' — wrong case, the platform will not load it; use '$($hint[0])'"
 				} else {
-					Report-Error "15. $label`: $prop has invalid value '$val' (allowed: $($allowed -join ', '))"
+					# Значение из соседнего перечисления (у кнопки PictureAndText, у команды TextPicture) — подсказать замену
+					$syn = $script:enumInputSynonyms["$($it.Type).$prop"]
+					$use = @(if ($syn) { $syn.Keys | Where-Object { $_ -ieq $val } | ForEach-Object { $syn[$_] } })
+					if ($use.Count -gt 0) {
+						Report-Error "15. $label`: $prop '$val' is not valid for $($it.Type), the platform will not load it; use '$($use[0])'"
+					} else {
+						Report-Error "15. $label`: $prop has invalid value '$val' (allowed: $($allowed -join ', '))"
+					}
 				}
 				$check15Ok = $false
 			}
@@ -1796,7 +1902,7 @@ if (-not $stopped) {
 # принимает и переставляет при выгрузке — предупреждение, а не ошибка.
 if (-not $stopped) {
 	$orderBad = 0
-	foreach ($it in (Get-EnumCheckNodes)) {
+	foreach ($it in (Get-EnumCheckNodes $script:childTagOrder)) {
 		if ($it.Type -eq 'Form') { continue }
 		$prev = $null; $prevRank = -1
 		foreach ($c in $it.Node.ChildNodes) {
@@ -1812,6 +1918,714 @@ if (-not $stopped) {
 		}
 	}
 	if ($orderBad -eq 0) { Report-OK "16. Property order: matches the platform" }
+}
+
+# --- Check 17: настройки динамического списка в режиме совместимости ниже 8.3.19 ---
+# Field / CalculatedField / Parameter списка такая конфигурация принимает при загрузке и хранит в
+# базе, но в выгрузку XML не пишет — исходник с ними после выгрузки «теряет» их в диффе. Только для
+# конфигурации: у внешней обработки режим базы на форму не влияет.
+if (-not $stopped -and $script:isConfigContext) {
+	$cfgText = [System.IO.File]::ReadAllText($script:dumpAnchor, [System.Text.Encoding]::UTF8)
+	$cfgHead = $cfgText.Substring(0, [Math]::Min(65536, $cfgText.Length))
+	# Расширение: своего CompatibilityMode нет, форму ведёт его собственный режим. В основной
+	# конфигурации этот тег — режим для её расширений, не её собственный: только для расширения.
+	$compatMode = if ($cfgHead -match '<CompatibilityMode>([^<]+)</CompatibilityMode>') { $Matches[1].Trim() }
+		elseif ($cfgHead -match '<ConfigurationExtensionPurpose>' -and $cfgHead -match '<ConfigurationExtensionCompatibilityMode>([^<]+)</ConfigurationExtensionCompatibilityMode>') { $Matches[1].Trim() }
+		else { '' }
+	$compatRank = if ($compatMode -match '^Version(\d+)_(\d+)(?:_(\d+))?$') { [int]$Matches[1] * 10000 + [int]$Matches[2] * 100 + [int]$Matches[3] } else { 0 }
+	if ($compatRank -gt 0 -and $compatRank -lt 80319) {
+		$dynBad = 0
+		foreach ($a in $attrNodes) {
+			$st = $a.SelectSingleNode("f:Settings", $nsMgr)
+			if (-not $st -or $st.GetAttribute("type", "http://www.w3.org/2001/XMLSchema-instance") -ne 'DynamicList') { continue }
+			if ($st.SelectSingleNode("f:Field|f:CalculatedField|f:Parameter", $nsMgr)) {
+				Report-Warn "17. Dynamic list '$($a.GetAttribute('name'))': Field/CalculatedField/Parameter under compatibility mode $compatMode (< 8.3.19) are kept in the infobase but not written to the XML dump"
+				$dynBad++
+			}
+		}
+		if ($dynBad -eq 0) { Report-OK "17. Dynamic list settings: dumpable under $compatMode" }
+	}
+}
+
+# --- Структура элементов формы (генерируется) ---
+# Структура элементов формы: теги членов ChildItems (с версии формата), компаньоны по родителю, свойства типа.
+# Источник — XSD xcf-logform 2.10–2.21, корпус БП/ERP и замер загрузки 8.3.24/8.3.27 (#130).
+# Перегенерировать: python debug/form-dsl-revision/gen_structure_table.py
+$script:formElementTags = @{
+	'AutoCommandBar' = '2.10'
+	'Button' = '2.10'
+	'ButtonGroup' = '2.10'
+	'CalendarField' = '2.10'
+	'ChartField' = '2.10'
+	'CheckBoxField' = '2.10'
+	'ColumnGroup' = '2.10'
+	'CommandBar' = '2.10'
+	'ContextMenu' = '2.10'
+	'DendrogramField' = '2.10'
+	'FormattedDocumentField' = '2.10'
+	'GanttChartField' = '2.10'
+	'GeographicalSchemaField' = '2.10'
+	'GraphicalSchemaField' = '2.10'
+	'HTMLDocumentField' = '2.10'
+	'InputField' = '2.10'
+	'LabelDecoration' = '2.10'
+	'LabelField' = '2.10'
+	'PDFDocumentField' = '2.14'
+	'Page' = '2.10'
+	'Pages' = '2.10'
+	'PeriodField' = '2.10'
+	'PictureDecoration' = '2.10'
+	'PictureField' = '2.10'
+	'PlannerField' = '2.10'
+	'Popup' = '2.10'
+	'ProgressBarField' = '2.10'
+	'RadioButtonField' = '2.10'
+	'RowActionsPanel' = '2.21'
+	'SearchControlAddition' = '2.10'
+	'SearchStringAddition' = '2.10'
+	'SelectedItemsActionsPanel' = '2.21'
+	'SpreadSheetDocumentField' = '2.10'
+	'Table' = '2.10'
+	'TextDocumentField' = '2.10'
+	'TrackBarField' = '2.10'
+	'UsualGroup' = '2.10'
+	'ViewStatusAddition' = '2.10'
+}
+# Опечатки XSD, которые платформа читает как каноничный тег
+$script:formElementTagAliases = @{
+	'LableDecoration' = 'LabelDecoration'
+	'LableField' = 'LabelField'
+}
+$script:companionParents = @{
+	'ContextMenu' = 'CalendarField ChartField CheckBoxField DendrogramField FormattedDocumentField GanttChartField GeographicalSchemaField GraphicalSchemaField HTMLDocumentField InputField LabelDecoration LabelField PDFDocumentField PeriodField PictureDecoration PictureField PlannerField ProgressBarField RadioButtonField SearchControlAddition SearchStringAddition SpreadSheetDocumentField Table TextDocumentField TrackBarField ViewStatusAddition'
+	'AutoCommandBar' = 'Table'
+	'SearchStringAddition' = 'Table'
+	'SearchControlAddition' = 'Table'
+	'ViewStatusAddition' = 'PDFDocumentField Table'
+	'RowActionsPanel' = 'AutoCommandBar Button ButtonGroup CalendarField ChartField CheckBoxField ColumnGroup CommandBar ContextMenu DendrogramField FormattedDocumentField GanttChartField GeographicalSchemaField GraphicalSchemaField HTMLDocumentField InputField LabelDecoration LabelField PDFDocumentField Page Pages PeriodField PictureDecoration PictureField PlannerField Popup ProgressBarField RadioButtonField RowActionsPanel SearchControlAddition SearchStringAddition SelectedItemsActionsPanel SpreadSheetDocumentField Table TextDocumentField TrackBarField UsualGroup ViewStatusAddition'
+	'SelectedItemsActionsPanel' = 'AutoCommandBar Button ButtonGroup CalendarField ChartField CheckBoxField ColumnGroup CommandBar ContextMenu DendrogramField FormattedDocumentField GanttChartField GeographicalSchemaField GraphicalSchemaField HTMLDocumentField InputField LabelDecoration LabelField PDFDocumentField Page Pages PeriodField PictureDecoration PictureField PlannerField Popup ProgressBarField RadioButtonField RowActionsPanel SearchControlAddition SearchStringAddition SelectedItemsActionsPanel SpreadSheetDocumentField Table TextDocumentField TrackBarField UsualGroup ViewStatusAddition'
+}
+$script:containerTypes = 'AutoCommandBar ButtonGroup ColumnGroup CommandBar ContextMenu Page Pages Popup RowActionsPanel SearchControlAddition SelectedItemsActionsPanel Table UsualGroup'
+# Контейнер → допустимые члены его ChildItems
+$script:childItemsPlacement = @{
+	'AutoCommandBar' = 'Button ButtonGroup Popup SearchControlAddition SearchStringAddition ViewStatusAddition'
+	'ButtonGroup' = 'Button ButtonGroup Popup SearchControlAddition SearchStringAddition ViewStatusAddition'
+	'ColumnGroup' = 'CheckBoxField ColumnGroup InputField LabelField PictureField'
+	'CommandBar' = 'Button ButtonGroup Popup SearchControlAddition SearchStringAddition ViewStatusAddition'
+	'ContextMenu' = 'Button ButtonGroup Popup SearchControlAddition SearchStringAddition ViewStatusAddition'
+	'Form' = 'Button CalendarField ChartField CheckBoxField CommandBar DendrogramField FormattedDocumentField GanttChartField GeographicalSchemaField GraphicalSchemaField HTMLDocumentField InputField LabelDecoration LabelField PDFDocumentField Pages PeriodField PictureDecoration PictureField PlannerField ProgressBarField RadioButtonField SearchControlAddition SearchStringAddition SpreadSheetDocumentField Table TextDocumentField TrackBarField UsualGroup ViewStatusAddition'
+	'Page' = 'Button CalendarField ChartField CheckBoxField CommandBar DendrogramField FormattedDocumentField GanttChartField GeographicalSchemaField GraphicalSchemaField HTMLDocumentField InputField LabelDecoration LabelField PDFDocumentField Pages PeriodField PictureDecoration PictureField PlannerField ProgressBarField RadioButtonField SearchControlAddition SearchStringAddition SpreadSheetDocumentField Table TextDocumentField TrackBarField UsualGroup ViewStatusAddition'
+	'Pages' = 'Page'
+	'Popup' = 'Button ButtonGroup Popup SearchControlAddition SearchStringAddition ViewStatusAddition'
+	'SearchControlAddition' = 'Button ButtonGroup Popup SearchControlAddition SearchStringAddition ViewStatusAddition'
+	'Table' = 'CheckBoxField ColumnGroup InputField LabelField PictureField'
+	'UsualGroup' = 'Button CalendarField ChartField CheckBoxField CommandBar DendrogramField FormattedDocumentField GanttChartField GeographicalSchemaField GraphicalSchemaField HTMLDocumentField InputField LabelDecoration LabelField PDFDocumentField Pages PeriodField PictureDecoration PictureField PlannerField ProgressBarField RadioButtonField SearchControlAddition SearchStringAddition SpreadSheetDocumentField Table TextDocumentField TrackBarField UsualGroup ViewStatusAddition'
+}
+$script:elementPropertyTags = @{
+	'AutoCommandBar' = 'AppearanceMode Autofill EnableContentChange Enabled Events GroupHorizontalAlign GroupVerticalAlign Height HorizontalAlign HorizontalStretch ReadOnly Shortcut Title TitleFont TitleTextColor ToolTip ToolTipRepresentation UserVisible VerticalStretch Visible Width'
+	'Button' = 'AutoMaxHeight AutoMaxWidth BackColor BackPicture BackPictureEffect BorderColor ButtonImportance CardPictureAndTitleAlign Check CommandName CommandUniqueness DataPath DefaultButton DefaultItem Enabled Events Font GroupHorizontalAlign GroupVerticalAlign Height HorizontalStretch LocationInCommandBar MaxHeight MaxWidth MinWidth OnMainServerUnavalableBehavior OnlyInAllActions Parameter Picture PictureHeight PictureLocation PlacementArea Representation RepresentationInContextMenu Shape ShapeRepresentation Shortcut ShowAsCard SkipOnInput TextColor Title TitleHeight ToolTipRepresentation Type UserVisible VerticalStretch Visible Width'
+	'ButtonGroup' = 'CommandSource EnableContentChange Enabled Events GroupHorizontalAlign GroupVerticalAlign Height HorizontalStretch PlacementArea ReadOnly Representation Shortcut Title TitleFont TitleTextColor ToolTip ToolTipRepresentation UserVisible VerticalStretch Visible Width'
+	'CalendarField' = 'AppearanceInCard AutoCellHeight AutoEditMode AutoMaxHeight AutoMaxWidth AutoWidthInTable BeginOfRepresentationPeriod Border BorderColor CalendarNavigation CellHyperlink CellHyperlinkDisplayVariant CellHyperlinkRepresentation CellMark CommandSet DataPath DefaultItem DisplayImportance EditMode EnableDrag EnableStartDrag Enabled EndOfRepresentationPeriod Events FixInCard FixingInTable Font FooterBackColor FooterDataPath FooterFont FooterHorizontalAlign FooterPicture FooterText FooterTextColor GroupHorizontalAlign GroupVerticalAlign HeaderHorizontalAlign HeaderPicture Height HeightInMonths HorizontalAlign HorizontalStretch MarkRequiredComplete MaxHeight MaxWidth MinWidth OnMainServerUnavalableBehavior ReadOnly SelectionMode Shortcut ShowCurrentDate ShowInCard ShowInFooter ShowInHeader ShowMonthsPanel ShowTitleInCard SkipOnInput Title TitleBackColor TitleFont TitleHeight TitleLocation TitleTextColor ToolTip ToolTipRepresentation UserVisible VerticalAlign VerticalStretch Visible WarningOnEdit WarningOnEditRepresentation Width WidthInCard WidthInMonths'
+	'ChartField' = 'AppearanceInCard AutoCellHeight AutoEditMode AutoMaxHeight AutoMaxWidth AutoWidthInTable CellHyperlink CellHyperlinkDisplayVariant CellHyperlinkRepresentation CellMark CommandSet DataPath DefaultItem DisplayImportance EditMode Enabled Events FixInCard FixingInTable FooterBackColor FooterDataPath FooterFont FooterHorizontalAlign FooterPicture FooterText FooterTextColor GroupHorizontalAlign GroupVerticalAlign HeaderHorizontalAlign HeaderPicture Height HorizontalAlign HorizontalStretch MarkRequiredComplete MaxHeight MaxWidth MinWidth OnMainServerUnavalableBehavior ReadOnly Shortcut ShowInCard ShowInFooter ShowInHeader ShowTitleInCard SkipOnInput Title TitleBackColor TitleFont TitleHeight TitleLocation TitleTextColor ToolTip ToolTipRepresentation UserVisible VerticalAlign VerticalStretch Visible WarningOnEdit WarningOnEditRepresentation Width WidthInCard'
+	'CheckBoxField' = 'AppearanceInCard AutoCellHeight AutoEditMode AutoWidthInTable BackColor BorderColor CellHyperlink CellHyperlinkDisplayVariant CellHyperlinkRepresentation CellMark CheckBoxType CommandSet DataPath DefaultItem DisplayImportance EditFormat EditMode Enabled EqualItemsWidth Events FixInCard FixingInTable Font FooterBackColor FooterDataPath FooterFont FooterHorizontalAlign FooterPicture FooterText FooterTextColor GroupHorizontalAlign GroupVerticalAlign HeaderHorizontalAlign HeaderPicture HorizontalAlign HorizontalStretch ItemHeight ItemTitleHeight ItemWidth MarkRequiredComplete OnMainServerUnavalableBehavior ReadOnly Shortcut ShowInCard ShowInFooter ShowInHeader ShowTitleInCard SkipOnInput TextColor ThreeState Title TitleBackColor TitleFont TitleHeight TitleLocation TitleTextColor ToolTip ToolTipRepresentation TumblerRepresentation UserVisible VerticalAlign Visible WarningOnEdit WarningOnEditRepresentation WidthInCard'
+	'ColumnGroup' = 'EnableContentChange Enabled Events FixInCard FixingInTable Group GroupHorizontalAlign GroupVerticalAlign HeaderDataPath HeaderFormat HeaderHorizontalAlign HeaderPicture Height HorizontalStretch ReadOnly Shortcut ShowInCard ShowInHeader ShowTitle ShowTitleInCard Title TitleBackColor TitleFont TitleTextColor ToolTip ToolTipRepresentation UserVisible VerticalStretch Visible Width'
+	'CommandBar' = 'AppearanceMode CommandSource EnableContentChange Enabled Events GroupHorizontalAlign GroupVerticalAlign Height HorizontalLocation HorizontalStretch ReadOnly Shortcut Title TitleFont TitleTextColor ToolTip ToolTipRepresentation UserVisible VerticalStretch Visible Width'
+	'ContextMenu' = 'Autofill EnableContentChange Enabled Events GroupHorizontalAlign GroupVerticalAlign Height HorizontalStretch ReadOnly Shortcut Title TitleFont TitleTextColor ToolTip ToolTipRepresentation UserVisible VerticalStretch Visible Width'
+	'DendrogramField' = 'AppearanceInCard AutoCellHeight AutoEditMode AutoMaxHeight AutoMaxWidth AutoWidthInTable CellHyperlink CellHyperlinkDisplayVariant CellHyperlinkRepresentation CellMark CommandSet DataPath DefaultItem DisplayImportance EditMode Enabled Events FixInCard FixingInTable FooterBackColor FooterDataPath FooterFont FooterHorizontalAlign FooterPicture FooterText FooterTextColor GroupHorizontalAlign GroupVerticalAlign HeaderHorizontalAlign HeaderPicture Height HorizontalAlign HorizontalStretch MarkRequiredComplete MaxHeight MaxWidth MinWidth OnMainServerUnavalableBehavior ReadOnly Shortcut ShowInCard ShowInFooter ShowInHeader ShowTitleInCard SkipOnInput Title TitleBackColor TitleFont TitleHeight TitleLocation TitleTextColor ToolTip ToolTipRepresentation UserVisible VerticalAlign VerticalStretch Visible WarningOnEdit WarningOnEditRepresentation Width WidthInCard'
+	'FormattedDocumentField' = 'AppearanceInCard AutoCellHeight AutoEditMode AutoMaxHeight AutoMaxWidth AutoWidthInTable BackColor BorderColor CellHyperlink CellHyperlinkDisplayVariant CellHyperlinkRepresentation CellMark CommandSet DataPath DefaultItem DisplayImportance EditMode Enabled Events FixInCard FixingInTable Font FooterBackColor FooterDataPath FooterFont FooterHorizontalAlign FooterPicture FooterText FooterTextColor GroupHorizontalAlign GroupVerticalAlign HeaderHorizontalAlign HeaderPicture Height HorizontalAlign HorizontalStretch MarkRequiredComplete MaxHeight MaxWidth MinWidth OnMainServerUnavalableBehavior Output ReadOnly Shortcut ShowInCard ShowInFooter ShowInHeader ShowTitleInCard SkipOnInput TextColor Title TitleBackColor TitleFont TitleHeight TitleLocation TitleTextColor ToolTip ToolTipRepresentation UserVisible VerticalAlign VerticalStretch Visible WarningOnEdit WarningOnEditRepresentation Width WidthInCard'
+	'GanttChartField' = 'AppearanceInCard AutoCellHeight AutoEditMode AutoMaxHeight AutoMaxWidth AutoWidthInTable CellHyperlink CellHyperlinkDisplayVariant CellHyperlinkRepresentation CellMark CommandSet DataPath DefaultItem DisplayImportance EditMode Enabled Events FixInCard FixingInTable FooterBackColor FooterDataPath FooterFont FooterHorizontalAlign FooterPicture FooterText FooterTextColor GroupHorizontalAlign GroupVerticalAlign HeaderHorizontalAlign HeaderPicture Height HorizontalAlign HorizontalStretch IntervalsSelectionMode MarkRequiredComplete MaxHeight MaxWidth MinWidth OnMainServerUnavalableBehavior ReadOnly Shortcut ShowHorizontalLinesFlag ShowInCard ShowInFooter ShowInHeader ShowTitleInCard ShowVerticalLinesFlag SkipOnInput Table TableLocation Title TitleBackColor TitleFont TitleHeight TitleLocation TitleTextColor ToolTip ToolTipRepresentation UserVisible ValuesSelectionMode VerticalAlign VerticalStretch Visible WarningOnEdit WarningOnEditRepresentation Width WidthInCard'
+	'GeographicalSchemaField' = 'AppearanceInCard AutoCellHeight AutoEditMode AutoMaxHeight AutoMaxWidth AutoWidthInTable BorderColor CellHyperlink CellHyperlinkDisplayVariant CellHyperlinkRepresentation CellMark CommandSet DataPath DefaultItem DisplayImportance EditMode Enabled Events FixInCard FixingInTable FooterBackColor FooterDataPath FooterFont FooterHorizontalAlign FooterPicture FooterText FooterTextColor GroupHorizontalAlign GroupVerticalAlign HeaderHorizontalAlign HeaderPicture Height HorizontalAlign HorizontalStretch MarkRequiredComplete MaxHeight MaxWidth MinWidth OnMainServerUnavalableBehavior Output ReadOnly Shortcut ShowInCard ShowInFooter ShowInHeader ShowTitleInCard SkipOnInput Title TitleBackColor TitleFont TitleHeight TitleLocation TitleTextColor ToolTip ToolTipRepresentation UserVisible VerticalAlign VerticalStretch Visible WarningOnEdit WarningOnEditRepresentation Width WidthInCard'
+	'GraphicalSchemaField' = 'AppearanceInCard AutoCellHeight AutoEditMode AutoMaxHeight AutoMaxWidth AutoWidthInTable BorderColor CellHyperlink CellHyperlinkDisplayVariant CellHyperlinkRepresentation CellMark CommandSet DataPath DefaultItem DisplayImportance Edit EditMode Enabled Events FixInCard FixingInTable FooterBackColor FooterDataPath FooterFont FooterHorizontalAlign FooterPicture FooterText FooterTextColor GroupHorizontalAlign GroupVerticalAlign HeaderHorizontalAlign HeaderPicture Height HorizontalAlign HorizontalStretch MarkRequiredComplete MaxHeight MaxWidth MinWidth OnMainServerUnavalableBehavior Output ReadOnly Shortcut ShowInCard ShowInFooter ShowInHeader ShowTitleInCard SkipOnInput Title TitleBackColor TitleFont TitleHeight TitleLocation TitleTextColor ToolTip ToolTipRepresentation UserVisible VerticalAlign VerticalStretch Visible WarningOnEdit WarningOnEditRepresentation Width WidthInCard'
+	'HTMLDocumentField' = 'AppearanceInCard AutoCellHeight AutoEditMode AutoMaxHeight AutoMaxWidth AutoWidthInTable Border BorderColor CellHyperlink CellHyperlinkDisplayVariant CellHyperlinkRepresentation CellMark CommandSet DataPath DefaultItem DisplayImportance EditMode Enabled Events FixInCard FixingInTable FooterBackColor FooterDataPath FooterFont FooterHorizontalAlign FooterPicture FooterText FooterTextColor GroupHorizontalAlign GroupVerticalAlign HeaderHorizontalAlign HeaderPicture Height HorizontalAlign HorizontalStretch MarkRequiredComplete MaxHeight MaxWidth MinWidth OnMainServerUnavalableBehavior Output ReadOnly Shortcut ShowInCard ShowInFooter ShowInHeader ShowTitleInCard SkipOnInput Title TitleBackColor TitleFont TitleHeight TitleLocation TitleTextColor ToolTip ToolTipRepresentation UserVisible VerticalAlign VerticalStretch Visible WarningOnEdit WarningOnEditRepresentation Width WidthInCard'
+	'InputField' = 'AllowInputEmptyMultipleValues AllowMultipleValuesDuplicates AppearanceInCard AutoCapitalizationOnTextInput AutoCellHeight AutoChoiceIncomplete AutoCorrectionOnTextInput AutoEditMode AutoMarkIncomplete AutoMaxHeight AutoMaxWidth AutoShowClearButtonMode AutoShowOpenButtonMode AutoWidthInTable AutofillHint AvailableTypes BackColor BorderColor CellHyperlink CellHyperlinkDisplayVariant CellHyperlinkRepresentation CellMark ChoiceButton ChoiceButtonPicture ChoiceButtonRepresentation ChoiceButtonTitle ChoiceFoldersAndItems ChoiceForm ChoiceHistoryOnInput ChoiceList ChoiceListButton ChoiceListHeight ChoiceParameterLinks ChoiceParameters ChooseType ClearButton CommandSet CreateButton DataPath DefaultItem DisplayImportance DropListButton DropListHint DropListWidth EditFormat EditMode EditTextUpdate Enabled Events ExtendedEdit ExtendedEditMultipleValues FixInCard FixingInTable Font FooterBackColor FooterDataPath FooterFont FooterHorizontalAlign FooterPicture FooterText FooterTextColor Format GroupHorizontalAlign GroupVerticalAlign HeaderHorizontalAlign HeaderPicture Height HeightControlVariant HorizontalAlign HorizontalStretch IncompleteChoiceMode InputHint ListChoiceMode MarkNegatives MarkRequiredComplete Mask MaxHeight MaxValue MaxWidth MinValue MinWidth MultiLine MultipleValueDataPath MultipleValuePictureDataPath MultipleValuePictureShape MultipleValuePictureSize MultipleValuePresentDataPath MultipleValuesBackColor MultipleValuesFont MultipleValuesHyperlink MultipleValuesPicture MultipleValuesTextColor OnMainServerUnavalableBehavior OnScreenKeyboardReturnKeyText OpenButton PasswordMode Picture QuickChoice ReadOnly Shortcut ShowCheckBoxesInDropList ShowInCard ShowInFooter ShowInHeader ShowTitleInCard SkipOnInput SpecialTextInputMode SpellCheckingOnTextInput SpinButton TextColor TextEdit TextSize TimeChoiceMode Title TitleBackColor TitleFont TitleHeight TitleLocation TitleTextColor ToolTip ToolTipRepresentation TypeDomainEnabled TypeLink UserVisible VerticalAlign VerticalStretch Visible WarningOnEdit WarningOnEditRepresentation Width WidthInCard Wrap'
+	'LabelDecoration' = 'AutoMaxHeight AutoMaxWidth BackColor Border BorderColor Enabled Events Font GroupHorizontalAlign GroupVerticalAlign Height HorizontalAlign HorizontalStretch Hyperlink MaxHeight MaxWidth MinWidth OnMainServerUnavalableBehavior Shortcut SkipOnInput TextColor Title TitleHeight ToolTip ToolTipRepresentation UserVisible VerticalAlign VerticalStretch Visible Width'
+	'LabelField' = 'AppearanceInCard AutoCellHeight AutoEditMode AutoMaxHeight AutoMaxWidth AutoWidthInTable BackColor Border BorderColor CellHyperlink CellHyperlinkDisplayVariant CellHyperlinkRepresentation CellMark CommandSet DataPath DefaultItem DisplayImportance EditMode Enabled Events FixInCard FixingInTable Font FooterBackColor FooterDataPath FooterFont FooterHorizontalAlign FooterPicture FooterText FooterTextColor Format GroupHorizontalAlign GroupVerticalAlign HeaderHorizontalAlign HeaderPicture Height Hiperlink HorizontalAlign HorizontalStretch MarkNegatives MarkRequiredComplete MaxHeight MaxWidth MinWidth OnMainServerUnavalableBehavior PasswordMode ReadOnly Shortcut ShowInCard ShowInFooter ShowInHeader ShowTitleInCard SkipOnInput TextColor Title TitleBackColor TitleFont TitleHeight TitleLocation TitleTextColor ToolTip ToolTipRepresentation UseCopy UserVisible VerticalAlign VerticalStretch Visible WarningOnEdit WarningOnEditRepresentation Width WidthInCard'
+	'PDFDocumentField' = 'AppearanceInCard AutoCellHeight AutoEditMode AutoMaxHeight AutoMaxWidth AutoWidthInTable BorderColor CellHyperlink CellHyperlinkDisplayVariant CellHyperlinkRepresentation CellMark CommandSet CurrentPageNumber DataPath DefaultItem DisplayImportance EditMode Enabled Events FixInCard FixingInTable FooterBackColor FooterDataPath FooterFont FooterHorizontalAlign FooterPicture FooterText FooterTextColor GroupHorizontalAlign GroupVerticalAlign HeaderHorizontalAlign HeaderPicture Height HorizontalAlign HorizontalStretch MarkRequiredComplete MaxHeight MaxWidth MinWidth OnMainServerUnavalableBehavior Orientation Output ReadOnly Scale Shortcut ShowInCard ShowInFooter ShowInHeader ShowTitleInCard SkipOnInput Title TitleBackColor TitleFont TitleHeight TitleLocation TitleTextColor ToolTip ToolTipRepresentation UserVisible VerticalAlign VerticalStretch ViewStatusLocation Visible WarningOnEdit WarningOnEditRepresentation Width WidthInCard'
+	'Page' = 'BackColor ChildItemsTitleLocation ChildItemsWidth ChildrenAlign EnableContentChange Enabled Events Format Group GroupHorizontalAlign GroupVerticalAlign Height HorizontalAlign HorizontalSpacing HorizontalStretch Picture ReadOnly ScrollOnCompress Shortcut ShowTitle Title TitleDataPath TitleFont TitleTextColor ToolTip ToolTipRepresentation UserVisible VerticalAlign VerticalSpacing VerticalStretch Visible Width'
+	'Pages' = 'AssociatedTableElementId CurrentRowUse EnableContentChange Enabled Events GroupHorizontalAlign GroupVerticalAlign Height HorizontalStretch PagesRepresentation ReadOnly Shortcut Title TitleFont TitleTextColor ToolTip ToolTipRepresentation UserVisible VerticalStretch Visible Width'
+	'PeriodField' = 'AppearanceInCard AutoCellHeight AutoEditMode AutoMaxHeight AutoMaxWidth AutoWidthInTable Border BorderColor CellHyperlink CellHyperlinkDisplayVariant CellHyperlinkRepresentation CellMark CommandSet DataPath DefaultItem DisplayImportance EditMode Enabled Events FixInCard FixingInTable Font FooterBackColor FooterDataPath FooterFont FooterHorizontalAlign FooterPicture FooterText FooterTextColor GroupHorizontalAlign GroupVerticalAlign HeaderHorizontalAlign HeaderPicture Height HorizontalAlign HorizontalStretch MarkRequiredComplete MaxHeight MaxWidth MinWidth OnMainServerUnavalableBehavior ReadOnly Shortcut ShowInCard ShowInFooter ShowInHeader ShowTitleInCard SkipOnInput Title TitleBackColor TitleFont TitleHeight TitleLocation TitleTextColor ToolTip ToolTipRepresentation UserVisible VerticalAlign VerticalStretch Visible WarningOnEdit WarningOnEditRepresentation Width WidthInCard'
+	'PictureDecoration' = 'AutoMaxHeight AutoMaxWidth BackgroundShowMode Border BorderColor EnableDrag EnableStartDrag Enabled Events FileDragMode Font GroupHorizontalAlign GroupVerticalAlign Height HorizontalStretch Hyperlink ImageScale MaxHeight MaxWidth MinWidth NonselectedPictureText OnMainServerUnavalableBehavior Picture PictureColor PictureSize Shortcut SkipOnInput TextColor Title ToolTip ToolTipRepresentation UserVisible VerticalStretch Visible Width Zoomable'
+	'PictureField' = 'AppearanceInCard AutoCellHeight AutoEditMode AutoMaxHeight AutoMaxWidth AutoWidthInTable BackgroundShowMode Border BorderColor CellHyperlink CellHyperlinkDisplayVariant CellHyperlinkRepresentation CellMark CommandSet DataPath DefaultItem DisplayImportance EditMode EnableDrag EnableStartDrag Enabled Events FileDragMode FixInCard FixingInTable Font FooterBackColor FooterDataPath FooterFont FooterHorizontalAlign FooterPicture FooterText FooterTextColor GroupHorizontalAlign GroupVerticalAlign HeaderHorizontalAlign HeaderPicture Height HorizontalAlign HorizontalStretch Hyperlink ImageScale MarkRequiredComplete MaxHeight MaxWidth MinWidth NonselectedPictureText OnMainServerUnavalableBehavior PictureColor PictureSize ReadOnly Shortcut ShowInCard ShowInFooter ShowInHeader ShowTitleInCard SkipOnInput TextColor Title TitleBackColor TitleFont TitleHeight TitleLocation TitleTextColor ToolTip ToolTipRepresentation UserVisible ValuesPicture VerticalAlign VerticalStretch Visible WarningOnEdit WarningOnEditRepresentation Width WidthInCard Zoomable'
+	'PlannerField' = 'AppearanceInCard AutoCellHeight AutoEditMode AutoMaxHeight AutoMaxWidth AutoWidthInTable CellHyperlink CellHyperlinkDisplayVariant CellHyperlinkRepresentation CellMark CommandSet DataPath DefaultItem DimensionItemHyperlink DisplayImportance EditMode EnableDrag EnableStartDrag Enabled Events FixInCard FixingInTable FooterBackColor FooterDataPath FooterFont FooterHorizontalAlign FooterPicture FooterText FooterTextColor GroupHorizontalAlign GroupVerticalAlign HeaderHorizontalAlign HeaderPicture Height HorizontalAlign HorizontalStretch MarkRequiredComplete MaxHeight MaxWidth MinWidth OnMainServerUnavalableBehavior ReadOnly Shortcut ShowInCard ShowInFooter ShowInHeader ShowTitleInCard SkipOnInput TimeScaleItemHyperlink Title TitleBackColor TitleFont TitleHeight TitleLocation TitleTextColor ToolTip ToolTipRepresentation UserVisible VerticalAlign VerticalStretch Visible WarningOnEdit WarningOnEditRepresentation Width WidthInCard WrappedTimeScaleHeaderHyperlink'
+	'Popup' = 'BackColor BorderColor CommandSource EnableContentChange Enabled Events GroupHorizontalAlign GroupVerticalAlign Height HorizontalStretch Importance Picture PlacementArea ReadOnly Representation Shape ShapeRepresentation Shortcut Title TitleFont TitleTextColor ToolTip ToolTipRepresentation UserVisible VerticalStretch Visible Width'
+	'ProgressBarField' = 'AppearanceInCard AutoCellHeight AutoEditMode AutoMaxHeight AutoMaxWidth AutoWidthInTable BorderColor CellHyperlink CellHyperlinkDisplayVariant CellHyperlinkRepresentation CellMark CommandSet DataPath DefaultItem DisplayImportance EditMode Enabled Events FixInCard FixingInTable FooterBackColor FooterDataPath FooterFont FooterHorizontalAlign FooterPicture FooterText FooterTextColor GroupHorizontalAlign GroupVerticalAlign HeaderHorizontalAlign HeaderPicture Height HorizontalAlign HorizontalStretch MarkRequiredComplete MaxHeight MaxValue MaxWidth MinValue MinWidth OnMainServerUnavalableBehavior Orientation ReadOnly Representation Shortcut ShowInCard ShowInFooter ShowInHeader ShowPercent ShowTitleInCard SkipOnInput Title TitleBackColor TitleFont TitleHeight TitleLocation TitleTextColor ToolTip ToolTipRepresentation UserVisible VerticalAlign VerticalStretch Visible WarningOnEdit WarningOnEditRepresentation Width WidthInCard'
+	'RadioButtonField' = 'AppearanceInCard AutoCellHeight AutoEditMode AutoWidthInTable BackColor BorderColor CellHyperlink CellHyperlinkDisplayVariant CellHyperlinkRepresentation CellMark ChoiceList ColumnsCount CommandSet DataPath DefaultItem DisplayImportance EditMode Enabled EqualColumnsWidth Events FixInCard FixingInTable Font FooterBackColor FooterDataPath FooterFont FooterHorizontalAlign FooterPicture FooterText FooterTextColor GroupHorizontalAlign GroupVerticalAlign HeaderHorizontalAlign HeaderPicture HorizontalAlign HorizontalStretch ItemHeight ItemTitleHeight ItemWidth MarkRequiredComplete OnMainServerUnavalableBehavior Orientation RadioButtonType ReadOnly Shortcut ShowInCard ShowInFooter ShowInHeader ShowTitleInCard SkipOnInput TextColor Title TitleBackColor TitleFont TitleHeight TitleLocation TitleTextColor ToolTip ToolTipRepresentation TumblerRepresentation UserVisible VerticalAlign Visible WarningOnEdit WarningOnEditRepresentation WidthInCard'
+	'RowActionsPanel' = 'AppearanceMode EnableContentChange Enabled Events FillStdCommands GroupHorizontalAlign GroupVerticalAlign HAlign Height HorizontalStretch ReadOnly Shortcut Title TitleFont TitleTextColor ToolTip ToolTipRepresentation UserVisible VerticalStretch Visible Width'
+	'SearchControlAddition' = 'AdditionSource AutoMaxWidth BackColor BorderColor Enabled Events Font GroupHorizontalAlign GroupVerticalAlign HorizontalStretch MaxWidth MinWidth PlacementArea Source TextColor Title ToolTip ToolTipRepresentation UserVisible Visible Width'
+	'SearchStringAddition' = 'AdditionSource AutoMaxWidth BackColor BorderColor Enabled Events Font GroupHorizontalAlign GroupVerticalAlign HorizontalStretch MaxWidth MinWidth PlacementArea Source TextColor Title ToolTip ToolTipRepresentation UserVisible Visible Width'
+	'SelectedItemsActionsPanel' = 'AppearanceMode EnableContentChange Enabled Events FillStdCommands GroupHorizontalAlign GroupVerticalAlign HAlign Height HorizontalStretch ReadOnly Shortcut Title TitleFont TitleTextColor ToolTip ToolTipRepresentation UserVisible VerticalStretch Visible Width'
+	'SpreadSheetDocumentField' = 'AppearanceInCard AutoCellHeight AutoEditMode AutoMaxHeight AutoMaxWidth AutoWidthInTable BlackAndWhiteView BorderColor CellActionsButtonViewMode CellHyperlink CellHyperlinkDisplayVariant CellHyperlinkRepresentation CellMark CommandSet DataPath DefaultItem DisplayImportance DrawingSelectionShowMode Edit EditMode EnableDrag EnableStartDrag Enabled Events FixInCard FixingInTable FooterBackColor FooterDataPath FooterFont FooterHorizontalAlign FooterPicture FooterText FooterTextColor GroupHorizontalAlign GroupVerticalAlign HeaderHorizontalAlign HeaderPicture Height HorizontalAlign HorizontalScrollBar HorizontalStretch MarkRequiredComplete MaxHeight MaxWidth MinWidth OnMainServerUnavalableBehavior Output PointerType Protection ReadOnly SelectionShowMode Shortcut ShowCellNames ShowGrid ShowGroups ShowHeaders ShowInCard ShowInFooter ShowInHeader ShowRowAndColumnNames ShowTitleInCard SkipOnInput SpreadsheetDocumentMultipleSelectionPanelViewMode Title TitleBackColor TitleFont TitleHeight TitleLocation TitleTextColor ToolTip ToolTipRepresentation UserVisible VerticalAlign VerticalScrollBar VerticalStretch ViewScalingMode Visible WarningOnEdit WarningOnEditRepresentation Width WidthInCard'
+	'Table' = 'AllowGettingCurrentRowURL AllowRootChoice AutoAddIncomplete AutoInsertNewRow AutoMarkIncomplete AutoMaxCardHeight AutoMaxHeight AutoMaxRowsCount AutoMaxWidth AutoRefresh AutoRefreshPeriod Autofill BackColor BehaviorOnHorizontalCompression BorderColor CardBehaviorOnVerticalCompression CellHyperlinksRepresentation ChangeRowOrder ChangeRowSet ChoiceFoldersAndItems ChoiceMode CommandBarLocation CommandSet ComplexSettingsViewMode CurrentRowUse DataPath DefaultItem EnableDrag EnableStartDrag Enabled Events FileDragMode FixedLeft FixedRight Font Footer FooterHeight GroupHorizontalAlign GroupVerticalAlign Header HeaderHeight Height HeightControlVariant HeightInTableRows HierarchyPanelLocation HorizontalLines HorizontalLinesBWA HorizontalScrollBar HorizontalStretch IconSaveColorsKey InitialListView InitialRowActivation InitialTreeView MarkRequiredComplete MaxCardHeight MaxHeight MaxRowsCount MaxWidth MinWidth MobileDeviceTableType MultipleChoice OnMainServerUnavalableBehavior Output Period ReadOnly RefreshRequest Representation RestoreCurrentRow RowActionsShowType RowFilter RowInputMode RowPictureDataPath RowSelectionMode RowsPicture SaveColors SearchControlLocation SearchOnInput SearchStringLocation SelectionMode SettingsNamedItemDetailedRepresentation ShapeSaveColorsKey Shortcut ShowCommandBar ShowRoot SkipOnInput TextColor Title TitleFont TitleHeight TitleLocation TitleTextColor ToolTip ToolTipRepresentation TopLevelParent TreeSpecialSearch UpdateOnDataChange UseAlternationRowColor UseAlternationRowColorBWA UserSettingsGroup UserVisible VerticalLines VerticalLinesBWA VerticalScrollBar VerticalStretch ViewMode ViewStatusLocation Visible Width'
+	'TextDocumentField' = 'AppearanceInCard AutoCellHeight AutoEditMode AutoMaxHeight AutoMaxWidth AutoWidthInTable BackColor BorderColor CellHyperlink CellHyperlinkDisplayVariant CellHyperlinkRepresentation CellMark CommandSet DataPath DefaultItem DisplayImportance EditMode Enabled Events FixInCard FixingInTable Font FooterBackColor FooterDataPath FooterFont FooterHorizontalAlign FooterPicture FooterText FooterTextColor GroupHorizontalAlign GroupVerticalAlign HeaderHorizontalAlign HeaderPicture Height HorizontalAlign HorizontalStretch MarkRequiredComplete MaxHeight MaxWidth MinWidth OnMainServerUnavalableBehavior Output ReadOnly Shortcut ShowInCard ShowInFooter ShowInHeader ShowTitleInCard SkipOnInput TextColor Title TitleBackColor TitleFont TitleHeight TitleLocation TitleTextColor ToolTip ToolTipRepresentation UserVisible VerticalAlign VerticalStretch Visible WarningOnEdit WarningOnEditRepresentation Width WidthInCard'
+	'TrackBarField' = 'AppearanceInCard AutoCellHeight AutoEditMode AutoMaxHeight AutoMaxWidth AutoWidthInTable BorderColor CellHyperlink CellHyperlinkDisplayVariant CellHyperlinkRepresentation CellMark CommandSet DataPath DefaultItem DisplayImportance EditMode Enabled Events FixInCard FixingInTable FooterBackColor FooterDataPath FooterFont FooterHorizontalAlign FooterPicture FooterText FooterTextColor GroupHorizontalAlign GroupVerticalAlign HeaderHorizontalAlign HeaderPicture Height HorizontalAlign HorizontalStretch LargeStep MarkRequiredComplete MarkingAppearance MarkingStep MaxHeight MaxValue MaxWidth MinValue MinWidth OnMainServerUnavalableBehavior Orientation ReadOnly Shortcut ShowInCard ShowInFooter ShowInHeader ShowTitleInCard SkipOnInput Step Title TitleBackColor TitleFont TitleHeight TitleLocation TitleTextColor ToolTip ToolTipRepresentation UserVisible VerticalAlign VerticalStretch Visible WarningOnEdit WarningOnEditRepresentation Width WidthInCard'
+	'UsualGroup' = 'AssociatedTableElementId BackColor BackPicture BackPictureEffect Behavior CardRepresentationType ChildItemsTitleLocation ChildItemsWidth ChildrenAlign Collapsed CollapsedRepresentationItem CollapsedRepresentationTitle ControlRepresentation CurrentRowUse EnableContentChange Enabled Events Format Group GroupHorizontalAlign GroupVerticalAlign Height HiddenStateTitleBackColor HorizontalAlign HorizontalSpacing HorizontalStretch Hyperlink ReadOnly Representation ScrollOnCompress Shortcut ShowAsCard ShowLeftMargin ShowTitle ThroughAlign Title TitleDataPath TitleFont TitleTextColor ToolTip ToolTipRepresentation United UserVisible VerticalAlign VerticalSpacing VerticalStretch Visible Width'
+	'ViewStatusAddition' = 'AdditionSource AutoMaxWidth BackColor Border BorderColor ButtonColor Enabled Events Font GroupHorizontalAlign GroupVerticalAlign HorizontalLocation HorizontalStretch MaxWidth MinWidth PlacementArea Source TextColor Title TitleFont TitleTextColor ToolTip ToolTipRepresentation UserVisible Visible Width'
+}
+# --- /Структура элементов формы ---
+
+# Члены ChildItems вне <BaseForm> (его пишет платформа) — элементы формы, командных панелей и меню
+function Get-ChildItemsMembers {
+	return @($root.SelectNodes("//f:ChildItems/*[not(ancestor::*[local-name()='BaseForm'])]", $nsMgr))
+}
+$script:companionTags = @($script:companionParents.Keys)
+# Списки таблиц — множества с точным регистром, разобранные один раз (ключ ищется только каноничный)
+function ConvertTo-SetTable([hashtable]$table) {
+	$out = @{}
+	foreach ($k in $table.Keys) { $out[$k] = [System.Collections.Generic.HashSet[string]]::new([string[]]($table[$k] -split ' '), [StringComparer]::Ordinal) }
+	return $out
+}
+$companionParentSets = ConvertTo-SetTable $script:companionParents
+$propertySets = ConvertTo-SetTable $script:elementPropertyTags
+$placementSets = ConvertTo-SetTable $script:childItemsPlacement
+
+# --- Check 18: тег элемента формы ---
+# Тег члена ChildItems — из словаря формата (XSD logform) и не новее версии формата формы.
+$members = @(if (-not $stopped) { Get-ChildItemsMembers })
+$memberTypes = @{}   # узел → каноничный тег (для 19/20; незнакомые теги не проверяются дальше)
+if (-not $stopped) {
+	$check18Ok = $true
+	$formRank = Get-FormatRank $root.GetAttribute("version")
+	foreach ($m in $members) {
+		if ($stopped) { break }
+		$tag = $m.LocalName
+		$label = if ($m.HasAttribute('name')) { "<$tag> '$($m.GetAttribute('name'))'" } elseif ($m.HasAttribute('id')) { "<$tag> id=$($m.GetAttribute('id'))" } else { "<$tag>" }
+		# Без name/id платформа загружает элемент с пустым именем / id=0
+		$missing = @(foreach ($a in 'name', 'id') { if (-not $m.GetAttribute($a)) { $a } })
+		if ($missing.Count -gt 0) {
+			Report-Error "18. $label`: missing $($missing -join ' and ') attribute$(if ($missing.Count -gt 1) { 's' })"
+			$check18Ok = $false
+		}
+		$known = if ($script:formElementTags.Keys -ccontains $tag) { $tag } else { $null }
+		$alias = if ($script:formElementTagAliases.Keys -ccontains $tag) { $tag } else { $null }
+		if ($known) {
+			$since = $script:formElementTags[$known]
+			if ($formRank -gt 0 -and (Get-FormatRank $since) -gt $formRank) {
+				Report-Error "18. $label`: not available in format $($root.GetAttribute('version')) (since $since)"
+				$check18Ok = $false
+			} else {
+				$memberTypes[$m] = $known
+			}
+		} elseif ($alias) {
+			Report-Warn "18. $label is an old name — the platform reads it as <$($script:formElementTagAliases[$alias])>"
+			$memberTypes[$m] = $script:formElementTagAliases[$alias]
+		} else {
+			$hint = @($script:formElementTags.Keys | Where-Object { $_ -ieq $tag })[0]
+			if (-not $hint) { $hint = @($script:formElementTagAliases.Keys | Where-Object { $_ -ieq $tag } | ForEach-Object { $script:formElementTagAliases[$_] })[0] }
+			if ($hint) {
+				Report-Error "18. $label`: wrong case, use <$hint>"
+			} else {
+				Report-Error "18. $label is not a form element type"
+			}
+			$check18Ok = $false
+		}
+	}
+	if ($check18Ok) { Report-OK "18. Element types: $($members.Count) checked" }
+}
+
+# --- Check 19: компаньоны элемента ---
+# Контекстное меню, командная панель и дополнения таблицы бывают только у своих типов; каждый — один.
+if (-not $stopped) {
+	$check19Ok = $true
+	foreach ($m in $members) {
+		if ($stopped) { break }
+		if (-not $memberTypes.ContainsKey($m)) { continue }
+		$type = $memberTypes[$m]
+		$seen = @{}
+		foreach ($c in $m.ChildNodes) {
+			if ($c.NodeType -ne 'Element' -or $c.NamespaceURI -ne 'http://v8.1c.ru/8.3/xcf/logform') { continue }
+			$ct = $c.LocalName
+			if ($ct -cne 'ExtendedTooltip' -and $script:companionTags -cnotcontains $ct) { continue }
+			if ($seen.ContainsKey($ct)) {
+				Report-Error "19. $type '$($m.GetAttribute('name'))': duplicate <$ct>"
+				$check19Ok = $false
+				continue
+			}
+			$seen[$ct] = $true
+			if ($ct -ceq 'ExtendedTooltip') { continue }
+			if (-not $companionParentSets[$ct].Contains($type)) {
+				Report-Error "19. $type '$($m.GetAttribute('name'))' cannot have <$ct>"
+				$check19Ok = $false
+			}
+		}
+	}
+	if ($check19Ok) { Report-OK "19. Companions: match element types" }
+}
+
+# --- Check 20: свойства элемента ---
+# Дочерний тег — свойство своего типа (корпус выгрузок ∪ XSD); ChildItems — только у контейнеров.
+if (-not $stopped) {
+	$check20Ok = $true
+	$containers = $script:containerTypes -split ' '
+	foreach ($m in $members) {
+		if ($stopped) { break }
+		if (-not $memberTypes.ContainsKey($m)) { continue }
+		$type = $memberTypes[$m]
+		$allowed = $propertySets[$type]
+		foreach ($c in $m.ChildNodes) {
+			if ($c.NodeType -ne 'Element' -or $c.NamespaceURI -ne 'http://v8.1c.ru/8.3/xcf/logform') { continue }
+			$pt = $c.LocalName
+			if ($pt -ceq 'ExtendedTooltip' -or $script:companionTags -ccontains $pt) { continue }
+			if ($pt -ceq 'ChildItems') {
+				if ($containers -cnotcontains $type) {
+					Report-Error "20. $type '$($m.GetAttribute('name'))' cannot have <ChildItems>"
+					$check20Ok = $false
+				}
+				continue
+			}
+			if ($null -eq $allowed -or $allowed.Contains($pt)) { continue }
+			$hint = @($allowed | Where-Object { $_ -ieq $pt } | Sort-Object)
+			if ($hint.Count -gt 0) {
+				Report-Warn "20. $type '$($m.GetAttribute('name'))': <$pt> — wrong case, use <$($hint[0])>"
+			} else {
+				Report-Warn "20. $type '$($m.GetAttribute('name'))': <$pt> is not a property of $type"
+			}
+			$check20Ok = $false
+		}
+	}
+	if ($check20Ok) { Report-OK "20. Element properties: match element types" }
+}
+
+# --- Check 21: размещение элемента в контейнере ---
+# Что можно положить в контейнер — по правилам редактора форм (их отпечаток — корпус выгрузок):
+# в Pages — только страницы, колонка таблицы — поле или группа колонок, подменю и группа кнопок —
+# только в командной панели. Платформа такое загружает, поэтому предупреждение.
+if (-not $stopped) {
+	$check21Ok = $true
+	foreach ($m in $members) {
+		if ($stopped) { break }
+		if (-not $memberTypes.ContainsKey($m)) { continue }
+		$owner = $m.ParentNode.ParentNode
+		# Владелец — элемент (каноничный тег) или компаньон (ContextMenu, AutoCommandBar) — тег как есть,
+		# но только точного регистра: @{} PS регистронезависим, а владелец с неверным тегом уже ошибка 18
+		$ownerType = if ($owner -eq $root) { 'Form' } elseif ($memberTypes.ContainsKey($owner)) { $memberTypes[$owner] }
+			elseif ($script:childItemsPlacement.Keys -ccontains $owner.LocalName) { $owner.LocalName } else { $null }
+		if (-not $ownerType -or -not $placementSets.ContainsKey($ownerType)) { continue }
+		if ($placementSets[$ownerType].Contains($memberTypes[$m])) { continue }
+		$where = if ($ownerType -eq 'Form') { 'the form' } else { "$ownerType '$($owner.GetAttribute('name'))'" }
+		Report-Warn "21. $($memberTypes[$m]) '$($m.GetAttribute('name'))' cannot be placed in $where"
+		$check21Ok = $false
+	}
+	if ($check21Ok) { Report-OK "21. Element placement: match containers" }
+}
+
+# --- Check 23: источник дополнения ---
+# Источник строки поиска, состояния просмотра и управления поиском — таблица (у состояния просмотра
+# ещё поле PDF). Несуществующий Item платформа молча выбрасывает вместе со связью; остальное загружает
+# как есть, но в выгрузках такого не бывает. Отсутствие AdditionSource законно (у компаньона платформа
+# восстанавливает его сама).
+if (-not $stopped) {
+	$check23Ok = $true
+	$additionTypes = @{ 'SearchStringAddition' = 'SearchStringRepresentation'; 'ViewStatusAddition' = 'ViewStatusRepresentation'; 'SearchControlAddition' = 'SearchControl' }
+	$typeByName = @{}
+	# Все именованные члены: элемент с неверным тегом (ошибка 18) всё же есть в форме, его тип — $null
+	foreach ($m in $members) {
+		$n = $m.GetAttribute('name')
+		if ($n -and -not $typeByName.ContainsKey($n)) { $typeByName[$n] = if ($memberTypes.ContainsKey($m)) { $memberTypes[$m] } else { $null } }
+	}
+	$additions = @(foreach ($m in $members) {
+		if (-not $memberTypes.ContainsKey($m)) { continue }
+		if ($additionTypes.ContainsKey($memberTypes[$m])) { @{ Node = $m; Tag = $memberTypes[$m]; Owner = $null } }
+		foreach ($c in $m.ChildNodes) {
+			if ($c.NodeType -ne 'Element' -or $c.NamespaceURI -ne 'http://v8.1c.ru/8.3/xcf/logform') { continue }
+			if ($additionTypes.Keys -ccontains $c.LocalName) { @{ Node = $c; Tag = $c.LocalName; Owner = $m.GetAttribute('name') } }
+		}
+	})
+	foreach ($a in $additions) {
+		if ($stopped) { break }
+		$src = $a.Node.SelectSingleNode("f:AdditionSource", $nsMgr)
+		if (-not $src) { continue }
+		$label = "$($a.Tag) '$($a.Node.GetAttribute('name'))'"
+		$itemNode = $src.SelectSingleNode("f:Item", $nsMgr)
+		$item = if ($itemNode) { $itemNode.InnerText.Trim() } else { '' }
+		if (-not $item) {
+			Report-Error "23. ${label}: source item is empty"
+			$check23Ok = $false
+			continue
+		}
+		if (-not $typeByName.ContainsKey($item)) {
+			Report-Error "23. ${label}: source item '$item' not found in the form — the platform drops the link on load"
+			$check23Ok = $false
+			continue
+		}
+		$itemType = $typeByName[$item]
+		$sources = if ($a.Tag -eq 'ViewStatusAddition') { @('Table', 'PDFDocumentField') } else { @('Table') }
+		if ($null -ne $itemType -and $sources -cnotcontains $itemType) {
+			Report-Warn "23. ${label}: source item '$item' is $itemType, expected $($sources -join ' or ')"
+			$check23Ok = $false
+		} elseif ($a.Owner -and $item -ne $a.Owner) {
+			Report-Warn "23. ${label}: source item '$item' is not its owner '$($a.Owner)'"
+			$check23Ok = $false
+		}
+		$typeNode = $src.SelectSingleNode("f:Type", $nsMgr)
+		$srcType = if ($typeNode) { $typeNode.InnerText.Trim() } else { '' }
+		if ($srcType -cne $additionTypes[$a.Tag]) {
+			Report-Warn "23. ${label}: source type '$srcType' does not match the addition, expected $($additionTypes[$a.Tag])"
+			$check23Ok = $false
+		}
+	}
+	if ($check23Ok) { Report-OK "23. Addition sources: match items" }
+}
+
+# --- Check 22: обработчики — модуль формы ---
+# Привязки Form.xml (события, действия команд) сверяются с процедурами модуля <каталог Form.xml>/Form/Module.bsl.
+# Читается только модуль формы: общие модули, которые подключают процедуры формы по имени, не смотрим —
+# поэтому процедура без привязки только предупреждение.
+# Текст модуля формы; $null — модуль не в UTF-8 (с заменой символов имена процедур не найти — лучше сказать прямо)
+function Read-ModuleText([string]$path) {
+	try { return (New-Object System.Text.UTF8Encoding($false, $true)).GetString([System.IO.File]::ReadAllBytes($path)).TrimStart([char]0xFEFF) }
+	catch { return $null }
+}
+
+# Сканер BSL: строковые литералы (с "" и многострочными продолжениями «|») и комментарии // отделяются
+# от кода, номера строк сохраняются. Lines — строки текста; Code — они же без комментариев, литерал
+# заменён на ""; Mask — строки той же длины, литералы и комментарии — пробелами (позиции в маске —
+# позиции в тексте); Literals — @{ Line; Text; Prefix — код этой строки слева от литерала; Col — начало
+# текста литерала в строке, -1 у многострочного }.
+function Get-BslScan([string]$text) {
+	$lines = $text -replace "`r", "" -split "`n"
+	$code = New-Object System.Collections.ArrayList
+	$mask = New-Object System.Collections.ArrayList
+	$lits = New-Object System.Collections.ArrayList
+	$inStr = $false; $cur = $null; $curLine = 0; $curPrefix = ""; $curCol = -1
+	for ($i = 0; $i -lt $lines.Count; $i++) {
+		$line = $lines[$i]
+		# строка без кавычек вне литерала — только отрезать комментарий (посимвольный разбор в PS медленный)
+		if (-not $inStr -and $line.IndexOf('"') -lt 0) {
+			$k = $line.IndexOf('//')
+			[void]$code.Add($(if ($k -ge 0) { $line.Substring(0, $k) } else { $line }))
+			[void]$mask.Add($(if ($k -ge 0) { $line.Substring(0, $k) + (' ' * ($line.Length - $k)) } else { $line }))
+			continue
+		}
+		$sb = New-Object System.Text.StringBuilder
+		$mk = $line.ToCharArray()
+		$j = 0
+		if ($inStr) {
+			# продолжение многострочного литерала: пробелы, затем «|»
+			while ($j -lt $line.Length -and ($line[$j] -eq ' ' -or $line[$j] -eq "`t")) { $j++ }
+			# строка «//…» между строками литерала — комментарий, литерал продолжается на следующей
+			if ($j + 1 -lt $line.Length -and $line[$j] -eq '/' -and $line[$j + 1] -eq '/') { [void]$code.Add(""); [void]$mask.Add(' ' * $line.Length); continue }
+			if ($j -lt $line.Length -and $line[$j] -eq '|') { $mk[$j] = ' '; $j++ }
+			$cur += "`n"
+			$curCol = -1
+		}
+		while ($j -lt $line.Length) {
+			$c = $line[$j]
+			if ($inStr) {
+				if ($c -eq '"') {
+					if ($j + 1 -lt $line.Length -and $line[$j + 1] -eq '"') { $cur += '"'; $mk[$j] = ' '; $mk[$j + 1] = ' '; $j += 2; continue }
+					$inStr = $false
+					[void]$lits.Add(@{ Line = $curLine; Text = $cur; Prefix = $curPrefix; Col = $curCol })
+					[void]$sb.Append('""')
+					$j++
+					continue
+				}
+				$cur += $c; $mk[$j] = ' '; $j++; continue
+			}
+			if ($c -eq '/' -and $j + 1 -lt $line.Length -and $line[$j + 1] -eq '/') { for ($q = $j; $q -lt $mk.Length; $q++) { $mk[$q] = ' ' }; break }
+			if ($c -eq '"') { $inStr = $true; $cur = ""; $curLine = $i + 1; $curPrefix = $sb.ToString(); $curCol = $j + 1; $j++; continue }
+			[void]$sb.Append($c); $j++
+		}
+		[void]$code.Add($sb.ToString())
+		[void]$mask.Add([string]::new($mk))
+	}
+	return @{ Lines = $lines; Code = $code.ToArray(); Mask = $mask.ToArray(); Literals = $lits.ToArray() }
+}
+
+# Процедуры и функции модуля (имя, первая и последняя строка; первая — с аннотациями над заголовком)
+# и области (имя, строки #Область и #КонецОбласти, вложенность). Строки нумеруются с 1.
+# Заголовок — только в начале строки: продолжение литерала («|…») и комментарий заголовком не станут.
+function Get-ModuleOutline([string[]]$lines) {
+	$procs = New-Object System.Collections.ArrayList
+	$regions = New-Object System.Collections.ArrayList
+	$open = New-Object System.Collections.ArrayList
+	$cur = $null
+	for ($i = 0; $i -lt $lines.Count; $i++) {
+		$l = $lines[$i]
+		if ($null -ne $cur) {
+			# конец процедуры — в начале строки или после «;» (`Возврат Х;КонецФункции`)
+			if ($l -match '(^|;)\s*(КонецПроцедуры|КонецФункции|EndProcedure|EndFunction)(?![\w])') { $cur.end = $i + 1; [void]$procs.Add($cur); $cur = $null }
+			continue
+		}
+		$m = [regex]::Match($l, '^\s*(?:(?:Асинх|Async)\s+)?(?:Процедура|Функция|Procedure|Function)\s+(\w+)\s*\(', 'IgnoreCase')
+		if ($m.Success) {
+			$s = $i
+			while ($s -gt 0 -and $lines[$s - 1] -match '^\s*&') { $s-- }
+			$cur = [pscustomobject]@{ name = $m.Groups[1].Value; start = $s + 1; end = $i + 1 }
+			continue
+		}
+		$m = [regex]::Match($l, '^\s*#(?:Область|Region)\s+(\S+)', 'IgnoreCase')
+		if ($m.Success) { [void]$open.Add([pscustomobject]@{ name = $m.Groups[1].Value; start = $i + 1; end = 0; depth = $open.Count }); continue }
+		if ($l -match '^\s*#(КонецОбласти|EndRegion)(?![\w])' -and $open.Count -gt 0) {
+			$r = $open[$open.Count - 1]; $open.RemoveAt($open.Count - 1)
+			$r.end = $i + 1; [void]$regions.Add($r)
+		}
+	}
+	return @{ procs = $procs; regions = $regions }
+}
+
+# Литерал в позиции имени обработчика, собранного склейкой: ПодключитьОбработчикОжидания(X, …),
+# Новый ОписаниеОповещения(X, …), УстановитьДействие(Событие, X), .Действие = X — по коду строки слева от литерала.
+$script:handlerArgPrefix = '(?:(?:ПодключитьОбработчикОжидания|AttachIdleHandler|ОписаниеОповещения|NotifyDescription)\s*\((?<a>[^,]*)|(?:УстановитьДействие|SetAction)\s*\([^,]*,(?<a>[^,]*)|\.(?:Действие|Action)\s*=(?<a>[^;]*))$'
+
+if (-not $stopped) {
+	$modulePath = Join-Path (Split-Path (Resolve-Path $FormPath).ProviderPath -Parent) "Form/Module.bsl"
+	$moduleText = if (Test-Path -LiteralPath $modulePath) { Read-ModuleText $modulePath } else { $null }
+	if (-not (Test-Path -LiteralPath $modulePath)) {
+		Report-OK "22. Form module handlers: no module — skipped"
+	} elseif ($null -eq $moduleText) {
+		Report-Warn "22. Form module is not UTF-8 — handlers are not checked"
+	} else {
+		$bsl = Get-BslScan $moduleText
+		$outline = Get-ModuleOutline $bsl.Code
+		# @{} регистронезависим — как имена в BSL
+		$procs = @{}
+		foreach ($p in $outline.procs) { if (-not $procs.ContainsKey($p.name)) { $procs[$p.name] = $p } }
+		$bound = @{}
+		$check22Ok = $true
+		$guidRx = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
+
+		# Привязка без процедуры. Событие с GUID вместо имени — событие объекта, которого у основного реквизита
+		# формы нет: платформа его хранит, но не вызывает. В форме расширения привязка без callType — исходной
+		# формы, её процедура в модуле конфигурации.
+		foreach ($evt in $root.SelectNodes(".//f:Events/f:Event[not(ancestor::f:BaseForm)]", $nsMgr)) {
+			if ($stopped) { break }
+			$h = $evt.InnerText.Trim()
+			if (-not $h) { continue }
+			$bound[$h] = $true
+			$evtName = $evt.GetAttribute('name')
+			if ($evtName -match $guidRx) { continue }
+			if ($hasBaseForm -and -not $evt.GetAttribute('callType')) { continue }
+			if ($procs.ContainsKey($h)) { continue }
+			$owner = $evt.ParentNode.ParentNode
+			$what = if ($owner -eq $root) { "Form event '$evtName'" } else { "Event '$evtName' of $($owner.LocalName) '$($owner.GetAttribute('name'))'" }
+			Report-Error "22. ${what}: handler '$h' not found in the form module"
+			$check22Ok = $false
+		}
+		foreach ($cmd in $cmdNodes) {
+			if ($stopped) { break }
+			foreach ($act in $cmd.SelectNodes("f:Action", $nsMgr)) {
+				$h = $act.InnerText.Trim()
+				if (-not $h) { continue }
+				$bound[$h] = $true
+				if ($hasBaseForm -and -not $act.GetAttribute('callType')) { continue }
+				if ($procs.ContainsKey($h)) { continue }
+				Report-Error "22. Command '$($cmd.GetAttribute('name'))': action '$h' not found in the form module"
+				$check22Ok = $false
+			}
+		}
+
+		# Процедура без привязки. Не висячая: экспортная, с аннотацией расширения, Подключаемый_* (их подключает
+		# БСП), имя в коде модуля или равно литералу, имя оканчивается куском склейки в позиции обработчика.
+		$lits = @{}
+		$tails = New-Object System.Collections.ArrayList
+		foreach ($l in $bsl.Literals) {
+			$t = "$($l.Text)".Trim()
+			if (-not $t) { continue }
+			$lits[$t] = $true
+			$m = [regex]::Match($l.Prefix, $script:handlerArgPrefix, 'IgnoreCase')
+			if ($m.Success -and $m.Groups['a'].Value.Contains('+')) { [void]$tails.Add($t) }
+		}
+		# слова кода — один проход: поиск имени по всему модулю для каждой процедуры на больших модулях долог
+		$wordCount = New-Object 'System.Collections.Generic.Dictionary[string,int]' ([StringComparer]::OrdinalIgnoreCase)
+		foreach ($w in [regex]::Split(($bsl.Code -join "`n"), '\W+')) {
+			if (-not $w) { continue }
+			$c = 0; [void]$wordCount.TryGetValue($w, [ref]$c); $wordCount[$w] = $c + 1
+		}
+		foreach ($p in $outline.procs) {
+			if ($stopped) { break }
+			$n = $p.name
+			if ($bound.ContainsKey($n) -or $lits.ContainsKey($n)) { continue }
+			if ($n.StartsWith('Подключаемый_', [System.StringComparison]::OrdinalIgnoreCase)) { continue }
+			$k = $p.start - 1
+			$ann = @()
+			while ($k -lt $p.end - 1 -and $bsl.Code[$k] -match '^\s*&') { $ann += $bsl.Code[$k]; $k++ }
+			$hdr = $bsl.Code[$k]
+			$e = $k
+			while ($hdr -notmatch '\)' -and $e + 1 -lt $p.end) { $e++; $hdr += ' ' + $bsl.Code[$e] }
+			if ($hdr -match '\)\s*(Экспорт|Export)(?!\w)') { continue }
+			if (@($ann | Where-Object { $_ -match '^\s*&\s*(Перед|После|Вместо|ИзменениеИКонтроль|Before|After|Around|ChangeAndValidate)\s*\(' }).Count -gt 0) { continue }
+			# имя в коде, кроме самого заголовка
+			$c = 0; [void]$wordCount.TryGetValue($n, [ref]$c)
+			if ($c -gt 1) { continue }
+			$tail = $false
+			foreach ($t in $tails) { if ($n.EndsWith($t, [System.StringComparison]::OrdinalIgnoreCase)) { $tail = $true; break } }
+			if ($tail) { continue }
+			Report-Warn "22. Procedure '$n' (Module.bsl:$($k + 1)) is not bound in Form.xml and not referenced in the form module — dead code, unless a common module attaches it by name"
+			$check22Ok = $false
+		}
+		if ($check22Ok) { Report-OK "22. Form module handlers: bindings match procedures" }
+	}
+}
+
+# Объявления Перем по операторам (в строке их может быть несколько, оператор — на несколько строк):
+# имя и строка, где оно стоит
+function Get-VarDeclarations([string[]]$mask) {
+	$text = $mask -join "`n"
+	$starts = New-Object int[] $mask.Count
+	$acc = 0
+	for ($k = 0; $k -lt $mask.Count; $k++) { $starts[$k] = $acc; $acc += $mask[$k].Length + 1 }
+	$out = @()
+	foreach ($m in [regex]::Matches($text, '(?im)(?:^|;)\s*(?:&[^\s;]+\s+)*(?:Перем|Var)\s+([^;]*)')) {
+		$off = $m.Groups[1].Index
+		foreach ($part in ($m.Groups[1].Value -split ',')) {
+			$nm = ($part -replace '\s+(Экспорт|Export)\s*$', '').Trim()
+			if ($nm) {
+				$pos = $off + $part.IndexOf($nm)
+				$b = [array]::BinarySearch($starts, $pos)
+				$out += [pscustomobject]@{ Name = $nm; Line = $(if ($b -ge 0) { $b + 1 } else { -bnot $b }) }
+			}
+			$off += $part.Length + 1
+		}
+	}
+	return $out
+}
+
+# Реквизиты формы по имени (@{} регистронезависим — как имена в 1С). В форме расширения — и реквизиты
+# исходной формы (<BaseForm>): их видит модуль и на них ссылаются пути. Своя копия заимствованного
+# реквизита побеждает — в ней изменения расширения (добавленные колонки).
+function Get-FormAttributeMap {
+	$map = @{}
+	foreach ($a in $root.SelectNodes("f:Attributes/f:Attribute | f:BaseForm/f:Attributes/f:Attribute", $nsMgr)) {
+		$n = $a.GetAttribute('name')
+		if (-not $map.ContainsKey($n)) { $map[$n] = $a }
+	}
+	return $map
+}
+
+# --- Check 24: переменные модуля против реквизитов формы ---
+# Переменная модуля (Перем вне процедур) с именем реквизита формы — модуль не компилируется: «Переменная
+# с указанным именем уже определена». Загрузка XML и обновление конфигурации этого не показывают — ошибка
+# всплывает при первом обращении к форме. Локальная Перем в процедуре реквизит перекрывает, это допустимо.
+if (-not $stopped) {
+	$modulePath = Join-Path (Split-Path (Resolve-Path $FormPath).ProviderPath -Parent) "Form/Module.bsl"
+	if (-not (Test-Path -LiteralPath $modulePath)) {
+		Report-OK "24. Module variables: no module — skipped"
+	} else {
+		$moduleText = Read-ModuleText $modulePath
+		if ($null -eq $moduleText) {
+			Report-Warn "24. Form module is not UTF-8 — module variables are not checked"
+		} else {
+			$bsl = Get-BslScan $moduleText
+			$outline = Get-ModuleOutline $bsl.Code
+			$inProc = New-Object bool[] ($bsl.Code.Count + 1)
+			foreach ($p in $outline.procs) { for ($k = $p.start; $k -le $p.end -and $k -le $bsl.Code.Count; $k++) { $inProc[$k] = $true } }
+			# В форме расширения модуль видит и реквизиты исходной формы — замер на 8.3.24
+			$formAttrs = Get-FormAttributeMap
+			$check24Ok = $true
+			foreach ($v in (Get-VarDeclarations $bsl.Mask)) {
+				if ($inProc[$v.Line] -or -not $formAttrs.ContainsKey($v.Name)) { continue }
+				Report-Error "24. Module variable '$($v.Name)' (Module.bsl:$($v.Line)) has the same name as form attribute '$($formAttrs[$v.Name].GetAttribute('name'))' — the platform will not compile the module: `"Переменная с указанным именем уже определена`""
+				$check24Ok = $false
+			}
+			if ($check24Ok) { Report-OK "24. Module variables: no clash with form attributes" }
+		}
+	}
+}
+
+# --- Check 25: поля условного оформления формы ---
+# Поле отбора условного оформления — путь от реквизита формы. Устаревший путь (реквизит или колонку
+# переименовали, удалили) платформа принимает молча — правило просто не срабатывает (замер 8.3.24/8.3.27).
+# Глубже корня проверяются только колонки таблиц значений: поля объекта и динамического списка — в метаданных.
+if (-not $stopped) {
+	$caNode = $root.SelectSingleNode("f:Attributes/f:ConditionalAppearance", $nsMgr)
+	if ($null -eq $caNode) {
+		Report-OK "25. Conditional appearance fields: none"
+	} else {
+		$caNs = New-Object System.Xml.XmlNamespaceManager($xmlDoc.NameTable)
+		$caNs.AddNamespace("dcsset", "http://v8.1c.ru/8.1/data-composition-system/settings")
+		$caAttrs = Get-FormAttributeMap
+		$caCols = @{}
+		$check25Ok = $true
+		$seen25 = @{}
+		foreach ($t in $caNode.SelectNodes(".//dcsset:left | .//dcsset:right", $caNs)) {
+			if (-not $t.GetAttribute("type", "http://www.w3.org/2001/XMLSchema-instance").EndsWith(':Field')) { continue }
+			$path = $t.InnerText.Trim()
+			if (-not $path -or $seen25.ContainsKey($path)) { continue }
+			$seen25[$path] = $true
+			$segs = @($path -split '\.')
+			$attr = $caAttrs[$segs[0]]
+			if ($null -eq $attr) {
+				Report-Warn "25. Conditional appearance: filter field '$path' — the form has no attribute '$($segs[0])' — a stale path, the platform accepts it without error"
+				$check25Ok = $false
+				continue
+			}
+			$ts = @($attr.SelectNodes("f:Type/v8:Type", $nsMgr) | ForEach-Object { $_.InnerText.Trim() })
+			if ($segs.Count -lt 2 -or $ts.Count -ne 1 -or @('v8:ValueTable','v8:ValueTree') -notcontains $ts[0]) { continue }
+			# Второй сегмент — своя колонка таблицы (AdditionalColumns у неё — колонки вложенных таблиц, уровнем ниже)
+			$an = $attr.GetAttribute('name')
+			if (-not $caCols.ContainsKey($an)) {
+				$cols = @{}
+				foreach ($c in $attr.SelectNodes("f:Columns/f:Column", $nsMgr)) { $cols[$c.GetAttribute('name')] = $true }
+				$caCols[$an] = $cols
+			}
+			if (-not $caCols[$an].ContainsKey($segs[1])) {
+				Report-Warn "25. Conditional appearance: filter field '$path' — attribute '$($segs[0])' has no column '$($segs[1])' — a stale path, the platform accepts it without error"
+				$check25Ok = $false
+			}
+		}
+		if ($check25Ok) { Report-OK "25. Conditional appearance fields: rooted at form attributes" }
+	}
+}
+
+# --- Check 26: значение ссылки в отборе/параметре (dcscor:DesignTimeValue) ---
+# Вид "Enum.X.EnumValue.Y" (формат списка выбора) платформа здесь не разрешает: загрузка проходит,
+# значение остаётся строкой, и условие с ним никогда не выполняется (замер 8.3.24).
+if (-not $stopped) {
+	$check26Ok = $true
+	foreach ($n in $xmlDoc.SelectNodes("//*[@xsi:type]", $nsMgr)) {
+		if (-not $n.GetAttribute("type", "http://www.w3.org/2001/XMLSchema-instance").EndsWith(':DesignTimeValue')) { continue }
+		$v = $n.InnerText.Trim()
+		if ($v -match '^(Enum|Перечисление)\.([^.]+)\.(EnumValue|ЗначениеПеречисления)\.(.+)$') {
+			$fixed = "Перечисление." + $Matches[2] + "." + $Matches[4]
+			Report-Error "26. Design-time value '$v' — the platform does not resolve the EnumValue form here, the condition never matches; write '$fixed'"
+			$check26Ok = $false
+		}
+	}
+	if ($check26Ok) { Report-OK "26. Design-time values: resolvable" }
+}
+
+# --- Check 27: имена цветов web:/win: — из палитры платформы ---
+# Палитры — таблицы платформы (core83/core85.dll, одинаковы 8.3.20…8.5). Имя вне палитры — загрузка
+# отвергает Form.xml целиком («Исключение XDTO»). Регистр платформа не различает (web:red → web:Red).
+$script:webColors = @(
+	'AliceBlue','AntiqueWhite','Aqua','Aquamarine','Azure','Beige','Bisque','Black','BlanchedAlmond','Blue',
+	'BlueViolet','Brown','BurlyWood','CadetBlue','Chartreuse','Chocolate','Coral','CornFlowerBlue','CornSilk','Cream',
+	'Crimson','Cyan','DarkBlue','DarkCyan','DarkGoldenRod','DarkGray','DarkGreen','DarkKhaki','DarkMagenta','DarkOliveGreen',
+	'DarkOrange','DarkOrchid','DarkRed','DarkSalmon','DarkSeaGreen','DarkSlateBlue','DarkSlateGray','DarkTurquoise','DarkViolet','DeepPink',
+	'DeepSkyBlue','DimGray','DodgerBlue','FireBrick','FloralWhite','ForestGreen','Fuchsia','Gainsboro','GhostWhite','Gold',
+	'Goldenrod','Gray','Green','GreenYellow','HoneyDew','HotPink','IndianRed','Indigo','Ivory','Khaki',
+	'Lavender','LavenderBlush','LawnGreen','LemonChiffon','LightBlue','LightCoral','LightCyan','LightGoldenRod','LightGoldenRodYellow','LightGray',
+	'LightGreen','LightPink','LightSalmon','LightSeaGreen','LightSkyBlue','LightSlateGray','LightSlateBlue','LightSteelBlue','LightYellow','Lime',
+	'LimeGreen','Linen','Magenta','Maroon','MediumAquaMarine','MediumBlue','MediumGray','MediumGreen','MediumOrchid','MediumPurple',
+	'MediumSeaGreen','MediumSlateBlue','MediumSpringGreen','MediumTurquoise','MediumVioletRed','MidnightBlue','MintCream','MistyRose','Moccasin','NavajoWhite',
+	'Navy','OldLace','Olive','Olivedrab','Orange','OrangeRed','Orchid','PaleGoldenrod','PaleGreen','PaleTurquoise',
+	'PaleVioletRed','PapayaWhip','PeachPuff','Peru','Pink','Plum','PowderBlue','Purple','Red','RosyBrown',
+	'RoyalBlue','SaddleBrown','Salmon','SandyBrown','Seagreen','SeaShell','Sienna','Silver','SkyBlue','SlateBlue',
+	'SlateGray','Snow','SpringGreen','SteelBlue','Tan','Teal','Thistle','Tomato','Turquoise','Violet',
+	'VioletRed','Wheat','White','WhiteSmoke','Yellow','YellowGreen'
+)
+$script:winColors = @(
+	'ScrollBar','Desktop','ActiveTitleBar','InactiveTitleBar','MenuBar','WindowBackground','WindowFrame','MenuItemText','WindowText','ActiveTitleBarText',
+	'ActiveBorder','InactiveBorder','ApplicationWorkspace','Highlight','HighlightText','ButtonFace','ButtonShadow','DisabledText','ButtonText','InactiveTitleBarText',
+	'ButtonHighlight','ButtonDarkShadow','ButtonLightShadow','ToolTipText','ToolTip','HotLight','GradientActiveCaption','GradientInactiveCaption','MiddleGradientActiveCaption','MiddleGradientInactiveCaption'
+)
+if (-not $stopped) {
+	$check27Ok = $true
+	$seen27 = @{}
+	foreach ($n in $xmlDoc.SelectNodes("//*[not(*)]", $nsMgr)) {
+		$xt = $n.GetAttribute("type", "http://www.w3.org/2001/XMLSchema-instance")
+		if (-not ($xt.EndsWith(':Color') -or $n.LocalName.EndsWith('Color'))) { continue }
+		$v = $n.InnerText.Trim()
+		if ($v -notmatch '^(web|win):(\w+)$' -or $seen27.ContainsKey($v)) { continue }
+		$seen27[$v] = $true
+		$palette = if ($Matches[1] -eq 'web') { $script:webColors } else { $script:winColors }
+		if ($palette -notcontains $Matches[2]) {
+			$hint = if ($Matches[1] -eq 'win' -and $Matches[2] -eq 'GrayText') { " (the platform name is win:DisabledText)" } else { "" }
+			Report-Error "27. Color '$v' is not in the platform $($Matches[1]): palette$hint — the platform rejects the whole form on load"
+			$check27Ok = $false
+		}
+	}
+	if ($check27Ok) { Report-OK "27. Color names: in platform palettes" }
 }
 
 # --- Summary ---

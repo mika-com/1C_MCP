@@ -1,11 +1,13 @@
-// web-test cli/exec-context v1.1 — buildContext + executeScript для run/exec/test
+// web-test cli/exec-context v1.5 — buildContext + executeScript для run/exec/test
 // Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 import { readFileSync, writeFileSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { tmpdir } from 'os';
 import * as browser from '../browser.mjs';
-import { elapsed, slugify } from './util.mjs';
+import { resetSlideRun } from '../engine/recording/slides/index.mjs';
+import { anchorLocator } from '../engine/recording/anchors.mjs';
+import { elapsed, slugify, withDeadline, softDeadline, DeadlineError } from './util.mjs';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const DEFAULT_ERROR_SHOT_PATH = resolve(tmpdir(), 'web-test-error-shot.png');
@@ -64,8 +66,18 @@ export function buildContext({ noRecord = false } = {}) {
     for (const fn of ['showCaption', 'hideCaption']) {
       ctx[fn] = noop;
     }
+    // no voice, but the words are checked as in the recording (a wrong anchor must not wait for the real run)
+    ctx.speak = async (text) => {
+      if (typeof text !== 'string' || !text.trim()) throw new Error('speak: the phrase to say (a non-empty string)');
+      const next = anchorLocator(text);
+      let n = 0;
+      return { seconds: 0, at: async (x) => { next(x, `speak at ${++n}`); return { t: 0, by: 'estimate', late: 0 }; } };
+    };
     ctx.isRecording = () => false;
     ctx.getCaptions = () => [];
+    // slides are still drawn (the page state matters for debugging), without TTS and with short holds
+    ctx.showSlide = (spec, opts = {}) => browser.showSlide(spec, { ...opts, fast: 0.3 });
+    ctx.prepareSlides = (specs, opts = {}) => browser.prepareSlides(specs, { ...opts, validateOnly: true });
   }
 
   // Wrap action functions to auto-detect 1C errors (modal, balloon)
@@ -108,7 +120,7 @@ export function buildContext({ noRecord = false } = {}) {
   return ctx;
 }
 
-export async function executeScript(code, { noRecord } = {}) {
+export async function executeScript(code, { noRecord, timeoutMs } = {}) {
   const output = [];
   const origLog = console.log;
   const origErr = console.error;
@@ -117,6 +129,7 @@ export async function executeScript(code, { noRecord } = {}) {
 
   const t0 = Date.now();
   try {
+    resetSlideRun();   // slide numbers (theme.frame) start over with every script
     const ctx = buildContext({ noRecord });
 
     // Normalize Windows backslash paths to prevent JS parse errors
@@ -125,31 +138,48 @@ export async function executeScript(code, { noRecord } = {}) {
 
     const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
     const fn = new AsyncFunction(...Object.keys(ctx), code);
-    await fn(...Object.values(ctx));
+    const run = fn(...Object.values(ctx));
+    // The deadline only stops waiting — a hung call keeps running until the caller tears the
+    // browser down (cmdRun disconnects right after).
+    await (timeoutMs ? withDeadline(run, timeoutMs, 'script') : run);
 
     console.log = origLog;
     console.error = origErr;
     return { ok: true, output: output.join('\n'), elapsed: elapsed(t0) };
   } catch (e) {
-    console.log = origLog;
-    console.error = origErr;
+    if (e instanceof DeadlineError) {
+      // The timed-out script keeps running through the teardown; its logs must not reach stdout,
+      // which carries the JSON result alone.
+      const toStderr = (prefix) => (...a) => process.stderr.write(prefix + a.map(String).join(' ') + '\n');
+      console.log = toStderr('[after timeout] ');
+      console.error = toStderr('[after timeout][ERR] ');
+    } else {
+      console.log = origLog;
+      console.error = origErr;
+    }
 
-    // Auto-stop recording if active (prevents "Already recording" on next exec)
+    // Auto-stop recording if active (prevents "Already recording" on next exec).
+    // Bounded: after a script timeout the renderer may be the thing that hangs.
     if (browser.isRecording()) {
-      try { await browser.stopRecording(); } catch {}
+      await softDeadline(browser.stopRecording(), 40000, 'stopRecording');
     }
 
     // Error screenshot (skip if already taken before fetchErrorStack closed the modal)
     let shotFile = e.onecError?.screenshot;
     if (!shotFile) {
-      try {
-        const png = await browser.screenshot();
-        shotFile = nextErrorShotPath('script');
-        writeFileSync(shotFile, png);
-      } catch {}
+      const shot = await softDeadline(browser.screenshot(), 5000, 'screenshot');
+      if (shot.ok) {
+        try {
+          shotFile = nextErrorShotPath('script');
+          writeFileSync(shotFile, shot.value);
+        } catch { shotFile = undefined; }
+      }
     }
 
-    const result = { ok: false, error: e.message, output: output.join('\n'), screenshot: shotFile, elapsed: elapsed(t0) };
+    const timedOut = e instanceof DeadlineError;
+    const error = timedOut ? `Script timed out after ${e.ms}ms (--timeout)` : e.message;
+    const result = { ok: false, error, output: output.join('\n'), screenshot: shotFile, elapsed: elapsed(t0) };
+    if (timedOut) result.timedOut = true;
 
     // Enrich with 1C error context if available
     if (e.onecError) {

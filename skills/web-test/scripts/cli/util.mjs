@@ -1,4 +1,4 @@
-// web-test cli/util v1.4 — generic helpers for CLI commands
+// web-test cli/util v1.8 — generic helpers for CLI commands
 // Source: https://github.com/Nikolay-Shirokov/cc-1c-skills
 
 // Wall-clock bounds live in the engine (session.mjs needs them too, and the engine must not
@@ -77,8 +77,9 @@ export function xmlEscape(s) {
     .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
 }
 
+// Keys may be in any script: `\w` is ASCII-only, so `{случай}` would stay unsubstituted.
 export function interpolate(template, params) {
-  return String(template).replace(/\{(\w+)\}/g, (_, key) =>
+  return String(template).replace(/\{([\p{L}\p{N}_]+)\}/gu, (_, key) =>
     params[key] !== undefined ? String(params[key]) : `{${key}}`);
 }
 
@@ -109,6 +110,17 @@ Commands:
   stop                     Logout and close browser
   status                   Check session status
   test <dir|file>...       Run regression tests (*.test.mjs); accepts multiple paths
+  play <slides.mjs> --out=<file.mp4> [--no-narration] [--music=<preset|file>]
+                           Slides video without 1C: blank page, recording + narration
+                           (--no-narration: video + captions.json only, narrate later;
+                           --music: background music in speech pauses — bright, warm, calm,
+                           focus, uplift, uplift-soft or a file)
+  preview <slides.mjs> [--out-dir=<dir>]
+                           A PNG per slide step + checks (no TTS, no video)
+
+Options for start and run:
+  --user=NAME              Log in as this infobase user instead of the publication's one
+  --password=PWD           Password of --user (omit for an empty one)
 
 Options for exec:
   --no-record              Skip video recording (record() becomes no-op)
