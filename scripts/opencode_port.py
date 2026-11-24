@@ -91,7 +91,7 @@ _PLUGIN_SHIMS = (
     ('bsl-autocheck.mjs', PLUGIN_FILE,
      'Создано scripts/opencode_port.py install — проверка BSL после каждой правки (1C-Agent).'),
     ('shell-guard.mjs', SHELL_GUARD_FILE,
-     'Создано scripts/opencode_port.py install — запрет COM, интерактивного 1cv8 и загрузки конфигурации вне db-* (1C-Agent).'),
+     'Создано scripts/opencode_port.py install — запрет COM, интерактивного 1cv8, загрузки вне db-*, пароля в команде и чтения секретов (1C-Agent).'),
 )
 
 

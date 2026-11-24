@@ -2,9 +2,9 @@
 
 Агент для разработки на 1С:Предприятие 8.3 в [OpenCode](https://opencode.ai/v2/docs) (Desktop и CLI):
 
-- **85 навыков**: 81 из [cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills) (конфигурации, расширения,
-  EPF/ERF, формы, СКД, макеты, роли, XDTO, базы, веб-публикация, web-test) + свои `bsl-check`, `vrunner`, `1c-test` (стратегия тестирования, preflight, шаблоны Vanessa) и `print-form`
-  (печатные формы «сначала макет» с PNG-предпросмотром макета);
+- **86 навыков**: 81 из [cc-1c-skills](https://github.com/Nikolay-Shirokov/cc-1c-skills) (конфигурации, расширения,
+  EPF/ERF, формы, СКД, макеты, роли, XDTO, базы, веб-публикация, web-test) + свои `bsl-check`, `vrunner`, `1c-test` (стратегия тестирования, preflight, шаблоны Vanessa), `print-form`
+  (печатные формы «сначала макет» с PNG-предпросмотром макета) и `db-install-agentquery` (расширение чтения `query_db`);
 - **9 агентов**: основной `1c`, субагенты по этапам `1c-analyst` → `1c-developer` → `1c-deployer` → `1c-tester` (+ `1c-test-author`),
   и профильные субагенты `1c-explorer` (разведка кода и расширений CFE), `1c-debugger` (расследование ошибок и ЖР `event_log`),
   `1c-query-expert` (разработка, валидация `validate_query` и оптимизация запросов 1С);
@@ -212,9 +212,9 @@ UTF-8 для PowerShell и `cmd` и `PYTHONIOENCODING`/`PYTHONUTF8` для Pytho
 |------|-----|
 | `.opencode/agents/` | агенты OpenCode v2 (Markdown + frontmatter) |
 | `.opencode/commands/` | команды `/1c-*` |
-| `skills/` | 85 навыков: 81 из `cc-1c-skills` + собственные (`bsl-check`, `vrunner`, `1c-test`, `print-form`) |
+| `skills/` | 86 навыков: 81 из `cc-1c-skills` + собственные (`bsl-check`, `vrunner`, `1c-test`, `print-form`, `db-install-agentquery`) |
 | `mcp/` | MCP-серверы и `register-opencode-mcp.mjs` (пишет `mcp.servers`, удаляет старую запись `lsp.bsl`) |
-| `plugins/` | плагины OpenCode v2: `bsl-autocheck.mjs` (проверка BSL после правки) и `shell-guard.mjs` (запрет COM, интерактивного `1cv8` и загрузки в базу вне `db-*`). Переходники — `.opencode/plugins/*.js` |
+| `plugins/` | плагины OpenCode v2: `bsl-autocheck.mjs` (проверка BSL после правки) и `shell-guard.mjs` (запрет COM, интерактивного `1cv8`, загрузки в базу вне `db-*`, пароля в команде и чтения секретов). Переходники — `.opencode/plugins/*.js` |
 | `opencode.json` | конфиг v2 для работы в самом репозитории (`skills`, `mcp.servers`, `default_agent`) |
 | `templates/AGENTS.md` | шаблон инструкций для 1С-проекта |
 | `install.ps1`, `install.cmd` | установка на Windows одной командой из папки проекта |
@@ -222,7 +222,10 @@ UTF-8 для PowerShell и `cmd` и `PYTHONIOENCODING`/`PYTHONUTF8` для Pytho
 | `tests/mcp/run.mjs`, `tests/mcp/multiuser.mjs` | тесты прокси `1c-bsl` (дерево процессов, таймаут, область индексации) и многопользовательской безопасности |
 | `tests/plugins/bsl-autocheck.mjs` | тесты плагина на поддельном BSL LS (пачки, таймаут, вывод, нет BSL LS) и миграции `lsp.bsl` |
 | `tests/plugins/shell-guard.mjs` | тесты запрета COM, интерактивного `1cv8` и загрузки конфигурации, включая отключение в `.v8-project.json` |
-| `tests/mcp/query-db.mjs` | тесты `query_db` на подставном HTTP (лимит, таймаут, `validate_query`, пароль не в ответе и не в URL) |
+| `tests/mcp/query-db.mjs` | тесты `query_db` на подставном HTTP (лимит, таймаут, `validate_query`, пароль не в ответе и не в URL, `action: status`) |
+| `tests/mcp/odata-get.mjs` | тесты `odata_get`: только GET, лимит, пароль не в URL и не в ответе |
+| `tests/skills/agentquery-extension.mjs` | состав расширения AgentQuery и подстановка языка базы без запуска платформы |
+| `tests/agents/permissions.mjs` | права агентов OpenCode v2: последнее совпадение, секреты закрыты, загрузку делает deployer |
 | `tests/mcp/help.mjs` | тесты `1c-help` на синтетических `.hbk` (`tests/mcp/lib/make-hbk.mjs`, без содержимого справки 1С) |
 | `tests/mcp/power1c.mjs` | тесты графа метаданных (`object_refs`, `find_method`, `find_usages`), статического валидатора запросов (`validate_query`) и чтения ЖР (`event_log`) |
 | `tests/web-test/session.mjs` | тесты сеанса `web-test` на поддельном браузере: `open` → много `exec` в одном браузере, сеанс переживает конец вызова shell, токен, простой, смена адреса |

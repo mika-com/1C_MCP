@@ -81,6 +81,9 @@ param(
     [Parameter(Mandatory=$false)]
     [string]$Password,
 
+    [Parameter(Mandatory=$false)]
+    [string]$Database,
+
     [Parameter(Mandatory=$true)]
     [string]$ConfigDir,
 
@@ -173,11 +176,23 @@ function Test-SamePath {
 }
 
 function Find-ProjectDatabase {
-    # Запись базы в реестре, соответствующая переданному соединению. $null, если не найдена.
+    # Запись базы: сначала -Database (id или aliases), иначе path или server+ref.
     $pf = Find-V8Project (Get-Location).Path
     if (-not $pf) { return $null }
     try { $proj = Get-Content $pf -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return $null }
     if (-not $proj.databases) { return $null }
+    $wanted = ''
+    $var = Get-Variable -Name Database -Scope Script -ErrorAction SilentlyContinue
+    if ($var -and $var.Value) { $wanted = ([string]$var.Value).Trim() }
+    if ($wanted) {
+        foreach ($db in @($proj.databases)) {
+            if ($db.id -and [string]$db.id.Equals($wanted, [System.StringComparison]::OrdinalIgnoreCase)) { return $db }
+            foreach ($alias in @($db.aliases)) {
+                if ($alias -and [string]$alias.Equals($wanted, [System.StringComparison]::OrdinalIgnoreCase)) { return $db }
+            }
+        }
+        return $null
+    }
     foreach ($db in $proj.databases) {
         if ($InfoBasePath -and $db.path -and (Test-SamePath $db.path $InfoBasePath)) { return $db }
         if ($InfoBaseServer -and $InfoBaseRef -and $db.server -and $db.ref) {
@@ -188,11 +203,20 @@ function Find-ProjectDatabase {
     return $null
 }
 
-# OpenCode: пользователь и пароль — из .v8-project.json или V8_DB_USER / V8_DB_PASSWORD,
-# если их не передали в командной строке. Явные -UserName/-Password сильнее. Значение пароля не печатаем.
+# OpenCode: -Database <id> подставляет соединение, пользователя и пароль.
+# Явный -Password сильнее, но в команду его не передают. Значение пароля не печатаем.
+$dbRecCred = Find-ProjectDatabase
+$credFrom = @()
+if ($Database) {
+    if (-not $dbRecCred) { Write-Host "Error: база с id '$Database' не найдена в .v8-project.json." -ForegroundColor Red; exit 1 }
+    if ($dbRecCred.path -and [string]$dbRecCred.type -ne 'server') { $InfoBasePath = [string]$dbRecCred.path }
+    elseif ($dbRecCred.server -and $dbRecCred.ref) {
+        $InfoBaseServer = [string]$dbRecCred.server
+        $InfoBaseRef = [string]$dbRecCred.ref
+    } elseif ($dbRecCred.path) { $InfoBasePath = [string]$dbRecCred.path }
+    $credFrom += ('database ' + [string]$dbRecCred.id + ' from .v8-project.json')
+}
 if (-not $UserName -or -not $Password) {
-    $dbRecCred = Find-ProjectDatabase
-    $credFrom = @()
     if (-not $UserName) {
         if ($dbRecCred -and $dbRecCred.user) { $UserName = [string]$dbRecCred.user; $credFrom += 'user from .v8-project.json' }
         elseif ($env:V8_DB_USER) { $UserName = $env:V8_DB_USER; $credFrom += 'user from V8_DB_USER' }
@@ -201,8 +225,8 @@ if (-not $UserName -or -not $Password) {
         if ($dbRecCred -and $dbRecCred.password) { $Password = [string]$dbRecCred.password; $credFrom += 'password from .v8-project.json' }
         elseif ($env:V8_DB_PASSWORD) { $Password = $env:V8_DB_PASSWORD; $credFrom += 'password from V8_DB_PASSWORD' }
     }
-    if ($credFrom.Count) { Write-Host ("Infobase credentials (" + ($credFrom -join ', ') + ") — not passed on the command line.") }
 }
+if ($credFrom.Count) { Write-Host ("Infobase credentials (" + ($credFrom -join ', ') + ") — not passed on the command line.") }
 
 
 function Resolve-RepositorySettings {

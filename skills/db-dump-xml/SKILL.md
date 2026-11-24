@@ -8,7 +8,7 @@ argument-hint: "[database] [outputDir]"
 
 > **OpenCode:** `{SKILL_DIR}` в командах — каталог текущего навыка. Подставь абсолютный путь к каталогу навыка, если среда не делает это автоматически. Команды запускай из корня проекта. Если `powershell.exe` недоступен (Linux/macOS), запусти одноимённый `.py`-скрипт через `python` (или `python3`) с теми же параметрами.
 
-> **Пароль (OpenCode).** Не передавай `-Password` (и `/P`, `--password`) в командной строке: скрипт берёт пользователя и пароль из записи базы в `.v8-project.json` (совпадение по `path` или `server`+`ref`), а если записи нет — из `V8_DB_USER` / `V8_DB_PASSWORD`. Явный `-Password` по-прежнему перекрывает файл и переменную.
+> **Пароль (OpenCode).** Не передавай `-Password`, `/P`, `--password`, `curl -u` и заголовок `Basic`. Передай `-Database <id>`: скрипт подставит путь или сервер, пользователя и пароль из записи `databases[]` (сначала `id` и `aliases`, иначе `path` или `server`+`ref`). Нет записи — `V8_DB_USER` / `V8_DB_PASSWORD`. Явный `-Password` перекрывает файл, но shell-guard его блокирует. Значение пароля в команду и в ответ не подставляй.
 
 Выгружает конфигурацию информационной базы в XML-файлы (исходники). Поддерживает полную, инкрементальную, частичную выгрузку и обновление ConfigDumpInfo.
 
@@ -50,6 +50,7 @@ powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/db-dump-xml.ps1" <пара�
 | `-InfoBaseRef <имя>` | * | Имя базы на сервере |
 | `-UserName <имя>` | нет | Имя пользователя |
 | `-Password <пароль>` | нет | Пароль |
+| `-Database <id>` | нет | id базы в `.v8-project.json`: путь или сервер, пользователь и пароль берутся из записи. `-Password` не передавать |
 | `-ConfigDir <путь>` | да | Каталог для выгрузки |
 | `-Mode <режим>` | нет | `Full` / `Changes` (по умолч.) / `Partial` / `UpdateInfo` |
 | `-Objects <список>` | для Partial | Имена объектов через запятую |
@@ -89,7 +90,7 @@ powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/db-dump-xml.ps1" -InfoBaseP
 powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/db-dump-xml.ps1" -InfoBasePath "C:\Bases\MyDB" -UserName "Admin" -ConfigDir "C:\WS\cfsrc" -Mode Partial -Objects "Справочник.Номенклатура,Документ.Заказ"
 
 # Серверная база
-powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/db-dump-xml.ps1" -InfoBaseServer "srv01" -InfoBaseRef "MyApp_Dev" -UserName "Admin" -Password "secret" -ConfigDir "C:\WS\cfsrc" -Mode Full
+powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/db-dump-xml.ps1" -InfoBaseServer "srv01" -InfoBaseRef "MyApp_Dev" -ConfigDir "C:\WS\cfsrc" -Mode Full
 
 # Выгрузка расширения
 powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/db-dump-xml.ps1" -InfoBasePath "C:\Bases\MyDB" -UserName "Admin" -ConfigDir "C:\WS\ext_src" -Mode Full -Extension "МоёРасширение"

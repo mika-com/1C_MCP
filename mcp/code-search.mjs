@@ -3,7 +3,7 @@
 // объекты метаданных по смыслу (имя, синоним, реквизиты, типы), граф связей объекта (object_refs: подписки,
 // движения регистров, перехваты CFE, где используется как тип), методы с кодом и перехватами, список методов модуля,
 // места вызова (включая Form.xml, подписки, регламентные задания, HTTP/Web-сервисы), статическая валидация запросов
-// по схеме метаданных (validate_query), чтение данных базы (query_db, только ВЫБРАТЬ) и Журнала регистрации
+// по схеме метаданных (validate_query), чтение данных базы (query_db, только ВЫБРАТЬ; odata_get — GET стандартного OData) и Журнала регистрации
 // 1Cv8.lgd / *.lgp со стек-трейсами (event_log).
 // CLI: node code-search.mjs --semantic-build [--root DIR] [--force] | --semantic-status [--root DIR]
 
@@ -18,7 +18,8 @@ import { agentVersion, instructionSuffix, agentBanner, autocheckStatusText } fro
 import * as sem from './lib/semantic.mjs';
 import { validateQuery } from './lib/query-validator.mjs';
 import { readEventLog } from './lib/event-log.mjs';
-import { queryDb } from './lib/query-db.mjs';
+import { queryDb, isStatusAction as queryStatus } from './lib/query-db.mjs';
+import { odataGet, isStatusAction as odataStatus } from './lib/odata-get.mjs';
 
 const INDEX_VERSION = 5;
 const SKIP_DIRS = new Set(['.git', 'node_modules', '.agents', '.opencode', 'build', 'base', 'tools', 'test-tmp', '.v8-xsd']);
@@ -1693,6 +1694,7 @@ export const ARG_ALIASES = {
   search_code: { pattern: ['query', 'text', 'string'] },
   validate_query: { query: ['text', 'sql', 'q'] },
   query_db: { query: ['text', 'sql', 'q'] },
+  odata_get: { entity: ['set', 'name', 'resource'] },
 };
 const ARG_EXAMPLES = {
   semantic_search: '{"query": "где проверяется кредитный лимит"}', find_object: '{"query": "ЗадачиМне"}',
@@ -1701,6 +1703,7 @@ const ARG_EXAMPLES = {
   find_usages: '{"name": "ПриЗаписи"}', search_code: '{"pattern": "ЗаписатьИзменения("}',
   validate_query: '{"query": "ВЫБРАТЬ Ссылка ИЗ Справочник.Номенклатура"}',
   query_db: '{"database": "dev", "query": "ВЫБРАТЬ ПЕРВЫЕ 20 Наименование ИЗ Справочник.Номенклатура"}',
+  odata_get: '{"database": "dev", "entity": "Catalog_Номенклатура", "filter": "IsFolder eq false", "top": 20}',
 };
 
 function aliasProps(canonical, names) {
@@ -1798,14 +1801,34 @@ const TOOLS = [
   { name: 'query_db', description: 'Прочитать данные информационной базы 1С. Только ВЫБРАТЬ (SELECT): текст проверяет validate_query, ' +
       'изменение данных невозможно. Лимит строк (по умолчанию 100, максимум 500) и таймаут (по умолчанию 30 с, максимум 120 с) обязательны и не отключаются. ' +
       'База — id из .v8-project.json. Запрос уходит HTTP-сервису AgentQuery опубликованной базы (queryUrl или webUrl + /hs/agentquery/query); ' +
-      'пароль только в заголовке Authorization этого процесса, не в командной строке. COM и интерактивный 1cv8 не используются.',
+      'пароль только в заголовке Authorization этого процесса, не в командной строке. COM и интерактивный 1cv8 не используются. '
+      + 'action=status делает GET и пишет, чего не хватает: нет адреса, адрес не отвечает, расширение не опубликовано (404), ошибка входа (401/403), в URL попал веб-клиент. '
+      + 'Расширение ставит навык db-install-agentquery.',
     annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
     inputSchema: { type: 'object', properties: {
       database: { type: 'string', description: 'Обязательно. id базы из .v8-project.json (например «dev», «HotDoc»)' },
       query: { type: 'string', description: 'Обязательно. Текст запроса 1С, только ВЫБРАТЬ. ПЕРВЫЕ допишется само, если лимит не задан в тексте или он больше limit' },
       limit: { type: 'number', description: 'Сколько строк вернуть (1…500, по умолчанию 100). Ноль и большое число приводятся к этому диапазону' },
       timeout_sec: { type: 'number', description: 'Таймаут HTTP, секунды (1…120, по умолчанию 30)' },
+      action: { type: 'string', enum: ['status'], description: 'status — проверить публикацию AgentQuery, не выполняя запрос' },
       root: ROOT_ARG, ...aliasProps('query', ['text', 'sql', 'q']) } } },
+  { name: 'odata_get', description: 'Прочитать стандартный OData опубликованной базы 1С. Только GET: набор сущностей '
+      + '(Catalog_Имя, Document_Имя, InformationRegister_Имя) и параметры $filter, $select, $top, $orderby. '
+      + '$top обязателен (1…500, по умолчанию 100). action=status проверяет, что сервис отвечает. '
+      + 'База — id из .v8-project.json, адрес — odataUrl или webUrl + /odata/standard.odata. '
+      + 'Пароль только в заголовке Authorization этого процесса. Запись, POST и произвольный URL невозможны.',
+    annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: true },
+    inputSchema: { type: 'object', properties: {
+      database: { type: 'string', description: 'Обязательно. id базы из .v8-project.json' },
+      entity: { type: 'string', description: 'Набор сущностей: Catalog_Номенклатура, Document_ЗаказКлиента или $metadata. Не нужен при action=status' },
+      filter: { type: 'string', description: 'Значение $filter, например «IsFolder eq false»' },
+      select: { type: 'string', description: 'Значение $select: имена полей через запятую' },
+      top: { type: 'number', description: 'Значение $top (1…500, по умолчанию 100). Большее число уменьшается' },
+      orderby: { type: 'string', description: 'Значение $orderby' },
+      skip: { type: 'number', description: 'Значение $skip (0…10000)' },
+      action: { type: 'string', enum: ['status'], description: 'status — проверить, что стандартный OData опубликован, без чтения набора' },
+      timeout_sec: { type: 'number', description: 'Таймаут HTTP, секунды (1…120, по умолчанию 30)' },
+      root: ROOT_ARG, ...aliasProps('entity', ['set', 'name']) } } },
   { name: 'event_log', description: 'Чтение Журнала регистрации 1С (SQLite 1Cv8.lgd, текстовый *.lgp + 1Cv8.lgf) и Технологического журнала 1С (ТЖ *.log: EXCP, TDEADLOCK, TTIMEOUT, TLOCK, SDBL) без запуска конфигуратора. ' +
       'Возвращает последние ошибки выполнения, взаимоблокировки, таймауты, медленные запросы и автоматически ' +
       'привязывает серверный стек-трейс BSL ({Модуль(Строка)} и Context ТЖ Модуль : Строка) к файлам и строкам проекта.',
@@ -1836,7 +1859,9 @@ const INSTRUCTIONS = 'Поиск и статический анализ по XML
   'find_method(name, object?) — метод с кодом и перехватами CFE; module_methods(module) — состав модуля; ' +
   'find_usages(name, object?) — кто вызывает (включая Form.xml, подписки, регл. задания); ' +
   'validate_query(query) — проверить таблицы и поля запроса 1С по метаданным; ' +
-  'query_db(database, query) — прочитать строки из опубликованной базы (только ВЫБРАТЬ, лимит и таймаут обязательны, пароль не в командной строке); ' +
+  'query_db(database, query) — прочитать строки из опубликованной базы (только ВЫБРАТЬ, лимит и таймаут обязательны, пароль не в командной строке); '
+  + 'query_db с action=status — готов ли HTTP-сервис AgentQuery; '
+  + 'odata_get(database, entity) — GET стандартного OData ($filter/$select/$top/$orderby), пароль только в заголовке; ' +
   'event_log() — прочитать ошибки и стек-трейсы из Журнала регистрации 1С; ' +
   'search_code(pattern) — строка в коде.' + instructionSuffix();
 
@@ -1860,8 +1885,14 @@ function queryDbPathFilter(idx, database) {
 }
 
 async function handleCall(name, a, root) {
-  a = normalizeArgs(name, a || {});
+  const raw = a || {};
   if (!existsSync(root)) throw new Error(`каталог не найден: ${root}`);
+  if (name === 'query_db' && queryStatus(raw)) {
+    return queryDb(buildIndex(root), { ...raw, action: 'status' });
+  }
+  if (name === 'odata_get' && odataStatus(raw)) return odataGet(root, { ...raw, action: 'status' });
+  if (name === 'odata_get') return odataGet(root, normalizeArgs(name, raw));
+  a = normalizeArgs(name, raw);
   const idx = buildIndex(root, { force: name === 'index_status' && a.refresh });
   if (name === 'event_log') return readEventLog(idx, a);
   if (name === 'query_db') return queryDb(idx, { ...a, isAllowedPath: queryDbPathFilter(idx, a.database) });

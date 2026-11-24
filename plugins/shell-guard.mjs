@@ -11,11 +11,21 @@
 // - интерактивный 1cv8 / 1cv8c (ENTERPRISE, в том числе /Execute, и конфигуратор без пакетной операции);
 // - загрузка и обновление конфигурации и расширений в базу вне скриптов навыков
 //   (прямой /LoadConfigFromFiles, /LoadCfg, /UpdateDBCfg, /RestoreIB, ibcmd config load|import|apply
-//   и ibcmd extension create|update|load).
+//   и ibcmd extension create|update|load);
+// - команда, в которой виден пароль базы: значение из .v8-project.json (длина от 6),
+//   непустой -Password / --password / --db-pwd, /P с значением, curl -u user:pass, Basic,
+//   user:pass в URL. Текст отказа пароль не повторяет. Тело доверенного скрипта навыка
+//   на шаблон -Password не проверяется: параметр там объявлен, значение подставляет сам скрипт;
+// - чтение .v8-project.json, opencode.db и .env (кроме .env.example) через оболочку;
+// - Get-Content / Select-String / cat / grep / rg по BSL и XML метаданных выгрузки.
+//   Это блок, а не предупреждение: в сессиях такой обход индекса и был основной расход,
+//   предупреждение команду всё равно выполняет. В ответе назван инструмент, которым
+//   читать нужно (read с offset, find_method, find_usages, search_code, meta-info).
 //
 // Скрипты навыков (`…/skills/<навык>/scripts/…`, в том числе установленные в ~/.config/opencode/skills)
 // не проверяются на запуск платформы и загрузку: это штатный пакетный путь db-*, epf-*, erf-*.
-// COM в них всё равно запрещён.
+// COM в них всё равно запрещён. Пароль на командной строке навыка тоже запрещён:
+// навык вызывают с -Database <id>, без -Password.
 //
 // Отключение — осознанное, в конфиге проекта (переменная среды важнее, как у bsl-autocheck):
 //   .v8-project.json: "shellGuard": { "enabled": false }   или  "shellGuard": false
@@ -158,7 +168,89 @@ export function referencedScripts(command) {
 function isSearchOnly(command) {
   const t = String(command || '').trim();
   if (hasCom(t) || launchesPlatform(t) || IBCMD_MUTATION.test(t)) return false;
+  if (passwordIssue(t, []) || readsSecretFile(t) || isMetadataScan(t)) return false;
   return /^(?:rg|grep|egrep|fgrep|ag|ugrep|findstr)\b/i.test(t) || /^git\s+grep\b/i.test(t);
+}
+
+export function collectSecrets(proj) {
+  const out = [];
+  const add = (value) => {
+    if (typeof value === 'string' && value.length >= 6 && !out.includes(value)) out.push(value);
+  };
+  for (const db of proj?.databases || []) {
+    add(db?.password);
+    add(db?.repository?.password);
+    for (const ext of db?.extensions || []) add(ext?.repository?.password);
+  }
+  return out;
+}
+
+export function loadSecrets(dir) {
+  try {
+    const f = resolve(dir, '.v8-project.json');
+    if (!existsSync(f)) return [];
+    const proj = JSON.parse(stripJsonComments(readFileSync(f, 'utf8').replace(/^\uFEFF/, '')));
+    return collectSecrets(proj);
+  } catch { return []; }
+}
+
+function nonEmpty(value) {
+  const v = String(value ?? '').trim();
+  return v.length > 0 && v !== "''" && v !== '""';
+}
+
+export function passwordIssue(text, secrets = []) {
+  const s = String(text || '');
+  const param = /(?:^|[\s;&|`])(?:-{1,2}Password|-{2}password|--db-pwd)\b(?:\s*[:=]\s*|\s+)(?:"([^"]*)"|'([^']*)'|(\S+))/gi;
+  let m;
+  while ((m = param.exec(s))) {
+    if (nonEmpty(m[1] ?? m[2] ?? m[3])) return true;
+  }
+  const slashP = /(?:^|[\s;&|`])\/P(?:"([^"]*)"|'([^']*)'|(?![A-Za-z])(\S+))/g;
+  while ((m = slashP.exec(s))) {
+    if (nonEmpty(m[1] ?? m[2] ?? m[3])) return true;
+  }
+  if (/\/\/[^/\s:]+:[^/\s@]+@/.test(s)) return true;
+  if (/\bcurl\b/i.test(s)) {
+    const user = /(?:^|[\s;&|`])(?:-u|--user)\s+(?:"([^"]*)"|'([^']*)'|(\S+))/gi;
+    while ((m = user.exec(s))) {
+      const val = m[1] ?? m[2] ?? m[3] ?? '';
+      if (val.includes(':') && nonEmpty(val.split(':')[1])) return true;
+    }
+  }
+  const basic = /\bBasic\s+([A-Za-z0-9+/=]{8,})/gi;
+  while ((m = basic.exec(s))) {
+    try {
+      const decoded = Buffer.from(m[1], 'base64').toString('utf8');
+      if (/^[^\s:]{1,80}:\S{1,200}$/.test(decoded)) return true;
+    } catch { /* не base64 */ }
+  }
+  for (const secret of secrets) {
+    if (secret && s.includes(secret)) return true;
+  }
+  return false;
+}
+
+const READER = /(?:^|[\s;&|`(])(?:Get-Content|gc|type|cat|more|less|head|tail|Select-String|sls|findstr|grep|egrep|fgrep|rg|ag|bat|sqlite3)\b|ReadAllText|open\s*\(/i;
+
+export function readsSecretFile(text) {
+  const s = String(text || '');
+  if (!READER.test(s)) return false;
+  if (/\.v8-project\.json\b/i.test(s) || /\bopencode\.db\b/i.test(s)) return true;
+  const envs = s.match(/\.env(?:\.[A-Za-z0-9_-]+)?/gi) || [];
+  return envs.some((hit) => !/\.env\.example$/i.test(hit));
+}
+
+const SCANNER = /(?:^|[\s;&|`(])(?:Get-Content|gc|type|cat|more|less|Select-String|sls|findstr|grep|egrep|fgrep|rg|ag|Select-Xml)\b/i;
+const META_DIR = /(?:^|[\s"'`\\/(])(?:Catalogs|Documents|CommonModules|InformationRegisters|AccumulationRegisters|AccountingRegisters|CalculationRegisters|DataProcessors|Enums|HTTPServices|WebServices|Subsystems|Constants|CommonForms|EventSubscriptions|ScheduledJobs|ChartsOfAccounts|ChartsOfCharacteristicTypes|ChartsOfCalculationTypes|ExchangePlans|DocumentJournals|BusinessProcesses|FilterCriteria|DefinedTypes|CommonTemplates|CommonAttributes|FunctionalOptions|XDTOPackages)[\\/]/i;
+const META_FILE = /\.bsl\b|\*\.bsl\b|Configuration\.xml\b|Form\.xml\b|Rights\.xml\b/i;
+
+export function isMetadataScan(text) {
+  const s = String(text || '');
+  if (!SCANNER.test(s)) return false;
+  if (META_FILE.test(s)) return true;
+  if (META_DIR.test(s)) return true;
+  return /\bsrc[\\/]/i.test(s) && /\.xml\b/i.test(s);
 }
 
 const MESSAGES = {
@@ -169,8 +261,18 @@ const MESSAGES = {
     + 'Предприятие — навык db-run, проверка в браузере — web-test (агент 1c-tester), чтение данных — query_db. '
     + 'Пакетная сборка EPF/ERF и выгрузка — навыками, не прямым запуском.',
   load: 'shell-guard: заблокирована загрузка или обновление конфигурации и расширений в базу вне навыков db-*. '
-    + 'Это делают db-load-xml, db-load-cf, db-load-git, db-update, db-cfe-admin (агент 1c-deployer). '
+    + 'Это делают db-load-xml, db-load-cf, db-load-git, db-update, db-install-agentquery, db-cfe-admin (агент 1c-deployer). '
     + 'Прямой конфигуратор и команды автономного сервера на загрузку сюда не подходят.',
+  password: 'shell-guard: в команде пароль базы или ключ доступа (-Password, /P, --password, curl -u, Basic, user:pass в URL). '
+    + 'Навык вызывают с -Database <id>: скрипт сам читает user и password из .v8-project.json. '
+    + 'Значение пароля в этот ответ не входит.',
+  secrets: 'shell-guard: прямое чтение .v8-project.json, opencode.db или .env через оболочку заблокировано. '
+    + 'Учётные данные читают навыки и MCP (query_db, odata_get) внутри своего процесса и не печатают пароль. '
+    + '.env.example читать можно.',
+  metadata: 'shell-guard: чтение BSL или XML метаданных через Get-Content, Select-String, cat или grep не выполняется. '
+    + 'Такой обход индекса раздувает сессию, поэтому команда не запускается, а не сопровождается предупреждением. '
+    + 'Код модуля — инструмент read с offset и limit, find_method, find_usages, search_code. '
+    + 'Состав объекта — meta-info, find_object, object_refs. Повторять ту же команду не нужно.',
 };
 
 function withSwitch(message) {
@@ -199,12 +301,17 @@ function readScript(file, readFile) {
 }
 
 // null — команду можно выполнять. Иначе { code, message }.
-export function inspectCommand(command, { cwd = process.cwd(), readFile, enabled = true } = {}) {
+export function inspectCommand(command, { cwd = process.cwd(), readFile, enabled = true, secrets, projectDir } = {}) {
   if (!enabled) return null;
   const cmd = String(command || '');
   if (!cmd.trim()) return null;
-  if (isSearchOnly(cmd)) return null;
+  const secretList = Array.isArray(secrets) ? secrets : loadSecrets(projectDir || cwd);
   const chunks = [cmd, ...decodeEncoded(cmd)];
+  const line = chunks.join('\n');
+  if (passwordIssue(line, secretList)) return { code: 'password', message: withSwitch(MESSAGES.password) };
+  if (readsSecretFile(line)) return { code: 'secrets', message: withSwitch(MESSAGES.secrets) };
+  if (isMetadataScan(line)) return { code: 'metadata', message: withSwitch(MESSAGES.metadata) };
+  if (isSearchOnly(cmd)) return null;
   const untrusted = [];
   const read = readFile || ((f) => readFileSync(f, 'utf8'));
   for (const rel of referencedScripts(cmd)) {
@@ -224,6 +331,8 @@ export function inspectCommand(command, { cwd = process.cwd(), readFile, enabled
     if (body.text) untrusted.push(body.text);
   }
   const all = chunks.concat(untrusted).join('\n');
+  if (passwordIssue(all, secretList)) return { code: 'password', message: withSwitch(MESSAGES.password) };
+  if (readsSecretFile(all)) return { code: 'secrets', message: withSwitch(MESSAGES.secrets) };
   if (hasCom(all)) return { code: 'com', message: withSwitch(MESSAGES.com) };
   if (chunks.concat(untrusted).some(isLoadOrUpdate)) return { code: 'load', message: withSwitch(MESSAGES.load) };
   if (chunks.concat(untrusted).some(isInteractiveLaunch)) return { code: 'interactive', message: withSwitch(MESSAGES.interactive) };
@@ -258,6 +367,7 @@ export function createPlugin({ env = process.env, readFile } = {}) {
         cwd: cwd || root,
         readFile,
         enabled: loadGuardSettings(root, env).enabled,
+        projectDir: root,
       });
 
       if (ctx.shell && typeof ctx.shell.hook === 'function') {

@@ -64,8 +64,11 @@ def same_path(a, b):
         return False
 
 
+def _db_token(value):
+    return str(value or '').strip().lower()
+
 def find_project_database(args):
-    """Запись базы в реестре, соответствующая переданному соединению. None, если не найдена."""
+    """Запись базы в реестре. Сначала -Database (id или aliases), иначе path или server+ref."""
     pf = _sg_find_v8project(os.getcwd())
     if not pf:
         return None
@@ -73,6 +76,15 @@ def find_project_database(args):
         with open(pf, encoding="utf-8-sig") as f:
             proj = json.load(f)
     except Exception:
+        return None
+    wanted = _db_token(getattr(args, 'Database', ''))
+    if wanted:
+        for db in proj.get("databases") or []:
+            if _db_token(db.get('id')) == wanted:
+                return db
+            for alias in db.get('aliases') or []:
+                if _db_token(alias) == wanted:
+                    return db
         return None
     for db in proj.get("databases") or []:
         if args.InfoBasePath and db.get("path") and same_path(db["path"], args.InfoBasePath):

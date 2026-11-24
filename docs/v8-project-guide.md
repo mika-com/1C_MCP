@@ -30,6 +30,7 @@
       "configSrc": "src\\cf",                // каталог XML-выгрузки конфигурации (см. структуру ниже)
       "webUrl": "http://localhost:8081/dev", // URL веб-клиента (для /web-test)
       "queryUrl": "http://localhost:8081/dev/hs/agentquery/query", // query_db; пусто — webUrl + /hs/agentquery/query
+      "odataUrl": "http://localhost:8081/dev/odata/standard.odata", // odata_get; пусто — webUrl + /odata/standard.odata
 
       // Хранилище конфигурации (для /db-repo). Без него навыки группы db-* не смогут
       // работать с базой, подключённой к хранилищу: платформа не примет от них ни одной
@@ -61,7 +62,7 @@
     }
   ],
   "default": "dev",
-  "shellGuard": { "enabled": true }, // false — снять запрет COM, GUI 1cv8 и загрузки вне db-*
+  "shellGuard": { "enabled": true }, // false — снять shell-guard целиком (COM, пароль в команде, чтение секретов)
 
   // === Инструменты ===
   "webPath": "C:\\tools\\apache24",                  // каталог Apache
@@ -90,7 +91,7 @@
 | `ffmpegPath` | string | нет | `tools/ffmpeg/bin/ffmpeg.exe` | Путь к ffmpeg | Руками |
 | `tts` | object | нет | Edge TTS, DmitryNeural | Настройки озвучки видео | Руками |
 | `xsdPath` | string | нет | `.v8-xsd` | Каталог XSD-схем платформы по версиям формата (см. ниже) | Руками |
-| `shellGuard` | object / `false` | нет | включено | Запрет COM, интерактивного `1cv8` и загрузки конфигурации вне навыков `db-*`. `false` или `{ "enabled": false }` снимает запрет. Переменная `V8_SHELL_GUARD=0` важнее файла | Руками |
+| `shellGuard` | object / `false` | нет | включено | Запрет COM, интерактивного `1cv8`, загрузки конфигурации вне навыков `db-*`, команды с паролем базы, чтения `.v8-project.json` / `opencode.db` / `.env` через оболочку и `Get-Content`/`grep` по BSL и XML выгрузки. `false` или `{ "enabled": false }` снимает запрет целиком. Переменная `V8_SHELL_GUARD=0` важнее файла | Руками |
 
 ## Базы данных (`databases[]`)
 
@@ -104,7 +105,7 @@
 | `ref` | string | для server | Имя базы на сервере | `/db-list add` |
 | `v8path` | string | нет | Платформа этой базы — перекрывает корневой `v8path` (см. ниже) | Руками |
 | `user` | string | нет | Пользователь 1С | `/db-list add` или руками |
-| `password` | string | нет | Пароль. Скрипты с `-Password` (`epf-build`, `db-*` и др.) берут его из этой записи, если аргумент не передан; иначе — из `V8_DB_PASSWORD`. Явный `-Password` перекрывает запись. В командную строку пароль не передают | `/db-list add` или руками |
+| `password` | string | нет | Пароль. Скрипты с `-Password` берут его из этой записи по `-Database <id>` (или по `path` / `server`+`ref`, если id не передали); иначе — из `V8_DB_PASSWORD`. Явный `-Password` перекрывает запись, но shell-guard такую команду блокирует. В командную строку пароль не передают | `/db-list add` или руками |
 | `aliases` | string[] | нет | Альтернативные имена для обращения к базе | `/db-list add` или руками |
 | `branches` | string[] | нет | Git-ветки или glob-паттерны (`release/*`, `feature/*`) | Руками |
 | `configSrc` | string | нет | Каталог XML-выгрузки конфигурации (рекомендуется `src/cf`, см. структуру ниже). Путь относительный — от корня проекта | Руками |
@@ -112,6 +113,7 @@
 | `newObjectPosition` | `"end"`/`"byName"` | нет | Override места вставки в `<ChildObjects>` для этой базы (см. ниже) | Руками |
 | `webUrl` | string | нет | URL веб-клиента для `/web-test`. Если `queryUrl` пуст, `query_db` вызывает `<webUrl>/hs/agentquery/query` | Руками |
 | `queryUrl` | string | нет | Полный URL HTTP-сервиса чтения `query_db`. Пусто — берётся `webUrl` + `/hs/agentquery/query`. Пароль в URL не пишут: инструмент вырезает userinfo и шлёт Basic-заголовок | Руками |
+| `odataUrl` | string | нет | Корень стандартного OData для `odata_get`. Пусто — `webUrl` + `/odata/standard.odata`. Пароль в URL не пишут | Руками |
 | `repository` | object | нет | Хранилище конфигурации: `path`, `user`, `password` (см. ниже) | Руками |
 | `extensions` | array | нет | Расширения конфигурации: `name`, `src`, необязательное `repository` (см. ниже) | Руками |
 

@@ -47,7 +47,7 @@ python scripts/opencode_port.py install --global
 ```
 
 Установщик:
-- копирует 85 навыков в `<проект>/.opencode/skills/` (глобально — `~/.config/opencode/skills/`);
+- копирует навыки в `<проект>/.opencode/skills/` (глобально — `~/.config/opencode/skills/`);
 - копирует 9 агентов (`1c`, `1c-analyst`, `1c-developer`, `1c-deployer`, `1c-tester`, `1c-test-author`, `1c-explorer`, `1c-debugger`, `1c-query-expert`) в
   `.opencode/agents/` и 9 команд `/1c-analyze`, `/1c-implement`, `/1c-deploy`, `/1c-webtest`, `/1c-bdd`, `/1c-check`, `/1c-explore`, `/1c-debug`, `/1c-query`
   в `.opencode/commands/`;
@@ -62,8 +62,12 @@ python scripts/opencode_port.py install --global
   `BSL_AUTOCHECK=0` — выключить; настройки — в [README](../README.md#mcp-серверы)). Перед загрузкой в базу
   каталог всё равно проверяется навыком `bsl-check`;
 - ставит плагин `shell-guard` (`plugins/shell-guard.js`): до запуска блокирует COM любой версии, интерактивный
-  `1cv8` и загрузку конфигурации или расширений в базу вне навыков `db-*`. Снять — `"shellGuard": { "enabled": false }`
-  в `.v8-project.json` или `V8_SHELL_GUARD=0`. `--no-autocheck` этот плагин не отключает.
+  `1cv8`, загрузку конфигурации или расширений в базу вне навыков `db-*`, команду с паролем базы, чтение
+  `.v8-project.json`, `opencode.db` и `.env` через оболочку, а также `Get-Content`/`grep` по BSL и XML выгрузки
+  (в ответе — имя нужного инструмента, команда не выполняется). Снять целиком — `"shellGuard": { "enabled": false }`
+  в `.v8-project.json` или `V8_SHELL_GUARD=0`. `--no-autocheck` этот плагин не отключает. Права агентов в
+  `.opencode/agents/*.md` — правила OpenCode v2 (`action` / `resource` / `effect`, последнее совпадение побеждает).
+  Это интерфейс: на старом OpenCode v1 ключ `permissions` не действует, барьером остаётся `shell-guard`.
 
 ## Шаг 3. MCP-серверы
 
@@ -98,7 +102,25 @@ node mcp/register-opencode-mcp.mjs --vrunner  # включить vrunner-mcp (н
 
 Для длинных задач берите сильную модель. Flash и бесплатные модели выдумывают API платформы и раздувают
 контекст. В `.opencode/agents/1c.md` и `1c-developer.md` есть закомментированный `model:` — конкретная модель
-не задана, подставьте свою. Плагин `bsl-autocheck` перед командой PowerShell включает UTF-8 (`shell.create.before`);
+не задана, подставьте свою.
+
+Короткие служебные вызовы OpenCode (заголовок сессии, сжатие контекста) имеет смысл отдать более дешёвой модели.
+В v2 для этого не поле `small_model` (оно устарело и читается как модель агента `title`), а модели служебных агентов
+в `opencode.json`:
+
+```json
+{
+  "agents": {
+    "title": { "model": "<провайдер>/<дешёвая-модель>" },
+    "summary": { "model": "<провайдер>/<дешёвая-модель>" },
+    "compaction": { "model": "<провайдер>/<дешёвая-модель>" }
+  }
+}
+```
+
+Идентификатор зависит от вашего провайдера, в репозиторий он не записан. Основной агент `1c` эту модель не наследует.
+
+Плагин `bsl-autocheck` перед командой PowerShell включает UTF-8 (`shell.create.before`);
 на живом OpenCode этот хук не проверялся. Если в выводе оболочки кракозябры, не разбирайте его как данные.
 
 ## Шаг 5. Откройте проект 1С

@@ -5,6 +5,28 @@
 ## [Unreleased]
 
 ### Добавлено
+- Расширение `AgentQuery` в XML (`skills/db-install-agentquery/extension`) и навык `db-install-agentquery`:
+  загрузка HTTP-сервиса чтения в выбранную базу через `db-load-xml -Extension` (`-Database <id>`, без пароля
+  в команде). Перед загрузкой подставляются uuid языка и версия формата из выгрузки базы. `query_db` с
+  `action: "status"` отдельно сообщает: нет адреса, адрес не отвечает, сервис не опубликован (404),
+  ошибка входа (401/403), в URL попал веб-клиент.
+- MCP `odata_get` (`1c-search`): только GET стандартного OData (`entity`, `$filter`, `$select`, `$top`, `$orderby`),
+  лимит строк и таймаут обязательны, пароль из `.v8-project.json` уходит заголовком `Authorization` и не попадает
+  в ответ. `action: "status"` проверяет, что сервис опубликован. Адрес — `odataUrl` или `webUrl` + `/odata/standard.odata`.
+- Плагин `shell-guard` v2: кроме прежних запретов блокирует команду с паролем базы (`-Password`, `/P`, `curl -u`,
+  `Basic`, значение из `.v8-project.json`), чтение `.v8-project.json`, `opencode.db` и `.env` через оболочку и
+  `Get-Content`/`Select-String`/`cat`/`grep` по BSL и XML выгрузки. Последнее именно блокируется, а не предупреждается:
+  в сессиях этот обход индекса был основным расходом, в ответе назван инструмент (`read` с offset, `find_method`,
+  `find_usages`, `search_code`, `meta-info`). Отключение прежнее: `shellGuard.enabled=false` или `V8_SHELL_GUARD=0`.
+- Навыки с `-Password` принимают `-Database <id>` и сами подставляют соединение, пользователя и пароль
+  (сначала `id` и `aliases`, иначе путь или `server`+`ref`). В примерах навыков пароль больше не показан.
+- Права агентов OpenCode v2 (проверено по [документации permissions](https://opencode.ai/docs/permissions/) и
+  [миграции с v1](https://opencode.ai/docs/migrate-v1/)): у `1c` и субагентов оболочка по умолчанию спрашивает,
+  чтение git и скрипты навыков разрешены, загрузку в базу может только `1c-deployer`, исследователи не правят файлы
+  и не запускают Code Mode, чтение `.v8-project.json`, `opencode.db` и `.env` запрещено. Файл с ключом `permissions`
+  OpenCode v2 читает только как v2, старый объект `permission` рядом не дублируется. На v1 эти правила не действуют;
+  барьер — `shell-guard`. В быстром старте — как задать дешёвую модель служебным агентам `title` / `summary` /
+  `compaction` вместо устаревшего `small_model`.
 - Плагин `shell-guard`: до запуска блокирует COM-коннектор любой версии, интерактивный `1cv8` и загрузку или
   обновление конфигурации и расширений в базу вне навыков `db-*` (включая скрипт и `powershell -EncodedCommand`).
   Отключение — `"shellGuard": { "enabled": false }` в `.v8-project.json` или `V8_SHELL_GUARD=0`.

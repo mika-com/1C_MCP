@@ -10,11 +10,32 @@ permissions:
   - action: skill
     resource: "*"
     effect: allow
+  - action: shell
+    resource: "*"
+    effect: ask
+  - action: shell
+    resource: "git status *"
+    effect: allow
+  - action: shell
+    resource: "git diff *"
+    effect: allow
+  - action: shell
+    resource: "git log *"
+    effect: allow
+  - action: shell
+    resource: "git show *"
+    effect: allow
+  - action: shell
+    resource: "*skills/*/scripts/*"
+    effect: allow
   - action: skill
     resource: "db-load-*"
     effect: deny
   - action: skill
     resource: "db-update"
+    effect: deny
+  - action: skill
+    resource: "db-install-agentquery"
     effect: deny
   - action: shell
     resource: "*LoadConfigFromFiles*"
@@ -29,7 +50,31 @@ permissions:
     resource: "*db-update*"
     effect: deny
   - action: shell
+    resource: "*db-install-agentquery*"
+    effect: deny
+  - action: shell
     resource: "*web-test*"
+    effect: deny
+  - action: read
+    resource: "*.env"
+    effect: deny
+  - action: read
+    resource: "*.env.*"
+    effect: deny
+  - action: read
+    resource: "*.env.example"
+    effect: allow
+  - action: read
+    resource: "*.v8-project.json"
+    effect: deny
+  - action: read
+    resource: "*opencode.db"
+    effect: deny
+  - action: shell
+    resource: "*.v8-project.json*"
+    effect: deny
+  - action: shell
+    resource: "*opencode.db*"
     effect: deny
 ---
 
@@ -55,7 +100,7 @@ permissions:
    отчёт-список — стандартная СКД и стандартная форма, расшифровка ссылок — штатная (`DetailProcessing`), свою
    форму не строй без просьбы. `Гиперссылка` — булево, не адрес. JSON СКД и форм — в каталоге проекта (`src/`,
    `build/`), не в `%TEMP%`. COM, typelib, реестр, UI Automation и GUI `1cv8` не используй. Пароль в `-Password`
-   не передавай: скрипты берут его из `.v8-project.json` или `V8_DB_PASSWORD`. Неизвестное событие в
+   не передавай: навыку нужен `-Database <id>`, скрипт берёт пароль из `.v8-project.json`. BSL и XML не читай через `Get-Content`/`Select-String`/`grep` — `shell-guard` это блокирует и называет `read`, `find_method`, `search_code`, `meta-info`. Неизвестное событие в
    `form-compile` — ошибка `[ERROR]`, имя не подбирай.
 3. Каждую правку `.bsl`/`.os` сразу проверяет плагин `bsl-autocheck`: строки `[bsl-autocheck] …` в результате
    `edit`/`write`/`patch` — ошибки исправь немедленно, не откладывая. Если в коде или СКД добавлен/изменён запрос 1С

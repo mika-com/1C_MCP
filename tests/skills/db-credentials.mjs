@@ -36,7 +36,7 @@ mod = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(mod)
 args = SimpleNamespace(**json.loads(${JSON.stringify(JSON.stringify(code))}))
 mod.apply_db_credentials(args)
-print(json.dumps({'UserName': args.UserName, 'Password': args.Password, 'InfoBasePath': getattr(args, 'InfoBasePath', '')}))
+print(json.dumps({'UserName': args.UserName, 'Password': args.Password, 'InfoBasePath': getattr(args, 'InfoBasePath', ''), 'InfoBaseServer': getattr(args, 'InfoBaseServer', ''), 'InfoBaseRef': getattr(args, 'InfoBaseRef', '')}))
 `;
   const r = spawnSync(py, ['-c', src], { encoding: 'utf8', env: { ...process.env, ...env } });
   const lines = (r.stdout || '').trim().split('\n');
@@ -74,6 +74,16 @@ const emptyPwd = run(
 );
 ok(emptyPwd.data?.UserName === 'FromFile' && emptyPwd.data?.Password === 'env-only',
   'пустой пароль в файле не затирает V8_DB_PASSWORD', emptyPwd.out);
+
+const byId = run({ InfoBasePath: '', InfoBaseServer: '', InfoBaseRef: '', UserName: '', Password: '', Database: 'dev' });
+ok(byId.data?.UserName === 'Admin' && byId.data?.Password === 'secret-from-file' && byId.data?.InfoBasePath === base,
+  '-Database id подставляет путь и пароль', byId.out);
+ok(/database dev from \.v8-project\.json/.test(byId.out) && !byId.out.includes('secret-from-file'),
+  'в выводе есть id базы и нет пароля', byId.out);
+
+const byAlias = run({ InfoBasePath: '', InfoBaseServer: '', InfoBaseRef: '', UserName: '', Password: '', Database: 'SRV' });
+ok(byAlias.data?.UserName === 'SrvUser' && byAlias.data?.InfoBaseServer === 'srv01' && byAlias.data?.InfoBaseRef === 'accounting',
+  '-Database совпадает с id без учёта регистра и заполняет сервер', byAlias.out);
 
 const server = run({ InfoBasePath: '', InfoBaseServer: 'SRV01', InfoBaseRef: 'Accounting', UserName: '', Password: '' });
 ok(server.data?.UserName === 'SrvUser' && server.data?.Password === 'srv-secret',

@@ -163,12 +163,17 @@ export function resolveDatabase(proj, id) {
   return { db: found };
 }
 
+export function isStatusAction(args) {
+  const action = String(args?.action || '').trim().toLowerCase();
+  return action === 'status' || args?.status === true;
+}
+
 export function endpointOf(db) {
   const explicit = String(db.queryUrl || '').trim();
   const web = String(db.webUrl || '').trim().replace(/\/+$/, '');
   const raw = explicit || (web ? `${web}/hs/agentquery/query` : '');
   if (!raw) {
-    return { error: `У базы «${db.id}» не задан queryUrl и нет webUrl. Опубликуйте HTTP-сервис AgentQuery (mcp/query-db/AgentQuery.bsl) навыком db-* и укажите webUrl или queryUrl. COM и интерактивный запуск платформы для чтения не используются.` };
+    return { error: explainReadiness('no_url', db, '') };
   }
   let url;
   try { url = new URL(raw); } catch {
@@ -180,6 +185,67 @@ export function endpointOf(db) {
   url.username = '';
   url.password = '';
   return { url: url.toString() };
+}
+
+const NO_BYPASS = 'COM, curl с паролем в аргументах и 1cv8 /Execute для чтения не используются.';
+
+export function diagnoseHttp({ status = 0, body = '', error } = {}) {
+  const message = String(error?.message || (typeof error === 'string' ? error : '') || '');
+  const name = String(error?.name || '');
+  if (name === 'TimeoutError' || name === 'AbortError' || /timeout|aborted/i.test(message)) {
+    return { code: 'timeout' };
+  }
+  if (error) return { code: 'unreachable', detail: message };
+  const head = String(body || '').slice(0, 500);
+  if (status === 401 || status === 403) return { code: 'auth', detail: String(status) };
+  if (status === 404) return { code: 'not_published', detail: '404' };
+  if (status === 405) return { code: 'method', detail: '405' };
+  if (status >= 300 && status < 400) return { code: 'redirect', detail: String(status) };
+  if (status >= 200 && status < 300 && /<!doctype html|<html[\s>]/i.test(head)) return { code: 'wrong_url', detail: 'html' };
+  if (status >= 500) return { code: 'upstream', detail: String(status) };
+  return null;
+}
+
+export function explainReadiness(code, db, url, detail = '') {
+  const id = db?.id || '?';
+  const where = url ? ` Адрес: ${url}.` : '';
+  switch (code) {
+    case 'no_url':
+      return `query_db: база «${id}» — нет адреса HTTP-сервиса (пустые queryUrl и webUrl). `
+        + `Установите расширение навыком db-install-agentquery и опубликуйте базу навыком web-publish, `
+        + `затем укажите webUrl или queryUrl. ${NO_BYPASS}`;
+    case 'unreachable':
+      return `query_db: база «${id}» — адрес не отвечает${detail ? ` (${detail})` : ''}.${where} `
+        + `Веб-сервер не запущен, порт закрыт или URL неверный. Это не отсутствие расширения: `
+        + `сначала проверьте публикацию (web-publish) и queryUrl. ${NO_BYPASS}`;
+    case 'not_published':
+      return `query_db: база «${id}» — HTTP 404, сервис AgentQuery по этому адресу не опубликован.${where} `
+        + `Либо расширение не загружено (навык db-install-agentquery, агент 1c-deployer), `
+        + `либо публикация не включает HTTP-сервисы расширений (web-publish пишет publishExtensionsByDefault). `
+        + `Ожидается путь /hs/agentquery/query. ${NO_BYPASS}`;
+    case 'auth':
+      return `query_db: база «${id}» — аутентификация не прошла (HTTP ${detail || '401'}).${where} `
+        + `Проверьте user и password записи базы в .v8-project.json (в ответ они не выводятся). `
+        + `Роль AQ_ОсновнаяРоль расширения даёт Use методов сервиса и не заменяет права на данные. ${NO_BYPASS}`;
+    case 'method':
+      return `query_db: база «${id}» — HTTP 405, по адресу нет нужного метода.${where} `
+        + `Обновите расширение навыком db-install-agentquery: GET проверяет готовность, POST выполняет ВЫБРАТЬ.`;
+    case 'wrong_url':
+      return `query_db: база «${id}» — по URL пришла HTML-страница, а не JSON сервиса AgentQuery.${where} `
+        + `Обычно это веб-клиент. queryUrl должен заканчиваться на /hs/agentquery/query `
+        + `(если пуст, берётся webUrl + этот путь).`;
+    case 'redirect':
+      return `query_db: база «${id}» — HTTP ${detail || '3xx'}, редирект не выполняется, чтобы не унести заголовок авторизации.${where} `
+        + `Проверьте queryUrl.`;
+    case 'upstream':
+      return `query_db: база «${id}» — HTTP ${detail || '5xx'} от веб-сервера.${where} `
+        + `Публикация или платформа недоступны. ${NO_BYPASS}`;
+    case 'not_agent':
+      return `query_db: база «${id}» — HTTP 200, но в JSON нет service=AgentQuery.${where} `
+        + `Адрес указывает не на этот HTTP-сервис. Ожидается /hs/agentquery/query.`;
+    default:
+      return `query_db: база «${id}» — не удалось проверить сервис (${code}).${where} ${NO_BYPASS}`;
+  }
 }
 
 function cell(value) {
@@ -199,10 +265,22 @@ async function defaultFetch(url, init) {
   return globalThis.fetch(url, init);
 }
 
+function authHeaders(db) {
+  const user = db.user == null ? '' : String(db.user);
+  const password = db.password == null ? '' : String(db.password);
+  const token = Buffer.from(`${user}:${password}`, 'utf8').toString('base64');
+  return { token, headers: { Accept: 'application/json', Authorization: `Basic ${token}` } };
+}
+
+async function readBody(response) {
+  try { return await response.text(); } catch (e) { return { error: e }; }
+}
+
 export async function queryDb(idx, args = {}, deps = {}) {
   const root = idx?.root;
   if (!root) return 'query_db: не передан корень проекта.';
-  if (!idx.configs?.length) {
+  const status = isStatusAction(args);
+  if (!status && !idx.configs?.length) {
     return `В ${root} не найдено выгрузок 1С (Configuration.xml). query_db не выполняет запрос, пока validate_query не по чему проверять текст.`;
   }
   const loaded = loadProject(root);
@@ -211,6 +289,7 @@ export async function queryDb(idx, args = {}, deps = {}) {
   if (resolved.error) return resolved.error;
   const db = resolved.db;
   const secrets = [db.password, db.user && db.password ? Buffer.from(`${db.user}:${db.password}`, 'utf8').toString('base64') : ''].filter(Boolean);
+  if (status) return probeStatus(db, args, deps, secrets);
 
   const check = assertReadOnlyQuery(args.query);
   if (!check.ok) return check.message;
@@ -227,37 +306,34 @@ export async function queryDb(idx, args = {}, deps = {}) {
   if (ep.error) return ep.error;
 
   const fetchImpl = deps.fetchImpl || defaultFetch;
-  const user = db.user == null ? '' : String(db.user);
-  const password = db.password == null ? '' : String(db.password);
-  const token = Buffer.from(`${user}:${password}`, 'utf8').toString('base64');
+  const { headers } = authHeaders(db);
   const timeoutMs = timeoutSec * 1000;
   let response;
   try {
     response = await fetchImpl(ep.url, {
       method: 'POST',
-      headers: {
-        'Content-Type': 'application/json; charset=utf-8',
-        Accept: 'application/json',
-        Authorization: `Basic ${token}`,
-      },
+      headers: { ...headers, 'Content-Type': 'application/json; charset=utf-8' },
       body: JSON.stringify({ query: limited, limit, timeoutSec }),
+      redirect: 'manual',
       signal: AbortSignal.timeout(timeoutMs),
     });
   } catch (e) {
-    const aborted = e?.name === 'TimeoutError' || e?.name === 'AbortError' || /timeout|aborted/i.test(String(e?.message || ''));
-    if (aborted) {
+    const kind = diagnoseHttp({ error: e });
+    if (kind?.code === 'timeout') {
       return redactSecrets(`query_db: база «${db.id}», таймаут ${timeoutSec} с — ответ не получен. Запрос только на чтение, повтор сам не запускается.`, secrets);
     }
-    return redactSecrets(`query_db: нет ответа HTTP-сервиса базы «${db.id}» (${e.message}). Проверьте публикацию AgentQuery. Пароль в вывод не попадает.`, secrets);
+    return redactSecrets(explainReadiness('unreachable', db, ep.url, e.message), secrets);
   }
 
-  let raw = '';
-  try { raw = await response.text(); } catch (e) {
-    return redactSecrets(`query_db: ответ базы «${db.id}» не прочитан (${e.message}).`, secrets);
+  const got = await readBody(response);
+  if (got && typeof got === 'object' && got.error) {
+    return redactSecrets(`query_db: ответ базы «${db.id}» не прочитан (${got.error.message}).`, secrets);
   }
-  raw = redactSecrets(raw, secrets);
+  let raw = redactSecrets(got, secrets);
   let data = null;
   try { data = JSON.parse(raw); } catch { data = null; }
+  const kind = diagnoseHttp({ status: response.status, body: raw });
+  if (kind) return redactSecrets(explainReadiness(kind.code, db, ep.url, kind.detail), secrets);
   if (!response.ok) {
     const err = data && typeof data.error === 'string' ? data.error : raw.slice(0, 500);
     return redactSecrets(`query_db: HTTP ${response.status} от базы «${db.id}».\n${err}`, secrets);
@@ -274,4 +350,46 @@ export async function queryDb(idx, args = {}, deps = {}) {
     formatTable(columns, rows),
   ];
   return redactSecrets(lines.join('\n'), secrets);
+}
+
+async function probeStatus(db, args, deps, secrets) {
+  const ep = endpointOf(db);
+  if (ep.error) return redactSecrets(ep.error, secrets);
+  const timeoutSec = clampTimeoutSec(args.timeout_sec ?? args.timeoutSec);
+  const fetchImpl = deps.fetchImpl || defaultFetch;
+  const { headers } = authHeaders(db);
+  let response;
+  try {
+    response = await fetchImpl(ep.url, {
+      method: 'GET',
+      headers,
+      redirect: 'manual',
+      signal: AbortSignal.timeout(timeoutSec * 1000),
+    });
+  } catch (e) {
+    const kind = diagnoseHttp({ error: e });
+    if (kind?.code === 'timeout') {
+      return redactSecrets(`query_db: база «${db.id}», таймаут ${timeoutSec} с — проверка готовности не дождалась ответа.`, secrets);
+    }
+    return redactSecrets(explainReadiness(kind?.code || 'unreachable', db, ep.url, e.message), secrets);
+  }
+  const got = await readBody(response);
+  if (got && typeof got === 'object' && got.error) {
+    return redactSecrets(`query_db: ответ базы «${db.id}» не прочитан (${got.error.message}).`, secrets);
+  }
+  const raw = redactSecrets(got, secrets);
+  const kind = diagnoseHttp({ status: response.status, body: raw });
+  if (kind) return redactSecrets(explainReadiness(kind.code, db, ep.url, kind.detail), secrets);
+  if (!response.ok) {
+    return redactSecrets(`query_db: HTTP ${response.status} от базы «${db.id}» при проверке готовности.\n${raw.slice(0, 500)}`, secrets);
+  }
+  let data = null;
+  try { data = JSON.parse(raw); } catch { data = null; }
+  if (!data || data.service !== 'AgentQuery' || data.ok !== true) {
+    return redactSecrets(explainReadiness('not_agent', db, ep.url), secrets);
+  }
+  return redactSecrets(
+    `query_db: база «${db.id}» готова. Сервис AgentQuery отвечает (только ВЫБРАТЬ). Адрес: ${ep.url}.`,
+    secrets,
+  );
 }

@@ -8,7 +8,7 @@ argument-hint: "[database]"
 
 > **OpenCode:** `{SKILL_DIR}` в командах — каталог текущего навыка. Подставь абсолютный путь к каталогу навыка, если среда не делает это автоматически. Команды запускай из корня проекта. Если `powershell.exe` недоступен (Linux/macOS), запусти одноимённый `.py`-скрипт через `python` (или `python3`) с теми же параметрами.
 
-> **Пароль (OpenCode).** Не передавай `-Password` (и `/P`, `--password`) в командной строке: скрипт берёт пользователя и пароль из записи базы в `.v8-project.json` (совпадение по `path` или `server`+`ref`), а если записи нет — из `V8_DB_USER` / `V8_DB_PASSWORD`. Явный `-Password` по-прежнему перекрывает файл и переменную.
+> **Пароль (OpenCode).** Не передавай `-Password`, `/P`, `--password`, `curl -u` и заголовок `Basic`. Передай `-Database <id>`: скрипт подставит путь или сервер, пользователя и пароль из записи `databases[]` (сначала `id` и `aliases`, иначе `path` или `server`+`ref`). Нет записи — `V8_DB_USER` / `V8_DB_PASSWORD`. Явный `-Password` перекрывает файл, но shell-guard его блокирует. Значение пароля в команду и в ответ не подставляй.
 
 Генерирует `default.vrd`, настраивает `httpd.conf` и запускает Apache HTTP Server для веб-доступа к информационной базе. При необходимости скачивает portable Apache. Идемпотентный — повторный вызов обновляет конфигурацию.
 
@@ -29,10 +29,9 @@ argument-hint: "[database]"
 3. Если не указал — сопоставь текущую ветку Git с `databases[].branches`
 4. Если ветка не совпала — используй `default`
 
-**ОБЯЗАТЕЛЬНО передавай все найденные параметры:**
-- **`-V8Path`** — `v8path` найденной записи базы, иначе корневой `v8path`. Не задан ни там, ни там — не передавай, но версия платформы тогда выберется автоматически и может оказаться не той
-- **`-UserName`** — из поля `user` найденной записи базы (если есть)
-- **`-Password`** — из поля `password` найденной записи базы (если есть)
+**Передавай так:**
+- **`-Database <id>`** — достаточно id базы. Скрипт сам возьмёт путь или сервер, пользователя и пароль. `-Password` и `-UserName` не передавай
+- **`-V8Path`** — только если нужно перекрыть `v8path` записи. Иначе не передавай: скрипт возьмёт платформу сам
 - **`-ApachePath`** — из `webPath` в `.v8-project.json` (если есть)
 
 Если файла `.v8-project.json` нет — предложи `/db-list add`.
@@ -53,6 +52,7 @@ powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/web-publish.ps1" <пара�
 | `-InfoBaseRef <имя>` | * | Имя базы на сервере |
 | `-UserName <имя>` | нет | Имя пользователя |
 | `-Password <пароль>` | нет | Пароль |
+| `-Database <id>` | нет | id базы в `.v8-project.json`: путь или сервер, пользователь и пароль берутся из записи. `-Password` не передавать |
 | `-AppName <имя>` | нет | Имя публикации (по умолчанию из имени каталога базы) |
 | `-ApachePath <путь>` | нет | Корень Apache (по умолчанию `tools/apache24`) |
 | `-Port <порт>` | нет | Порт (по умолчанию — первый свободный, начиная с `8081`; итоговый URL печатается) |
@@ -97,7 +97,7 @@ powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/web-publish.ps1" -InfoBaseP
 powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/web-publish.ps1" -InfoBasePath "C:\Bases\MyDB" -AppName "mydb" -Port 9090
 
 # Серверная база
-powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/web-publish.ps1" -InfoBaseServer "srv01" -InfoBaseRef "MyDB" -UserName "Admin" -Password "secret"
+powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/web-publish.ps1" -InfoBaseServer "srv01" -InfoBaseRef "MyDB"
 
 # Ручной режим (только инструкция)
 powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/web-publish.ps1" -InfoBasePath "C:\Bases\MyDB" -Manual

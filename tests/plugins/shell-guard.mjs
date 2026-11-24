@@ -73,7 +73,7 @@ console.log('разбор команд:');
   ok(G.inspectCommand('ibcmd infobase config export --out=C:\\out') === null, 'ibcmd config export не блокируется');
   ok(G.inspectCommand('ibcmd infobase dump C:\\a.dt') === null, 'ibcmd infobase dump не блокируется');
 
-  ok(G.inspectCommand(`powershell -File "${skill}"`, { cwd: dir }) === null, 'навык db-load-xml запускать можно');
+  ok(G.inspectCommand(`powershell -File "${skill}" -Database dev`, { cwd: dir }) === null, 'навык db-load-xml с -Database запускать можно');
   ok(G.inspectCommand(`powershell -File "${evil}"`, { cwd: dir })?.code === 'com', 'самодельный скрипт с V85.COMConnector блокируется');
   ok(G.inspectCommand(`powershell.exe -NoProfile -File "${evilLoad}"`, { cwd: dir })?.code === 'load', 'копия загрузки вне skills/ блокируется');
 
@@ -102,6 +102,36 @@ console.log('конфиг:');
   writeFileSync(join(dir, '.v8-project.json'), '{ "shellGuard": false }\n');
   ok(G.loadGuardSettings(dir, {}).enabled === false, 'shellGuard: false');
   ok(G.loadGuardSettings(join(dir, 'missing'), {}).enabled === true, 'без файла защита включена');
+}
+
+console.log('пароль, секреты и обход индекса:');
+{
+  const secret = 'S3cret-Long-Password';
+  const proj = join(dir, 'proj');
+  mkdirSync(proj, { recursive: true });
+  writeFileSync(join(proj, '.v8-project.json'), JSON.stringify({
+    databases: [{ id: 'dev', password: secret, repository: { password: 'Repo-Secret-Value' } }],
+  }));
+  const opts = { cwd: proj, projectDir: proj };
+  const leaked = G.inspectCommand(`powershell -File "${skill}" -Password "${secret}"`, opts);
+  ok(leaked?.code === 'password' && !leaked.message.includes(secret), ' -Password с значением блокируется и не эхом', leaked?.message);
+  ok(G.inspectCommand('curl -u Admin:hunter2 http://localhost/odata', opts)?.code === 'password', 'curl -u user:pass');
+  const basic = Buffer.from('Admin:hunter2', 'utf8').toString('base64');
+  ok(G.inspectCommand(`curl -H "Authorization: Basic ${basic}" http://localhost/hs`, opts)?.code === 'password', 'заголовок Basic');
+  ok(G.inspectCommand(`echo ${secret}`, opts)?.code === 'password' && !String(G.inspectCommand(`echo ${secret}`, opts).message).includes(secret), 'литерал пароля из .v8-project.json');
+  ok(G.inspectCommand(`powershell -File "${skill}" -Database dev`, opts) === null, '-Database без пароля не блокируется');
+  ok(G.inspectCommand('Get-Content .v8-project.json', opts)?.code === 'secrets', 'Get-Content .v8-project.json');
+  ok(G.inspectCommand('sqlite3 .opencode/opencode.db .dump', opts)?.code === 'secrets', 'чтение opencode.db');
+  ok(G.inspectCommand('cat .env', opts)?.code === 'secrets', 'cat .env');
+  ok(G.inspectCommand('cat .env.example', opts) === null, '.env.example не секрет');
+  const bsl = 'Get-Content src\\CommonModules\\Продажи\\Ext\\Module.bsl';
+  const hint = G.inspectCommand(bsl, opts);
+  ok(hint?.code === 'metadata' && /find_method/.test(hint.message) && /search_code/.test(hint.message) && /meta-info/.test(hint.message), 'Get-Content .bsl блокируется с подсказкой', hint?.message);
+  ok(G.inspectCommand('rg -n "Процедура" src/cf/Catalogs/Номенклатура.xml', opts)?.code === 'metadata', 'rg по XML метаданных');
+  ok(G.inspectCommand('rg -n shell-guard plugins docs', opts) === null, 'rg по docs и plugins не блокируется');
+  ok(G.inspectCommand('git diff -- src/CommonModules/Продажи/Ext/Module.bsl', opts) === null, 'git diff файла .bsl не блокируется');
+  writeFileSync(join(proj, '.v8-project.json'), JSON.stringify({ shellGuard: { enabled: false }, databases: [{ id: 'dev', password: secret }] }));
+  ok(G.inspectCommand(`curl -u Admin:${secret} http://x`, { ...opts, enabled: false }) === null, 'V8_SHELL_GUARD выключен — пароль не проверяется');
 }
 
 console.log('плагин:');
