@@ -334,13 +334,14 @@ FORM_EVENT_NOTES = {
     'form-compile': '### События',
 }
 PASSWORD_NOTE = (
-    '> **Пароль (OpenCode).** Не передавай `-Password` (и `/P`, `--password`) в командной строке: '
-    'скрипт берёт пользователя и пароль из записи базы в `.v8-project.json` (совпадение по `path` или '
-    '`server`+`ref`), а если записи нет — из `V8_DB_USER` / `V8_DB_PASSWORD`. Явный `-Password` по-прежнему '
-    'перекрывает файл и переменную.\n\n'
+    '> **Пароль (OpenCode).** Не передавай `-Password`, `-UserName` вместе с паролем, `/P`, `--password`, '
+    '`curl -u` и заголовок `Basic`. Передай `-Database <id>`: скрипт подставит путь или сервер, пользователя '
+    'и пароль из записи `databases[]` (сначала `id` и `aliases`, иначе `path` или `server`+`ref`). '
+    'Нет записи — `V8_DB_USER` / `V8_DB_PASSWORD`. Явный `-Password` перекрывает файл, но shell-guard его '
+    'блокирует. Значение пароля в команду и в ответ не подставляй.\n\n'
 )
 # Свои навыки порта (их нет в upstream): хранятся прямо в skills/ и сохраняются при пересборке
-OWN_SKILL_NAMES = ('1c-test', 'bsl-check', 'print-form', 'vrunner')
+OWN_SKILL_NAMES = ('1c-test', 'bsl-check', 'print-form', 'vrunner', 'db-install-agentquery')
 OVERLAY_FILES = (
     'web-test/scripts/cli/commands/open.mjs',
     'web-test/scripts/cli/keepalive.mjs',
@@ -843,14 +844,28 @@ def patch_form_compile_events(skills_dir):
 # Пароль базы: .v8-project.json или V8_DB_USER / V8_DB_PASSWORD, не командная строка
 # ---------------------------------------------------------------------------
 _CRED_PY_FN = '''
+def _apply_database_connection(args, db, filled):
+    """-Database задаёт соединение из записи. Явные path/server не затирают пустую запись."""
+    if not getattr(args, 'Database', None) or not db:
+        return
+    kind = str(db.get('type') or '').strip().lower()
+    if db.get('path') and kind != 'server':
+        args.InfoBasePath = str(db['path'])
+    elif db.get('server') and db.get('ref'):
+        args.InfoBaseServer = str(db['server'])
+        args.InfoBaseRef = str(db['ref'])
+    elif db.get('path'):
+        args.InfoBasePath = str(db['path'])
+    filled.append('database ' + str(db.get('id') or args.Database) + ' from .v8-project.json')
+
 def apply_db_credentials(args):
     """OpenCode: -UserName/-Password не обязательны. Источник (по убыванию): явный аргумент,
-    запись databases[] в .v8-project.json (path или server+ref), переменные V8_DB_USER / V8_DB_PASSWORD.
+    -Database (id или aliases в databases[]), затем path или server+ref, затем V8_DB_USER / V8_DB_PASSWORD.
     Значение пароля в вывод не попадает."""
     if not hasattr(args, 'Password') and not hasattr(args, 'UserName'):
         return args
     # Снять окружающие кавычки до сопоставления с .v8-project.json (clean_path ещё впереди).
-    for _attr in ('InfoBasePath', 'InfoBaseServer', 'InfoBaseRef'):
+    for _attr in ('InfoBasePath', 'InfoBaseServer', 'InfoBaseRef', 'Database'):
         _v = getattr(args, _attr, '') or ''
         if isinstance(_v, str):
             _v = _v.strip()
@@ -862,7 +877,11 @@ def apply_db_credentials(args):
         db = find_project_database(args)
     except Exception:
         db = None
+    if getattr(args, 'Database', None) and not db:
+        print('Error: база с id «%s» не найдена в .v8-project.json.' % args.Database, file=sys.stderr)
+        sys.exit(1)
     filled = []
+    _apply_database_connection(args, db, filled)
     if not getattr(args, 'UserName', None):
         user, src = '', ''
         if db and db.get('user'):
@@ -900,11 +919,20 @@ _CRED_PS_ANCHOR = '''            if ($db.server.Equals($InfoBaseServer, [System.
 }
 '''
 _CRED_PS_CALL = r'''
-# OpenCode: пользователь и пароль — из .v8-project.json или V8_DB_USER / V8_DB_PASSWORD,
-# если их не передали в командной строке. Явные -UserName/-Password сильнее. Значение пароля не печатаем.
+# OpenCode: -Database <id> подставляет соединение, пользователя и пароль.
+# Явный -Password сильнее, но в команду его не передают. Значение пароля не печатаем.
+$dbRecCred = Find-ProjectDatabase
+$credFrom = @()
+if ($Database) {
+    if (-not $dbRecCred) { Write-Host "Error: база с id '$Database' не найдена в .v8-project.json." -ForegroundColor Red; exit 1 }
+    if ($dbRecCred.path -and [string]$dbRecCred.type -ne 'server') { $InfoBasePath = [string]$dbRecCred.path }
+    elseif ($dbRecCred.server -and $dbRecCred.ref) {
+        $InfoBaseServer = [string]$dbRecCred.server
+        $InfoBaseRef = [string]$dbRecCred.ref
+    } elseif ($dbRecCred.path) { $InfoBasePath = [string]$dbRecCred.path }
+    $credFrom += ('database ' + [string]$dbRecCred.id + ' from .v8-project.json')
+}
 if (-not $UserName -or -not $Password) {
-    $dbRecCred = Find-ProjectDatabase
-    $credFrom = @()
     if (-not $UserName) {
         if ($dbRecCred -and $dbRecCred.user) { $UserName = [string]$dbRecCred.user; $credFrom += 'user from .v8-project.json' }
         elseif ($env:V8_DB_USER) { $UserName = $env:V8_DB_USER; $credFrom += 'user from V8_DB_USER' }
@@ -913,9 +941,78 @@ if (-not $UserName -or -not $Password) {
         if ($dbRecCred -and $dbRecCred.password) { $Password = [string]$dbRecCred.password; $credFrom += 'password from .v8-project.json' }
         elseif ($env:V8_DB_PASSWORD) { $Password = $env:V8_DB_PASSWORD; $credFrom += 'password from V8_DB_PASSWORD' }
     }
-    if ($credFrom.Count) { Write-Host ("Infobase credentials (" + ($credFrom -join ', ') + ") — not passed on the command line.") }
 }
+if ($credFrom.Count) { Write-Host ("Infobase credentials (" + ($credFrom -join ', ') + ") — not passed on the command line.") }
 
+'''
+
+
+_FIND_PY_OLD = '''def find_project_database(args):
+    """Запись базы в реестре, соответствующая переданному соединению. None, если не найдена."""
+    pf = _sg_find_v8project(os.getcwd())
+    if not pf:
+        return None
+    try:
+        with open(pf, encoding="utf-8-sig") as f:
+            proj = json.load(f)
+    except Exception:
+        return None
+    for db in proj.get("databases") or []:
+'''
+
+_FIND_PY_NEW = '''def _db_token(value):
+    return str(value or '').strip().lower()
+
+def find_project_database(args):
+    """Запись базы в реестре. Сначала -Database (id или aliases), иначе path или server+ref."""
+    pf = _sg_find_v8project(os.getcwd())
+    if not pf:
+        return None
+    try:
+        with open(pf, encoding="utf-8-sig") as f:
+            proj = json.load(f)
+    except Exception:
+        return None
+    wanted = _db_token(getattr(args, 'Database', ''))
+    if wanted:
+        for db in proj.get("databases") or []:
+            if _db_token(db.get('id')) == wanted:
+                return db
+            for alias in db.get('aliases') or []:
+                if _db_token(alias) == wanted:
+                    return db
+        return None
+    for db in proj.get("databases") or []:
+'''
+
+_FIND_PS_OLD = '''function Find-ProjectDatabase {
+    # Запись базы в реестре, соответствующая переданному соединению. $null, если не найдена.
+    $pf = Find-V8Project (Get-Location).Path
+    if (-not $pf) { return $null }
+    try { $proj = Get-Content $pf -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return $null }
+    if (-not $proj.databases) { return $null }
+    foreach ($db in $proj.databases) {
+'''
+
+_FIND_PS_NEW = '''function Find-ProjectDatabase {
+    # Запись базы: сначала -Database (id или aliases), иначе path или server+ref.
+    $pf = Find-V8Project (Get-Location).Path
+    if (-not $pf) { return $null }
+    try { $proj = Get-Content $pf -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return $null }
+    if (-not $proj.databases) { return $null }
+    $wanted = ''
+    $var = Get-Variable -Name Database -Scope Script -ErrorAction SilentlyContinue
+    if ($var -and $var.Value) { $wanted = ([string]$var.Value).Trim() }
+    if ($wanted) {
+        foreach ($db in @($proj.databases)) {
+            if ($db.id -and [string]$db.id.Equals($wanted, [System.StringComparison]::OrdinalIgnoreCase)) { return $db }
+            foreach ($alias in @($db.aliases)) {
+                if ($alias -and [string]$alias.Equals($wanted, [System.StringComparison]::OrdinalIgnoreCase)) { return $db }
+            }
+        }
+        return $null
+    }
+    foreach ($db in $proj.databases) {
 '''
 
 
@@ -926,6 +1023,18 @@ def patch_db_credentials(skills_dir):
     for path in py_files:
         raw = open(path, 'rb').read()
         text = raw.decode('utf-8')
+        orig = text
+        if _FIND_PY_OLD in text:
+            text = text.replace(_FIND_PY_OLD, _FIND_PY_NEW, 1)
+        if re.search(r'''add_argument\(\s*['"]-Password['"]''', text) and not re.search(
+                r'''add_argument\(\s*['"]-Database['"]''', text):
+            text2, n = re.subn(
+                r'''(?m)^(?P<ind>[ \t]*)parser\.add_argument\(\s*['"]-Password['"][^\n]*\n''',
+                lambda m: m.group(0) + m.group('ind')
+                + 'parser.add_argument("-Database", default="", help="id базы в .v8-project.json: соединение и пароль берутся из записи")\n',
+                text, count=1)
+            if n == 1:
+                text = text2
         if not re.search(r'''add_argument\(\s*['"]-Password['"]''', text):
             # Раньше ловили упоминание -Password в тексте ошибки. Функцию, вставленную так, убираем.
             if _CRED_PY_FN in text:
@@ -934,8 +1043,10 @@ def patch_db_credentials(skills_dir):
                 patched.append(os.path.relpath(path, skills_dir))
             continue
         if 'def find_project_database' not in text:
+            if text != orig:
+                open(path, 'wb').write(text.encode('utf-8'))
+                patched.append(os.path.relpath(path, skills_dir))
             continue
-        orig = text
         # Обновить уже вставленную функцию, если в ней ещё нет снятия кавычек.
         if 'def apply_db_credentials' in text and 'chr(34)' not in text:
             text2, n = re.subn(
@@ -965,9 +1076,28 @@ def patch_db_credentials(skills_dir):
         raw = open(path, 'rb').read()
         bom = raw.startswith(b'\xef\xbb\xbf')
         text = raw.decode('utf-8-sig')
+        if _FIND_PS_OLD in text:
+            text = text.replace(_FIND_PS_OLD, _FIND_PS_NEW, 1)
+        if '[string]$Password,' in text and '[string]$Database' not in text:
+            text = text.replace(
+                '[string]$Password,\n',
+                '[string]$Password,\n\n    [Parameter(Mandatory=$false)]\n    [string]$Database,\n',
+                1)
         if '[string]$Password' not in text or 'function Find-ProjectDatabase' not in text:
+            if text != raw.decode('utf-8-sig'):
+                data = text.encode('utf-8')
+                if bom:
+                    data = b'\xef\xbb\xbf' + data
+                open(path, 'wb').write(data)
+                patched.append(os.path.relpath(path, skills_dir))
             continue
-        if 'OpenCode: пользователь и пароль' in text:
+        if 'OpenCode: пользователь и пароль' in text or '-Database <id> подставляет' in text:
+            if text != raw.decode('utf-8-sig'):
+                data = text.encode('utf-8')
+                if bom:
+                    data = b'\xef\xbb\xbf' + data
+                open(path, 'wb').write(data)
+                patched.append(os.path.relpath(path, skills_dir))
             continue
         text2, one = _replace_once(text, _CRED_PS_ANCHOR, _CRED_PS_ANCHOR + _CRED_PS_CALL, os.path.basename(path) + ' cred ps')
         if not one:

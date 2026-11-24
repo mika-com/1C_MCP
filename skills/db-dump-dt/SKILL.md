@@ -8,7 +8,7 @@ argument-hint: "[database] [output.dt]"
 
 > **OpenCode:** `{SKILL_DIR}` в командах — каталог текущего навыка. Подставь абсолютный путь к каталогу навыка, если среда не делает это автоматически. Команды запускай из корня проекта. Если `powershell.exe` недоступен (Linux/macOS), запусти одноимённый `.py`-скрипт через `python` (или `python3`) с теми же параметрами.
 
-> **Пароль (OpenCode).** Не передавай `-Password` (и `/P`, `--password`) в командной строке: скрипт берёт пользователя и пароль из записи базы в `.v8-project.json` (совпадение по `path` или `server`+`ref`), а если записи нет — из `V8_DB_USER` / `V8_DB_PASSWORD`. Явный `-Password` по-прежнему перекрывает файл и переменную.
+> **Пароль (OpenCode).** Не передавай `-Password`, `/P`, `--password`, `curl -u` и заголовок `Basic`. Передай `-Database <id>`: скрипт подставит путь или сервер, пользователя и пароль из записи `databases[]` (сначала `id` и `aliases`, иначе `path` или `server`+`ref`). Нет записи — `V8_DB_USER` / `V8_DB_PASSWORD`. Явный `-Password` перекрывает файл, но shell-guard его блокирует. Значение пароля в команду и в ответ не подставляй.
 
 Выгружает информационную базу целиком (конфигурация **+ данные**) в DT-файл — полный снимок ИБ.
 
@@ -50,6 +50,7 @@ powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/db-dump-dt.ps1" <парам
 | `-InfoBaseRef <имя>` | * | Имя базы на сервере |
 | `-UserName <имя>` | нет | Имя пользователя |
 | `-Password <пароль>` | нет | Пароль |
+| `-Database <id>` | нет | id базы в `.v8-project.json`: путь или сервер, пользователь и пароль берутся из записи. `-Password` не передавать |
 | `-OutputFile <путь>` | да | Путь к выходному DT-файлу |
 | `-AdditionalV8Arguments <список>` | нет | Доп. аргументы запуска `1cv8.exe` через запятую, напр. `/UseHwLicenses+` |
 | `-AdditionalIbcmdArguments <список>` | нет | Доп. аргументы `ibcmd` через запятую, в форме `--ключ=значение` |
@@ -63,7 +64,7 @@ powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/db-dump-dt.ps1" <парам
 powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/db-dump-dt.ps1" -InfoBasePath "C:\Bases\MyDB" -UserName "Admin" -OutputFile "C:\backup\base.dt"
 
 # Серверная база
-powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/db-dump-dt.ps1" -InfoBaseServer "srv01" -InfoBaseRef "MyApp_Dev" -UserName "Admin" -Password "secret" -OutputFile "base.dt"
+powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/db-dump-dt.ps1" -InfoBaseServer "srv01" -InfoBaseRef "MyApp_Dev" -OutputFile "base.dt"
 ```
 
 ## Связанные навыки

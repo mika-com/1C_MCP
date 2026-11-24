@@ -9,7 +9,7 @@ argument-hint: <input.dt> [database]
 
 > **OpenCode:** `{SKILL_DIR}` в командах — каталог текущего навыка. Подставь абсолютный путь к каталогу навыка, если среда не делает это автоматически. Команды запускай из корня проекта. Если `powershell.exe` недоступен (Linux/macOS), запусти одноимённый `.py`-скрипт через `python` (или `python3`) с теми же параметрами.
 
-> **Пароль (OpenCode).** Не передавай `-Password` (и `/P`, `--password`) в командной строке: скрипт берёт пользователя и пароль из записи базы в `.v8-project.json` (совпадение по `path` или `server`+`ref`), а если записи нет — из `V8_DB_USER` / `V8_DB_PASSWORD`. Явный `-Password` по-прежнему перекрывает файл и переменную.
+> **Пароль (OpenCode).** Не передавай `-Password`, `/P`, `--password`, `curl -u` и заголовок `Basic`. Передай `-Database <id>`: скрипт подставит путь или сервер, пользователя и пароль из записи `databases[]` (сначала `id` и `aliases`, иначе `path` или `server`+`ref`). Нет записи — `V8_DB_USER` / `V8_DB_PASSWORD`. Явный `-Password` перекрывает файл, но shell-guard его блокирует. Значение пароля в команду и в ответ не подставляй.
 
 Восстанавливает информационную базу целиком (конфигурация **+ данные**) из DT-файла.
 
@@ -64,6 +64,7 @@ powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/db-load-dt.ps1" <парам
 | `-InfoBaseRef <имя>` | * | Имя базы на сервере |
 | `-UserName <имя>` | нет | Имя пользователя |
 | `-Password <пароль>` | нет | Пароль |
+| `-Database <id>` | нет | id базы в `.v8-project.json`: путь или сервер, пользователь и пароль берутся из записи. `-Password` не передавать |
 | `-InputFile <путь>` | да | Путь к DT-файлу |
 | `-JobsCount <N>` | нет | Число фоновых заданий загрузки (0 = по числу процессоров) |
 | `-UnlockCode <код>` | нет | Код разблокировки (`/UC`), если заблокировано начало сеансов |
@@ -84,7 +85,7 @@ powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/db-load-dt.ps1" <парам
 powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/db-load-dt.ps1" -InfoBasePath "C:\Bases\MyDB" -UserName "Admin" -InputFile "C:\backup\base.dt"
 
 # Серверная база с ускорением загрузки
-powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/db-load-dt.ps1" -InfoBaseServer "srv01" -InfoBaseRef "MyApp_Test" -UserName "Admin" -Password "secret" -InputFile "base.dt" -JobsCount 4
+powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/db-load-dt.ps1" -InfoBaseServer "srv01" -InfoBaseRef "MyApp_Test" -InputFile "base.dt" -JobsCount 4
 ```
 
 ## Связанные навыки

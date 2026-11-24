@@ -8,7 +8,7 @@ argument-hint: "[database]"
 
 > **OpenCode:** `{SKILL_DIR}` в командах — каталог текущего навыка. Подставь абсолютный путь к каталогу навыка, если среда не делает это автоматически. Команды запускай из корня проекта. Если `powershell.exe` недоступен (Linux/macOS), запусти одноимённый `.py`-скрипт через `python` (или `python3`) с теми же параметрами.
 
-> **Пароль (OpenCode).** Не передавай `-Password` (и `/P`, `--password`) в командной строке: скрипт берёт пользователя и пароль из записи базы в `.v8-project.json` (совпадение по `path` или `server`+`ref`), а если записи нет — из `V8_DB_USER` / `V8_DB_PASSWORD`. Явный `-Password` по-прежнему перекрывает файл и переменную.
+> **Пароль (OpenCode).** Не передавай `-Password`, `/P`, `--password`, `curl -u` и заголовок `Basic`. Передай `-Database <id>`: скрипт подставит путь или сервер, пользователя и пароль из записи `databases[]` (сначала `id` и `aliases`, иначе `path` или `server`+`ref`). Нет записи — `V8_DB_USER` / `V8_DB_PASSWORD`. Явный `-Password` перекрывает файл, но shell-guard его блокирует. Значение пароля в команду и в ответ не подставляй.
 
 Запускает информационную базу в режиме 1С:Предприятие (пользовательский режим).
 
@@ -48,6 +48,7 @@ powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/db-run.ps1" <парамет
 | `-InfoBaseRef <имя>` | * | Имя базы на сервере |
 | `-UserName <имя>` | нет | Имя пользователя |
 | `-Password <пароль>` | нет | Пароль |
+| `-Database <id>` | нет | id базы в `.v8-project.json`: путь или сервер, пользователь и пароль берутся из записи. `-Password` не передавать |
 | `-Execute <файл.epf>` | нет | Запуск внешней обработки сразу после старта |
 | `-CParam <строка>` | нет | Параметр запуска (/C) |
 | `-URL <ссылка>` | нет | Навигационная ссылка (формат `e1cib/...`) |
@@ -72,5 +73,5 @@ powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/db-run.ps1" -InfoBasePath "
 powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/db-run.ps1" -InfoBasePath "C:\Bases\MyDB" -UserName "Admin" -URL "e1cib/data/Справочник.Номенклатура"
 
 # Серверная база с параметром запуска
-powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/db-run.ps1" -InfoBaseServer "srv01" -InfoBaseRef "MyDB" -UserName "Admin" -Password "secret" -CParam "ЗапуститьОбновление"
+powershell.exe -NoProfile -File "{SKILL_DIR}/scripts/db-run.ps1" -InfoBaseServer "srv01" -InfoBaseRef "MyDB" -CParam "ЗапуститьОбновление"
 ```

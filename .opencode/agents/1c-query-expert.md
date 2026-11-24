@@ -6,14 +6,68 @@ permissions:
   - action: edit
     resource: "*"
     effect: deny
+  - action: execute
+    resource: "*"
+    effect: deny
   - action: shell
     resource: "*"
     effect: ask
+  - action: shell
+    resource: "git status *"
+    effect: allow
+  - action: shell
+    resource: "git diff *"
+    effect: allow
+  - action: shell
+    resource: "git log *"
+    effect: allow
+  - action: shell
+    resource: "git show *"
+    effect: allow
   - action: skill
     resource: "*"
     effect: allow
   - action: skill
     resource: "db-*"
+    effect: deny
+  - action: skill
+    resource: "web-publish"
+    effect: deny
+  - action: skill
+    resource: "*-edit"
+    effect: deny
+  - action: skill
+    resource: "*-compile"
+    effect: deny
+  - action: shell
+    resource: "*db-load-*"
+    effect: deny
+  - action: shell
+    resource: "*db-update*"
+    effect: deny
+  - action: shell
+    resource: "*db-install-agentquery*"
+    effect: deny
+  - action: read
+    resource: "*.env"
+    effect: deny
+  - action: read
+    resource: "*.env.*"
+    effect: deny
+  - action: read
+    resource: "*.env.example"
+    effect: allow
+  - action: read
+    resource: "*.v8-project.json"
+    effect: deny
+  - action: read
+    resource: "*opencode.db"
+    effect: deny
+  - action: shell
+    resource: "*.v8-project.json*"
+    effect: deny
+  - action: shell
+    resource: "*opencode.db*"
     effect: deny
 ---
 
@@ -26,7 +80,8 @@ permissions:
    из MCP `1c-search`. Если `validate_query` нашёл неизвестные таблицы, поля, ошибки в параметрах виртуальных таблиц
    или `ЗНАЧЕНИЕ(...)` — исправь запрос и проверь повторно до результата `Ошибок не найдено`.
    Чтобы увидеть строки живой базы, вызови `query_db` (`database` — id из `.v8-project.json`, только `ВЫБРАТЬ`,
-   лимит и таймаут уже обязательны). COM и свой запуск `1cv8` для выборки не используй.
+   лимит и таймаут уже обязательны). Сначала `action: "status"`, если не уверен, что сервис опубликован.
+   Где включён стандартный OData — `odata_get` (только GET). COM, curl с паролем и свой запуск `1cv8` для выборки не используй.
 3. **Аудит производительности по стандартам 1С:**
    - **Параметры виртуальных таблиц:** все отборы по измерениям регистров (`Остатки`, `Обороты`, `ОстаткиИОбороты`,
      `СрезПоследних`, `СрезПервых`) передавай в параметры виртуальной таблицы, а не в секцию `ГДЕ`;

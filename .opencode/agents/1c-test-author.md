@@ -21,11 +21,59 @@ permissions:
   - action: skill
     resource: "*"
     effect: allow
+  - action: shell
+    resource: "*"
+    effect: ask
+  - action: shell
+    resource: "git status *"
+    effect: allow
+  - action: shell
+    resource: "git diff *"
+    effect: allow
+  - action: shell
+    resource: "*skills/*/scripts/*"
+    effect: allow
   - action: skill
     resource: "db-load-*"
     effect: deny
   - action: skill
     resource: "db-update"
+    effect: deny
+  - action: skill
+    resource: "db-install-agentquery"
+    effect: deny
+  - action: shell
+    resource: "*db-load-*"
+    effect: deny
+  - action: shell
+    resource: "*db-update*"
+    effect: deny
+  - action: shell
+    resource: "*db-install-agentquery*"
+    effect: deny
+  - action: shell
+    resource: "*LoadConfigFromFiles*"
+    effect: deny
+  - action: read
+    resource: "*.env"
+    effect: deny
+  - action: read
+    resource: "*.env.*"
+    effect: deny
+  - action: read
+    resource: "*.env.example"
+    effect: allow
+  - action: read
+    resource: "*.v8-project.json"
+    effect: deny
+  - action: read
+    resource: "*opencode.db"
+    effect: deny
+  - action: shell
+    resource: "*.v8-project.json*"
+    effect: deny
+  - action: shell
+    resource: "*opencode.db*"
     effect: deny
 ---
 

@@ -280,11 +280,23 @@ function Test-SamePath {
     } catch { return $false }
 }
 function Find-ProjectDatabase {
-    # Запись базы в реестре, соответствующая переданному соединению. $null, если не найдена.
+    # Запись базы: сначала -Database (id или aliases), иначе path или server+ref.
     $pf = Find-V8Project (Get-Location).Path
     if (-not $pf) { return $null }
     try { $proj = Get-Content $pf -Raw -Encoding UTF8 | ConvertFrom-Json } catch { return $null }
     if (-not $proj.databases) { return $null }
+    $wanted = ''
+    $var = Get-Variable -Name Database -Scope Script -ErrorAction SilentlyContinue
+    if ($var -and $var.Value) { $wanted = ([string]$var.Value).Trim() }
+    if ($wanted) {
+        foreach ($db in @($proj.databases)) {
+            if ($db.id -and [string]$db.id.Equals($wanted, [System.StringComparison]::OrdinalIgnoreCase)) { return $db }
+            foreach ($alias in @($db.aliases)) {
+                if ($alias -and [string]$alias.Equals($wanted, [System.StringComparison]::OrdinalIgnoreCase)) { return $db }
+            }
+        }
+        return $null
+    }
     foreach ($db in $proj.databases) {
         if ($InfoBasePath -and $db.path -and (Test-SamePath $db.path $InfoBasePath)) { return $db }
         if ($InfoBaseServer -and $InfoBaseRef -and $db.server -and $db.ref) {

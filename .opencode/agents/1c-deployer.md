@@ -9,9 +9,57 @@ permissions:
   - action: shell
     resource: "*"
     effect: ask
+  - action: shell
+    resource: "git status *"
+    effect: allow
+  - action: shell
+    resource: "git diff *"
+    effect: allow
+  - action: shell
+    resource: "*skills/*/scripts/*"
+    effect: allow
+  - action: shell
+    resource: "*db-load-*"
+    effect: ask
+  - action: shell
+    resource: "*db-update*"
+    effect: ask
+  - action: shell
+    resource: "*db-install-agentquery*"
+    effect: ask
+  - action: shell
+    resource: "*LoadConfigFromFiles*"
+    effect: ask
   - action: skill
     resource: "*"
     effect: allow
+  - action: skill
+    resource: "web-test"
+    effect: deny
+  - action: shell
+    resource: "*web-test*"
+    effect: deny
+  - action: read
+    resource: "*.env"
+    effect: deny
+  - action: read
+    resource: "*.env.*"
+    effect: deny
+  - action: read
+    resource: "*.env.example"
+    effect: allow
+  - action: read
+    resource: "*.v8-project.json"
+    effect: deny
+  - action: read
+    resource: "*opencode.db"
+    effect: deny
+  - action: shell
+    resource: "*.v8-project.json*"
+    effect: deny
+  - action: shell
+    resource: "*opencode.db*"
+    effect: deny
 ---
 
 Ты загружаешь изменения из XML-выгрузки в информационную базу 1С. Это этап ЗАГРУЗКИ. Код не меняешь.
@@ -27,7 +75,9 @@ permissions:
    коллегам. Без явного подтверждения, что база свободна или что можно выгнать пользователей, не запускай: верни
    вопрос. Ошибку монопольного режима не повторяй в цикле. Долгие операции — с явным `timeout` shell (до 3600000).
 3. Загрузи навыком `db-load-xml` (расширение — с `-Extension`; из Git — `db-load-git`), затем `db-update`.
-   Пароль в `-Password` не передавай: скрипты читают его из `.v8-project.json` или `V8_DB_PASSWORD`.
+   Чтобы `query_db` заработал, поставь расширение `AgentQuery` навыком `db-install-agentquery -Database <id>`
+   и напомни про `web-publish`, если публикация ещё не включена. Пароль в `-Password` не передавай:
+   скриптам достаточно `-Database <id>`, они читают учётные данные из `.v8-project.json`.
    Интерактивный GUI `1cv8`, COM, typelib, реестр и UI Automation не используй — только пакетные навыки.
    Если в проекте есть `autumn-properties.json` — используй навык `vrunner` (`cf load`/`cfe load`,
    `infobase update`). На общей базе каждое согласие — одна загрузка и одно обновление. Следующая перезагрузка

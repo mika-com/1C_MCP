@@ -121,6 +121,41 @@ console.log('исполнение на подставном HTTP:');
   ok(validateQuery(idx, { query: 'ВЫБРАТЬ Артикул ИЗ Справочник.Номенклатура' }).startsWith('[OK]'), 'эталонный запрос проходит validate_query');
 }
 
+console.log('готовность сервиса:');
+{
+  project('http://127.0.0.1:9/hs/agentquery/query');
+  const calls = [];
+  const fetchImpl = async (url, init) => {
+    calls.push({ url, init });
+    if (String(url).endsWith('/missing')) {
+      return { ok: false, status: 404, async text() { return 'not found'; } };
+    }
+    if (init.method === 'GET') {
+      return { ok: true, status: 200, async text() { return JSON.stringify({ service: 'AgentQuery', ok: true, readOnly: true }); } };
+    }
+    return { ok: false, status: 500, async text() { return 'no'; } };
+  };
+  const ready = await queryDb(idx, { database: 'dev', action: 'status' }, { fetchImpl });
+  ok(/готова/.test(ready) && calls[0]?.init?.method === 'GET' && !calls[0].init.body, 'status делает GET и не шлёт тело', ready);
+  ok(!ready.includes(PASSWORD) && calls[0].init.headers.Authorization.startsWith('Basic '), 'status: пароль только в заголовке', ready);
+  const missing = await queryDb({ root, configs: [{ dir: root }] }, { database: 'dev', action: 'status' }, {
+    fetchImpl: async () => ({ ok: false, status: 404, async text() { return 'missing'; } }),
+  });
+  ok(/404/.test(missing) && /db-install-agentquery/.test(missing) && !missing.includes(PASSWORD), '404 просит поставить расширение', missing);
+  const denied = await queryDb(idx, { database: 'dev', action: 'status' }, {
+    fetchImpl: async () => ({ ok: false, status: 401, async text() { return PASSWORD; } }),
+  });
+  ok(/401/.test(denied) && !denied.includes(PASSWORD), '401 не печатает пароль из тела', denied);
+  const html = await queryDb(idx, { database: 'dev', action: 'status' }, {
+    fetchImpl: async () => ({ ok: true, status: 200, async text() { return '<!DOCTYPE html><html><body>web</body></html>'; } }),
+  });
+  ok(/HTML/.test(html), 'HTML вместо сервиса — неверный URL', html);
+  const down = await queryDb(idx, { database: 'dev', action: 'status' }, {
+    fetchImpl: async () => { const e = new Error('connect ECONNREFUSED'); throw e; },
+  });
+  ok(/не отвечает/.test(down) && !down.includes(PASSWORD), 'нет соединения — отдельная причина', down);
+}
+
 console.log('MCP stdio:');
 {
   const port = await new Promise((resolvePort) => {
@@ -129,10 +164,12 @@ console.log('MCP stdio:');
       req.on('data', (d) => { body += d; });
       req.on('end', () => {
         server.__body = body;
+        server.__method = req.method;
         server.__auth = req.headers.authorization || '';
         server.__url = req.url;
         res.setHeader('Content-Type', 'application/json');
-        res.end(JSON.stringify({ columns: ['Артикул'], rows: [['A-1']], truncated: false }));
+        if (req.method === 'GET') res.end(JSON.stringify({ service: 'AgentQuery', ok: true, readOnly: true }));
+        else res.end(JSON.stringify({ columns: ['Артикул'], rows: [['A-1']], truncated: false }));
       });
     });
     server.listen(0, '127.0.0.1', () => resolvePort(server));
@@ -173,6 +210,13 @@ console.log('MCP stdio:');
   ok(httpServer.__auth.startsWith('Basic ') && !httpServer.__auth.includes(PASSWORD) && !String(httpServer.__url).includes(PASSWORD), 'stdio: пароль не в URL и не открытым текстом в заголовке');
   const sentQuery = JSON.parse(httpServer.__body || '{}').query || '';
   ok(/ПЕРВЫЕ 7/.test(sentQuery), 'stdio: в сервис ушёл запрос с ПЕРВЫЕ', sentQuery);
+  ok(httpServer.__method === 'POST', 'stdio: чтение идёт методом POST');
+  send({ jsonrpc: '2.0', id: 5, method: 'tools/call', params: { name: 'query_db', arguments: { database: 'dev', action: 'status' } } });
+  const status = await wait(5);
+  const statusText = status?.result?.content?.[0]?.text || '';
+  ok(/готова/.test(statusText) && !statusText.includes(PASSWORD), 'stdio: action status', statusText);
+  const odata = (list?.result?.tools || []).find((t) => t.name === 'odata_get');
+  ok(odata?.annotations?.readOnlyHint === true, 'в каталоге есть odata_get', JSON.stringify(odata?.annotations));
   p.stdin.end();
   await new Promise((r) => p.on('close', r));
   await new Promise((r) => httpServer.close(r));

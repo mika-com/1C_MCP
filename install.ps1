@@ -446,7 +446,7 @@ Invoke-Python $installArgs
 Write-Ok "MCP записаны в $OpenCodeHome\opencode.json (старая запись lsp.bsl удалена, если была)"
 Write-Ok 'Агент по умолчанию — 1c (default_agent), если вы не задали свой.'
 if (-not $NoBslLs) { Write-Ok 'Плагин bsl-autocheck: после каждой правки .bsl/.os агент получает ошибки BSL LS (отключить: BSL_AUTOCHECK=0)' }
-Write-Ok 'Плагин shell-guard: COM, интерактивный 1cv8 и загрузка конфигурации вне навыков db-* блокируются (отключить: shellGuard.enabled=false)'
+Write-Ok 'Плагин shell-guard: COM, интерактивный 1cv8, загрузка вне db-*, пароль в команде и чтение секретов блокируются (отключить: shellGuard.enabled=false)'
 
 # ---------- 5. BSL Language Server ----------
 Write-Step '5/6 BSL Language Server'

@@ -64,8 +64,11 @@ def same_path(a, b):
         return False
 
 
+def _db_token(value):
+    return str(value or '').strip().lower()
+
 def find_project_database(args):
-    """Запись базы в реестре, соответствующая переданному соединению. None, если не найдена."""
+    """Запись базы в реестре. Сначала -Database (id или aliases), иначе path или server+ref."""
     pf = _sg_find_v8project(os.getcwd())
     if not pf:
         return None
@@ -73,6 +76,15 @@ def find_project_database(args):
         with open(pf, encoding="utf-8-sig") as f:
             proj = json.load(f)
     except Exception:
+        return None
+    wanted = _db_token(getattr(args, 'Database', ''))
+    if wanted:
+        for db in proj.get("databases") or []:
+            if _db_token(db.get('id')) == wanted:
+                return db
+            for alias in db.get('aliases') or []:
+                if _db_token(alias) == wanted:
+                    return db
         return None
     for db in proj.get("databases") or []:
         if args.InfoBasePath and db.get("path") and same_path(db["path"], args.InfoBasePath):
@@ -83,14 +95,28 @@ def find_project_database(args):
                 return db
     return None
 
+def _apply_database_connection(args, db, filled):
+    """-Database задаёт соединение из записи. Явные path/server не затирают пустую запись."""
+    if not getattr(args, 'Database', None) or not db:
+        return
+    kind = str(db.get('type') or '').strip().lower()
+    if db.get('path') and kind != 'server':
+        args.InfoBasePath = str(db['path'])
+    elif db.get('server') and db.get('ref'):
+        args.InfoBaseServer = str(db['server'])
+        args.InfoBaseRef = str(db['ref'])
+    elif db.get('path'):
+        args.InfoBasePath = str(db['path'])
+    filled.append('database ' + str(db.get('id') or args.Database) + ' from .v8-project.json')
+
 def apply_db_credentials(args):
     """OpenCode: -UserName/-Password не обязательны. Источник (по убыванию): явный аргумент,
-    запись databases[] в .v8-project.json (path или server+ref), переменные V8_DB_USER / V8_DB_PASSWORD.
+    -Database (id или aliases в databases[]), затем path или server+ref, затем V8_DB_USER / V8_DB_PASSWORD.
     Значение пароля в вывод не попадает."""
     if not hasattr(args, 'Password') and not hasattr(args, 'UserName'):
         return args
     # Снять окружающие кавычки до сопоставления с .v8-project.json (clean_path ещё впереди).
-    for _attr in ('InfoBasePath', 'InfoBaseServer', 'InfoBaseRef'):
+    for _attr in ('InfoBasePath', 'InfoBaseServer', 'InfoBaseRef', 'Database'):
         _v = getattr(args, _attr, '') or ''
         if isinstance(_v, str):
             _v = _v.strip()
@@ -102,7 +128,11 @@ def apply_db_credentials(args):
         db = find_project_database(args)
     except Exception:
         db = None
+    if getattr(args, 'Database', None) and not db:
+        print('Error: база с id «%s» не найдена в .v8-project.json.' % args.Database, file=sys.stderr)
+        sys.exit(1)
     filled = []
+    _apply_database_connection(args, db, filled)
     if not getattr(args, 'UserName', None):
         user, src = '', ''
         if db and db.get('user'):
@@ -521,6 +551,7 @@ def main():
     parser.add_argument("-InfoBaseRef", default="")
     parser.add_argument("-UserName", default="")
     parser.add_argument("-Password", default="")
+    parser.add_argument("-Database", default="", help="id базы в .v8-project.json: соединение и пароль берутся из записи")
     parser.add_argument("-OutputFile", required=True)
     parser.add_argument("-AdditionalV8Arguments", nargs="*", default=[],
                         help="Extra 1cv8 arguments, e.g. /UseHwLicenses+")
